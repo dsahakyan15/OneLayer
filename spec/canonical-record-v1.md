@@ -1,6 +1,6 @@
 # canonical-record-v1
 
-**Статус:** draft (замораживается на выходе Gate B)
+**Статус:** frozen (Gate B)
 **Реализации:** `crates/canonical` (Rust), `packages/canonical-ts` (TypeScript, Gate B)
 **Векторы:** `spec/vectors/canonical.json`
 

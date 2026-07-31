@@ -12,8 +12,8 @@
 | Файл | Содержание |
 |---|---|
 | `OneLayer_Solana_Technical_Spec_RU.md` | техническая спецификация v0.9 |
-| `IMPLEMENTATION_PLAN.md` | план имплементации v2.2, gate-ы A–E |
-| `spec/*.md` | нормативные документы протокола |
+| `IMPLEMENTATION_PLAN.md` | план имплементации v2.3, gate-ы A–E |
+| `spec/*.md` | draft-документы протокола; становятся нормативными после Gate B |
 | `spec/vectors/*.json` | golden vectors — общий вход для обеих реализаций |
 | `docs/adr/` | принятые архитектурные решения |
 

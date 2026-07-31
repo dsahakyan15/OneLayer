@@ -5,13 +5,13 @@
       "description": "листья сортируются по (record_id_commitment, record_version) независимо от порядка подачи",
       "expected": {
         "leaf_order": [
-          "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
-          "b3754c1198c1c155d6c0d482ed6755cd642bc2ac970ad72785e0c298272f5587",
-          "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
-          "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
-          "daf13a5e73ab9df387ea71deaacfbf7273e9f23af00d968cf92ad38edd856b3f"
+          "53cab77f1d582efa5e301821ed1de2411636286bbac01027d262efb2b5129904",
+          "e9cc3aa0ee5d14c5e9ee6a8b5988bb04c1b2938a6c30bd189bf3b1d7c3773570",
+          "edaabaaa37aa087738f6e4a4b1205469677e114c25d5e672fa5a130e8a6eaf42",
+          "5253674764003f5a8cd9913a935c308bffea2b2b47a1a2d3a954897e472e34be",
+          "e382d156ac410033478e0de655a291ac7c6bd0dbc53902527f8b428059d95e2c"
         ],
-        "merkle_root": "e19c0232ae273e70cca32705054e63881e7f3890dc94a0218cd54d802c876cc4"
+        "merkle_root": "5a1e51610d7de03b49f34ccc0e561cef5708f199df7785a23773d522e31f6676"
       },
       "id": "batch-five-records-unsorted-input",
       "input": {
@@ -19,42 +19,42 @@
         "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
         "records": [
           {
-            "batch_leaf_hash": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+            "batch_leaf_hash": "edaabaaa37aa087738f6e4a4b1205469677e114c25d5e672fa5a130e8a6eaf42",
             "field_root": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
             "internal_record_id": "record-c",
-            "record_commitment": "bad3a2f1437adebd2c6964f22324bce28e90cb0211fd768b511c5a0cb318562c",
+            "record_commitment": "8e23c83ea1c5278a33d3d0554e0bcf888d0ebe31b90b4eafdc90269a1a434835",
             "record_id_commitment": "c3d4d62ef7d45c5b225d0789ffcae9c037e37ecd4b1f3151548d0a81dcdbdb45",
             "record_version": "1"
           },
           {
-            "batch_leaf_hash": "daf13a5e73ab9df387ea71deaacfbf7273e9f23af00d968cf92ad38edd856b3f",
+            "batch_leaf_hash": "e382d156ac410033478e0de655a291ac7c6bd0dbc53902527f8b428059d95e2c",
             "field_root": "2d0f9bdb66dac48b2be0095611760607a8d66977ae26b8ba186e5512c8e78da0",
             "internal_record_id": "record-a",
-            "record_commitment": "d290f95df072e86662e3b84968a4715ee3bf069fb1c4ba7b4c4928244915b533",
+            "record_commitment": "abd652d741fe92303a21c028309b0146c7fa8082bdef5a1984c15cb3caeca3c2",
             "record_id_commitment": "e1bea18cafced687c6991b158ccc0c5e4430f6dc41c48b07167ad6475c0db537",
             "record_version": "2"
           },
           {
-            "batch_leaf_hash": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+            "batch_leaf_hash": "5253674764003f5a8cd9913a935c308bffea2b2b47a1a2d3a954897e472e34be",
             "field_root": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
             "internal_record_id": "record-a",
-            "record_commitment": "bad3a2f1437adebd2c6964f22324bce28e90cb0211fd768b511c5a0cb318562c",
+            "record_commitment": "a7d22dd995144b65815de876c1aa13e563fb8b43165eea2a16d8eb75d81c806c",
             "record_id_commitment": "e1bea18cafced687c6991b158ccc0c5e4430f6dc41c48b07167ad6475c0db537",
             "record_version": "1"
           },
           {
-            "batch_leaf_hash": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+            "batch_leaf_hash": "53cab77f1d582efa5e301821ed1de2411636286bbac01027d262efb2b5129904",
             "field_root": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
             "internal_record_id": "record-b",
-            "record_commitment": "bad3a2f1437adebd2c6964f22324bce28e90cb0211fd768b511c5a0cb318562c",
+            "record_commitment": "4c24761a8c61cf7f93317141e1596ba668bb57f9da2204e2da7642d7534e4e43",
             "record_id_commitment": "0c9561a51c81df50abf0921b0fa609369afe21cf253e0929ced54634153dec04",
             "record_version": "1"
           },
           {
-            "batch_leaf_hash": "b3754c1198c1c155d6c0d482ed6755cd642bc2ac970ad72785e0c298272f5587",
+            "batch_leaf_hash": "e9cc3aa0ee5d14c5e9ee6a8b5988bb04c1b2938a6c30bd189bf3b1d7c3773570",
             "field_root": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
             "internal_record_id": "record-b",
-            "record_commitment": "b54a3aab8424c661e25a10d335886275998080b1518ee46ecdc2cd9cc8e2ade9",
+            "record_commitment": "7c9031b2feeb23626d62f508a031dd51cd35de352c7f739163c09f7b4767260e",
             "record_id_commitment": "0c9561a51c81df50abf0921b0fa609369afe21cf253e0929ced54634153dec04",
             "record_version": "3"
           }
@@ -63,83 +63,83 @@
       },
       "proofs": [
         {
-          "leaf_hash": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+          "leaf_hash": "53cab77f1d582efa5e301821ed1de2411636286bbac01027d262efb2b5129904",
           "leaf_index": 0,
           "path": [
             {
-              "sibling": "b3754c1198c1c155d6c0d482ed6755cd642bc2ac970ad72785e0c298272f5587",
+              "sibling": "e9cc3aa0ee5d14c5e9ee6a8b5988bb04c1b2938a6c30bd189bf3b1d7c3773570",
               "side": "RIGHT"
             },
             {
-              "sibling": "5859787fae53891dd46b27c69e17844e53365ac71cc9f0bb2f5e62041cfa8456",
+              "sibling": "3625950c2f9020bfd36ae88bb6b6c92bf937067f2bd184a3bd123adf05221478",
               "side": "RIGHT"
             },
             {
-              "sibling": "daf13a5e73ab9df387ea71deaacfbf7273e9f23af00d968cf92ad38edd856b3f",
+              "sibling": "e382d156ac410033478e0de655a291ac7c6bd0dbc53902527f8b428059d95e2c",
               "side": "RIGHT"
             }
           ]
         },
         {
-          "leaf_hash": "b3754c1198c1c155d6c0d482ed6755cd642bc2ac970ad72785e0c298272f5587",
+          "leaf_hash": "e9cc3aa0ee5d14c5e9ee6a8b5988bb04c1b2938a6c30bd189bf3b1d7c3773570",
           "leaf_index": 1,
           "path": [
             {
-              "sibling": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+              "sibling": "53cab77f1d582efa5e301821ed1de2411636286bbac01027d262efb2b5129904",
               "side": "LEFT"
             },
             {
-              "sibling": "5859787fae53891dd46b27c69e17844e53365ac71cc9f0bb2f5e62041cfa8456",
+              "sibling": "3625950c2f9020bfd36ae88bb6b6c92bf937067f2bd184a3bd123adf05221478",
               "side": "RIGHT"
             },
             {
-              "sibling": "daf13a5e73ab9df387ea71deaacfbf7273e9f23af00d968cf92ad38edd856b3f",
+              "sibling": "e382d156ac410033478e0de655a291ac7c6bd0dbc53902527f8b428059d95e2c",
               "side": "RIGHT"
             }
           ]
         },
         {
-          "leaf_hash": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+          "leaf_hash": "edaabaaa37aa087738f6e4a4b1205469677e114c25d5e672fa5a130e8a6eaf42",
           "leaf_index": 2,
           "path": [
             {
-              "sibling": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+              "sibling": "5253674764003f5a8cd9913a935c308bffea2b2b47a1a2d3a954897e472e34be",
               "side": "RIGHT"
             },
             {
-              "sibling": "aba4132a4f4f970043fcdd44cedb2ee0e089e6d36632859612c2ec461aebb25e",
+              "sibling": "cd08944f18aada5497051fa5b625208d60473d0b95329f05025ce6d791ef690b",
               "side": "LEFT"
             },
             {
-              "sibling": "daf13a5e73ab9df387ea71deaacfbf7273e9f23af00d968cf92ad38edd856b3f",
+              "sibling": "e382d156ac410033478e0de655a291ac7c6bd0dbc53902527f8b428059d95e2c",
               "side": "RIGHT"
             }
           ]
         },
         {
-          "leaf_hash": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+          "leaf_hash": "5253674764003f5a8cd9913a935c308bffea2b2b47a1a2d3a954897e472e34be",
           "leaf_index": 3,
           "path": [
             {
-              "sibling": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+              "sibling": "edaabaaa37aa087738f6e4a4b1205469677e114c25d5e672fa5a130e8a6eaf42",
               "side": "LEFT"
             },
             {
-              "sibling": "aba4132a4f4f970043fcdd44cedb2ee0e089e6d36632859612c2ec461aebb25e",
+              "sibling": "cd08944f18aada5497051fa5b625208d60473d0b95329f05025ce6d791ef690b",
               "side": "LEFT"
             },
             {
-              "sibling": "daf13a5e73ab9df387ea71deaacfbf7273e9f23af00d968cf92ad38edd856b3f",
+              "sibling": "e382d156ac410033478e0de655a291ac7c6bd0dbc53902527f8b428059d95e2c",
               "side": "RIGHT"
             }
           ]
         },
         {
-          "leaf_hash": "daf13a5e73ab9df387ea71deaacfbf7273e9f23af00d968cf92ad38edd856b3f",
+          "leaf_hash": "e382d156ac410033478e0de655a291ac7c6bd0dbc53902527f8b428059d95e2c",
           "leaf_index": 4,
           "path": [
             {
-              "sibling": "bc1582b83d5b8142bc153c0ad7af6ca3c41533d65159ae850478e53d1f6cd4be",
+              "sibling": "787e8d361018bbf016caa4416690273628bd527d6486964009e6dab195738a9a",
               "side": "LEFT"
             }
           ]

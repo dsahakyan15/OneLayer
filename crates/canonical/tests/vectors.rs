@@ -214,3 +214,25 @@ fn batch_vector_leaf_order_is_sorted_not_input_order() {
     let leaves: Vec<[u8; 32]> = leaf_order.iter().map(|h| hex32(h)).collect();
     assert_eq!(onelayer_merkle::root(&leaves).unwrap(), root);
 }
+
+#[test]
+fn batch_vector_binds_identical_content_to_record_id() {
+    let doc = load("batch.json");
+    let records = doc["vectors"][0]["input"]["records"].as_array().unwrap();
+    let first = records
+        .iter()
+        .find(|r| r["internal_record_id"] == "record-c")
+        .unwrap();
+    let second = records
+        .iter()
+        .find(|r| r["internal_record_id"] == "record-b" && r["record_version"] == "1")
+        .unwrap();
+
+    assert_eq!(first["field_root"], second["field_root"]);
+    assert_eq!(first["record_version"], second["record_version"]);
+    assert_ne!(
+        first["record_id_commitment"],
+        second["record_id_commitment"]
+    );
+    assert_ne!(first["record_commitment"], second["record_commitment"]);
+}

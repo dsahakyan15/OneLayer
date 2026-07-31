@@ -1,0 +1,305 @@
+name: onelayer-recovery-lab
+
+x-fixture-labels: &fixture-labels
+  com.onelayer.fixture: "true"
+  com.onelayer.environment: "synthetic"
+
+services:
+  source-db:
+    image: postgres:17.5
+    labels: *fixture-labels
+    environment:
+      POSTGRES_DB: onelayer_fixture
+      POSTGRES_USER: onelayer_fixture
+      POSTGRES_PASSWORD_FILE: /run/secrets/source_db_password
+    secrets: [source_db_password]
+    volumes:
+      - source-db:/var/lib/postgresql/data
+      - ./source/init.sql:/docker-entrypoint-initdb.d/00-fixture.sql:ro
+    networks: [source]
+
+  custodian-a:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    labels: *fixture-labels
+    command: server /data
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/custodian_a_user
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/custodian_a_password
+    secrets: [custodian_a_user, custodian_a_password]
+    volumes: [custodian-a:/data]
+    networks: [storage]
+
+  custodian-b:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    labels: *fixture-labels
+    command: server /data
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/custodian_b_user
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/custodian_b_password
+    secrets: [custodian_b_user, custodian_b_password]
+    volumes: [custodian-b:/data]
+    networks: [storage]
+
+  custodian-c:
+    image: minio/minio:RELEASE.2025-07-23T15-54-02Z
+    labels: *fixture-labels
+    command: server /data
+    environment:
+      MINIO_ROOT_USER_FILE: /run/secrets/custodian_c_user
+      MINIO_ROOT_PASSWORD_FILE: /run/secrets/custodian_c_password
+    secrets: [custodian_c_user, custodian_c_password]
+    volumes: [custodian-c:/data]
+    networks: [storage]
+
+  snapshot-coordinator:
+    profiles: [snapshot]
+    build:
+      context: ../..
+      dockerfile: deploy/recovery-lab/Dockerfile
+    labels: *fixture-labels
+    entrypoint: ["sleep", "infinity"]
+    secrets: [recovery_kek]
+    tmpfs: [/run/onelayer-recovery:mode=0700]
+    volumes: [snapshot-exchange:/exchange]
+    networks: [source, storage]
+
+  uploader-a:
+    profiles: [snapshot]
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    labels: *fixture-labels
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        user=$$(cat /run/secrets/custodian_a_user)
+        password=$$(cat /run/secrets/custodian_a_password)
+        mc alias set target http://custodian-a:9000 "$$user" "$$password" >/dev/null
+        mc mb --ignore-existing target/onelayer-fixture >/dev/null
+        mc cp "/exchange/$$SNAPSHOT_OBJECT" "target/onelayer-fixture/$$SNAPSHOT_OBJECT" >/dev/null
+        mc cp "target/onelayer-fixture/$$SNAPSHOT_OBJECT" /tmp/readback.cbor >/dev/null
+        cmp "/exchange/$$SNAPSHOT_OBJECT" /tmp/readback.cbor
+    environment: { SNAPSHOT_OBJECT: "" }
+    secrets: [custodian_a_user, custodian_a_password]
+    volumes: [snapshot-exchange:/exchange:ro]
+    tmpfs: [/tmp]
+    networks: [storage]
+    depends_on: [custodian-a]
+
+  uploader-b:
+    profiles: [snapshot]
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    labels: *fixture-labels
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        user=$$(cat /run/secrets/custodian_b_user)
+        password=$$(cat /run/secrets/custodian_b_password)
+        mc alias set target http://custodian-b:9000 "$$user" "$$password" >/dev/null
+        mc mb --ignore-existing target/onelayer-fixture >/dev/null
+        mc cp "/exchange/$$SNAPSHOT_OBJECT" "target/onelayer-fixture/$$SNAPSHOT_OBJECT" >/dev/null
+        mc cp "target/onelayer-fixture/$$SNAPSHOT_OBJECT" /tmp/readback.cbor >/dev/null
+        cmp "/exchange/$$SNAPSHOT_OBJECT" /tmp/readback.cbor
+    environment: { SNAPSHOT_OBJECT: "" }
+    secrets: [custodian_b_user, custodian_b_password]
+    volumes: [snapshot-exchange:/exchange:ro]
+    tmpfs: [/tmp]
+    networks: [storage]
+    depends_on: [custodian-b]
+
+  uploader-c:
+    profiles: [snapshot]
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    labels: *fixture-labels
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        user=$$(cat /run/secrets/custodian_c_user)
+        password=$$(cat /run/secrets/custodian_c_password)
+        mc alias set target http://custodian-c:9000 "$$user" "$$password" >/dev/null
+        mc mb --ignore-existing target/onelayer-fixture >/dev/null
+        mc cp "/exchange/$$SNAPSHOT_OBJECT" "target/onelayer-fixture/$$SNAPSHOT_OBJECT" >/dev/null
+        mc cp "target/onelayer-fixture/$$SNAPSHOT_OBJECT" /tmp/readback.cbor >/dev/null
+        cmp "/exchange/$$SNAPSHOT_OBJECT" /tmp/readback.cbor
+    environment: { SNAPSHOT_OBJECT: "" }
+    secrets: [custodian_c_user, custodian_c_password]
+    volumes: [snapshot-exchange:/exchange:ro]
+    tmpfs: [/tmp]
+    networks: [storage]
+    depends_on: [custodian-c]
+
+  key-holder-1:
+    profiles: [restore]
+    image: busybox:1.37
+    labels: *fixture-labels
+    command: ["sleep", "infinity"]
+    read_only: true
+    tmpfs: [/tmp]
+    secrets: [recovery_share_1]
+    networks: [keys]
+  key-holder-2:
+    profiles: [restore]
+    image: busybox:1.37
+    labels: *fixture-labels
+    command: ["sleep", "infinity"]
+    read_only: true
+    tmpfs: [/tmp]
+    secrets: [recovery_share_2]
+    networks: [keys]
+  key-holder-3:
+    profiles: [restore]
+    image: busybox:1.37
+    labels: *fixture-labels
+    command: ["sleep", "infinity"]
+    read_only: true
+    tmpfs: [/tmp]
+    secrets: [recovery_share_3]
+    networks: [keys]
+  key-holder-4:
+    profiles: [restore]
+    image: busybox:1.37
+    labels: *fixture-labels
+    command: ["sleep", "infinity"]
+    read_only: true
+    tmpfs: [/tmp]
+    secrets: [recovery_share_4]
+    networks: [keys]
+  key-holder-5:
+    profiles: [restore]
+    image: busybox:1.37
+    labels: *fixture-labels
+    command: ["sleep", "infinity"]
+    read_only: true
+    tmpfs: [/tmp]
+    secrets: [recovery_share_5]
+    networks: [keys]
+
+  retriever-b:
+    profiles: [restore]
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    labels: *fixture-labels
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        user=$$(cat /run/secrets/custodian_b_user)
+        password=$$(cat /run/secrets/custodian_b_password)
+        mc alias set target http://custodian-b:9000 "$$user" "$$password" >/dev/null
+        mc cp "target/onelayer-fixture/$$SNAPSHOT_OBJECT" "/exchange/$$SNAPSHOT_OBJECT" >/dev/null
+    environment: { SNAPSHOT_OBJECT: "" }
+    secrets: [custodian_b_user, custodian_b_password]
+    volumes: [snapshot-exchange:/exchange]
+    tmpfs: [/tmp]
+    networks: [storage]
+
+  retriever-c:
+    profiles: [restore]
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    labels: *fixture-labels
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        user=$$(cat /run/secrets/custodian_c_user)
+        password=$$(cat /run/secrets/custodian_c_password)
+        mc alias set target http://custodian-c:9000 "$$user" "$$password" >/dev/null
+        mc cp "target/onelayer-fixture/$$SNAPSHOT_OBJECT" "/exchange/$$SNAPSHOT_OBJECT" >/dev/null
+    environment: { SNAPSHOT_OBJECT: "" }
+    secrets: [custodian_c_user, custodian_c_password]
+    volumes: [snapshot-exchange:/exchange]
+    tmpfs: [/tmp]
+    networks: [storage]
+
+  corruptor-a:
+    profiles: [restore]
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    labels: *fixture-labels
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        user=$$(cat /run/secrets/custodian_a_user)
+        password=$$(cat /run/secrets/custodian_a_password)
+        mc alias set target http://custodian-a:9000 "$$user" "$$password" >/dev/null
+        mc cp "target/onelayer-fixture/$$SNAPSHOT_OBJECT" /tmp/object.cbor >/dev/null
+        byte=$$(od -An -tu1 -j64 -N1 /tmp/object.cbor)
+        flipped=$$((byte ^ 1))
+        printf "\\$$(printf '%03o' "$$flipped")" | dd of=/tmp/object.cbor bs=1 seek=64 count=1 conv=notrunc status=none
+        mc cp /tmp/object.cbor "target/onelayer-fixture/$$SNAPSHOT_OBJECT" >/dev/null
+    environment: { SNAPSHOT_OBJECT: "" }
+    secrets: [custodian_a_user, custodian_a_password]
+    tmpfs: [/tmp]
+    networks: [storage]
+
+  clean-room-db:
+    profiles: [restore]
+    image: postgres:17.5
+    labels: *fixture-labels
+    environment:
+      POSTGRES_DB: onelayer_restored
+      POSTGRES_USER: onelayer_restore
+      POSTGRES_PASSWORD_FILE: /run/secrets/restore_db_password
+    secrets: [restore_db_password]
+    volumes: [clean-room:/var/lib/postgresql/data]
+    networks: [restore]
+
+  clean-room-restore:
+    profiles: [restore]
+    build:
+      context: ../..
+      dockerfile: deploy/recovery-lab/Dockerfile
+    labels: *fixture-labels
+    entrypoint: ["sleep", "infinity"]
+    read_only: true
+    tmpfs: [/run/onelayer-recovery:mode=0700, /work:mode=0700]
+    volumes: [snapshot-exchange:/exchange:ro]
+    networks: [storage, keys, restore]
+
+networks:
+  source:
+    internal: true
+  storage:
+    internal: true
+  keys:
+    internal: true
+  restore:
+    internal: true
+
+volumes:
+  source-db:
+    labels: *fixture-labels
+  custodian-a:
+    labels: *fixture-labels
+  custodian-b:
+    labels: *fixture-labels
+  custodian-c:
+    labels: *fixture-labels
+  clean-room:
+    labels: *fixture-labels
+  snapshot-exchange:
+    labels: *fixture-labels
+
+secrets:
+  source_db_password:
+    file: /dev/shm/onelayer-recovery-lab-secrets/source-db-password
+  restore_db_password:
+    file: /dev/shm/onelayer-recovery-lab-secrets/restore-db-password
+  recovery_kek:
+    file: /dev/shm/onelayer-recovery-lab-secrets/recovery-kek
+  custodian_a_user:
+    file: /dev/shm/onelayer-recovery-lab-secrets/custodian-a-user
+  custodian_a_password:
+    file: /dev/shm/onelayer-recovery-lab-secrets/custodian-a-password
+  custodian_b_user:
+    file: /dev/shm/onelayer-recovery-lab-secrets/custodian-b-user
+  custodian_b_password:
+    file: /dev/shm/onelayer-recovery-lab-secrets/custodian-b-password
+  custodian_c_user:
+    file: /dev/shm/onelayer-recovery-lab-secrets/custodian-c-user
+  custodian_c_password:
+    file: /dev/shm/onelayer-recovery-lab-secrets/custodian-c-password
+  recovery_share_1:
+    file: /dev/shm/onelayer-recovery-lab-secrets/recovery-share-1
+  recovery_share_2:
+    file: /dev/shm/onelayer-recovery-lab-secrets/recovery-share-2
+  recovery_share_3:
+    file: /dev/shm/onelayer-recovery-lab-secrets/recovery-share-3
+  recovery_share_4:
+    file: /dev/shm/onelayer-recovery-lab-secrets/recovery-share-4
+  recovery_share_5:
+    file: /dev/shm/onelayer-recovery-lab-secrets/recovery-share-5

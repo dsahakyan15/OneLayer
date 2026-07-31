@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project=onelayer-recovery-lab
+container=${project}-source-db-1
+volume=${project}_source-db
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+
+if [[ ${DESTROY_ONELAYER_FIXTURE:-} != yes ]]; then
+  echo "DESTROY_ONELAYER_FIXTURE=yes is required" >&2
+  exit 30
+fi
+"$script_dir/fixture-guard" container "$container"
+"$script_dir/fixture-guard" volume "$volume"
+docker exec "$container" sh -eu -c 'PGPASSWORD=$(cat /run/secrets/source_db_password); export PGPASSWORD; test "$(psql -U onelayer_fixture -d onelayer_fixture -Atc "select marker from onelayer_fixture_marker")" = ONELAYER_SYNTHETIC_FIXTURE_V1'
+docker stop "$container"
+docker rm "$container"
+docker volume rm "$volume"
+printf '%s\n' "$container" "$volume"

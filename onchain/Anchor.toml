@@ -6,6 +6,7 @@ skip-lint = false
 
 [programs.localnet]
 alloc_spike = "ApAD9vA6UX8F31AYjCE36a3w3iVFR4ujM9Xo2o97PwQj"
+onelayer_registry = "6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo"
 
 [registry]
 url = "https://api.apr.dev"

@@ -1,6 +1,6 @@
 # anchor-chain-v1
 
-**Статус:** draft (замораживается на выходе Gate B)
+**Статус:** frozen (Gate B)
 **Реализация:** `crates/canonical/src/anchor.rs`
 **Векторы:** `spec/vectors/anchor.json`
 

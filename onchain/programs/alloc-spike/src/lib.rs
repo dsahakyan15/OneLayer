@@ -13,6 +13,8 @@
 //! Это spike. Код в продукт не переносится: zero-copy layout здесь
 //! намеренно вырожденный, инвариантов `publish_anchor` нет, авторизации нет.
 
+#![allow(unexpected_cfgs)]
+
 use anchor_lang::prelude::*;
 
 declare_id!("ApAD9vA6UX8F31AYjCE36a3w3iVFR4ujM9Xo2o97PwQj");

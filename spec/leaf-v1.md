@@ -1,6 +1,6 @@
 # leaf-v1
 
-**Статус:** draft (закрывается задачей `OL-A-05`, замораживается на выходе Gate B)
+**Статус:** frozen (Gate B; owner sign-off `OL-A-05` учитывается отдельно)
 **Реализация:** `crates/canonical/src/commit.rs`
 **Векторы:** `spec/vectors/leaf.json`, `spec/vectors/batch.json`
 
@@ -46,6 +46,7 @@ field_root = корень дерева (merkle-tree-v1) по field_tree_leaf_has
              листья отсортированы по path_bytes
 
 record_commitment = SHA-256("ONELAYER:RECORD:V1" || registry_id_hash ||
+                            record_id_commitment ||
                             u64_be(record_version) || field_root)
 
 batch_leaf_hash   = SHA-256(0x00 || record_commitment)
@@ -66,6 +67,10 @@ genesis_anchor_hash  = SHA-256("ONELAYER:GENESIS:V1" || registry_id_hash)
 Разделитель `0x00` в `record_id_commitment` обязателен: без него пары
 `("ab", "c")` и `("a", "bc")` дают одно обязательство.
 
+`record_id_commitment` входит в preimage обязательства к записи. Поэтому две
+записи с одинаковыми `registry_id_hash`, `record_version` и `field_root`, но
+разными `record_id_commitment`, дают разные `record_commitment`.
+
 Префиксы длины в `field_commitment` обязательны по той же причине.
 
 ## 4. Длина — всегда в байтах
@@ -85,8 +90,8 @@ genesis_anchor_hash  = SHA-256("ONELAYER:GENESIS:V1" || registry_id_hash)
 
 | Режим | Содержимое |
 |---|---|
-| `SELECTIVE_FIELDS` | значения раскрываемых полей, `field_salt` **только этих** путей, field-proof каждого, `field_root`, batch-proof |
-| `FULL_RECORD` | все значения и все `field_salt`, batch-proof (`field_root` пересчитывается) |
+| `SELECTIVE_FIELDS` | `record_id_commitment`, значения раскрываемых полей, `field_salt` **только этих** путей, field-proof каждого, `field_root`, batch-proof |
+| `FULL_RECORD` | `record_id_commitment`, все значения и все `field_salt`, batch-proof (`field_root` пересчитывается) |
 
 Раскрытие одной соли не даёт вычислить другие: HMAC с секретным ключом
 невосстановим по своим выходам.

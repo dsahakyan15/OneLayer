@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project=onelayer-recovery-lab
+resource_type=${1:?resource type required}
+resource_name=${2:?resource name required}
+
+if [[ ${COMPOSE_PROJECT_NAME:-$project} != "$project" || ${ONELAYER_ENVIRONMENT:-fixture} != fixture ]]; then
+  echo "fixture project guard failed" >&2
+  exit 20
+fi
+
+case "$resource_type" in
+  container)
+    project_label=$(docker inspect --format '{{ index .Config.Labels "com.docker.compose.project" }}' "$resource_name")
+    fixture_label=$(docker inspect --format '{{ index .Config.Labels "com.onelayer.fixture" }}' "$resource_name")
+    ;;
+  volume)
+    project_label=$(docker volume inspect --format '{{ index .Labels "com.docker.compose.project" }}' "$resource_name")
+    fixture_label=$(docker volume inspect --format '{{ index .Labels "com.onelayer.fixture" }}' "$resource_name")
+    ;;
+  *) echo "unsupported fixture resource type" >&2; exit 21 ;;
+esac
+
+if [[ "$project_label" != "$project" || "$fixture_label" != true ]]; then
+  echo "resource is not an isolated OneLayer fixture" >&2
+  exit 22
+fi

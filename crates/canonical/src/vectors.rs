@@ -13,10 +13,14 @@
 
 use crate::anchor::AnchorFields;
 use crate::cbor::{self, Value};
+use crate::certificate::{
+    AnchorReference, CertificateBody, DisclosureMode, FieldProof, MerkleProof,
+};
 use crate::commit::{
     self, batch_leaf_hash, field_commitment, field_salt, field_tree_leaf_hash, record_commitment,
     registry_id_hash, BatchRecord, BatchTree, FieldEntry, FieldTree, RecordFieldKey,
 };
+use crate::manifest::ManifestFields;
 use onelayer_merkle as merkle;
 use serde_json::{json, Map, Value as J};
 
@@ -28,6 +32,8 @@ const VECTOR_FIELD_KEY: [u8; 32] = [
 ];
 
 const VECTOR_REGISTRY_ID: &str = "gov.registry.land";
+const VECTOR_ID_KEY: [u8; 32] = [0x5a; 32];
+const VECTOR_INTERNAL_RECORD_ID: &str = "record-001";
 
 fn hx(b: &[u8]) -> String {
     hex::encode(b)
@@ -284,6 +290,11 @@ fn leaf_cases() -> Vec<LeafCase> {
 pub fn leaf_vectors() -> J {
     let key = RecordFieldKey::from_bytes(VECTOR_FIELD_KEY);
     let rid_hash = registry_id_hash(VECTOR_REGISTRY_ID);
+    let idc = commit::record_id_commitment(
+        &VECTOR_ID_KEY,
+        VECTOR_REGISTRY_ID,
+        VECTOR_INTERNAL_RECORD_ID,
+    );
 
     let items: Vec<J> = leaf_cases()
         .into_iter()
@@ -320,13 +331,14 @@ pub fn leaf_vectors() -> J {
                 .collect();
 
             let field_root = tree.root();
-            let rc = record_commitment(&rid_hash, case.record_version, &field_root);
+            let rc = record_commitment(&rid_hash, &idc, case.record_version, &field_root);
 
             json!({
                 "id": case.id,
                 "description": case.description,
                 "input": {
                     "registry_id": VECTOR_REGISTRY_ID,
+                    "record_id_commitment": hx(&idc),
                     "record_field_key": hx(&VECTOR_FIELD_KEY),
                     "record_version": case.record_version.to_string(),
                 },
@@ -528,7 +540,7 @@ pub fn anchor_vectors() -> J {
 pub fn batch_vectors() -> J {
     let key = RecordFieldKey::from_bytes(VECTOR_FIELD_KEY);
     let rid_hash = registry_id_hash(VECTOR_REGISTRY_ID);
-    let id_key = [0x5au8; 32];
+    let id_key = VECTOR_ID_KEY;
 
     // Записи умышленно подаются не в порядке сортировки: вектор фиксирует,
     // что порядок листьев определяется (record_id_commitment, record_version),
@@ -553,7 +565,7 @@ pub fn batch_vectors() -> J {
             }],
         )
         .unwrap();
-        let rc = record_commitment(&rid_hash, version, &tree.root());
+        let rc = record_commitment(&rid_hash, &idc, version, &tree.root());
         described.push(json!({
             "internal_record_id": rid,
             "record_version": version.to_string(),
@@ -604,6 +616,252 @@ pub fn batch_vectors() -> J {
     })
 }
 
+// ----------------------------------------------------------------- manifest
+
+pub fn manifest_vectors() -> J {
+    let signing_key = [0x07u8; 32];
+    let cases = [
+        ("without-snapshot", None),
+        ("with-snapshot", Some([0x44u8; 32])),
+    ];
+    let vectors = cases
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, snapshot_hash))| {
+            let fields = ManifestFields {
+                registry_id_hash: registry_id_hash(VECTOR_REGISTRY_ID),
+                batch_sequence: index as u64 + 1,
+                registry_version: 7,
+                source_cursor_start: index as u64 * 100 + 1,
+                source_cursor_end: index as u64 * 100 + 100,
+                created_at: "2026-07-31T00:00:00Z".into(),
+                schema_version: 1,
+                leaf_count: 3,
+                merkle_root: [0x11; 32],
+                previous_anchor_hash: [0x22; 32],
+                snapshot_hash,
+                leaves_object_uri: format!("s3://onelayer-pilot/batches/{}/leaves.cbor", index + 1),
+                leaves_object_hash: [0x33; 32],
+                builder_version: "onelayer-pipeline/0.1.0".into(),
+                operator_key_id: "pilot-operator-1".into(),
+            };
+            let unsigned = fields.unsigned_cbor().unwrap();
+            let signed = fields.sign(&signing_key).unwrap();
+            json!({
+                "id": id,
+                "description": if snapshot_hash.is_some() { "snapshotHash = bytes(32)" } else { "snapshotHash = CBOR null" },
+                "input": {
+                    "manifest_version": 1,
+                    "registry_id_hash": hx(&fields.registry_id_hash),
+                    "batch_sequence": fields.batch_sequence.to_string(),
+                    "registry_version": fields.registry_version.to_string(),
+                    "source_cursor_start": fields.source_cursor_start.to_string(),
+                    "source_cursor_end": fields.source_cursor_end.to_string(),
+                    "created_at": fields.created_at,
+                    "schema_version": fields.schema_version,
+                    "hash_algorithm": "SHA256",
+                    "tree_algorithm": "RFC6962_SHA256_V1",
+                    "leaf_count": fields.leaf_count,
+                    "merkle_root": hx(&fields.merkle_root),
+                    "previous_anchor_hash": hx(&fields.previous_anchor_hash),
+                    "snapshot_hash": fields.snapshot_hash.map(|hash| hx(&hash)),
+                    "leaves_object_uri": fields.leaves_object_uri,
+                    "leaves_object_hash": hx(&fields.leaves_object_hash),
+                    "builder_version": fields.builder_version,
+                    "operator_key_id": fields.operator_key_id,
+                    "test_signing_key": hx(&signing_key),
+                },
+                "expected": {
+                    "unsigned_manifest_cbor": hx(&unsigned),
+                    "manifest_hash": hx(&signed.manifest_hash),
+                    "operator_public_key": hx(&signed.operator_public_key),
+                    "manifest_signature": hx(&signed.manifest_signature),
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "spec": "spec/batch-manifest-v1.md",
+        "note": "test_signing_key используется только для воспроизводимого golden vector",
+        "vectors": vectors,
+    })
+}
+
+// -------------------------------------------------------------- certificate
+
+pub fn certificate_vectors() -> J {
+    let key = RecordFieldKey::from_bytes(VECTOR_FIELD_KEY);
+    let registry_hash = registry_id_hash(VECTOR_REGISTRY_ID);
+    let record_id = commit::record_id_commitment(
+        &VECTOR_ID_KEY,
+        VECTOR_REGISTRY_ID,
+        VECTOR_INTERNAL_RECORD_ID,
+    );
+    let issuer_key = [0x09u8; 32];
+    let all_fields = vec![
+        FieldEntry {
+            path: "area".into(),
+            value: Value::Text("1234.50".into()),
+        },
+        FieldEntry {
+            path: "registeredAt".into(),
+            value: Value::Text("2026-07-31T00:00:00Z".into()),
+        },
+        FieldEntry {
+            path: "status".into(),
+            value: Value::Text("ACTIVE".into()),
+        },
+    ];
+    let field_tree = FieldTree::build(&key, &all_fields).unwrap();
+
+    let cases = [
+        (
+            "full-record",
+            DisclosureMode::FullRecord,
+            vec!["area", "registeredAt", "status"],
+            1,
+            false,
+        ),
+        (
+            "selective-one",
+            DisclosureMode::SelectiveFields,
+            vec!["status"],
+            1,
+            false,
+        ),
+        (
+            "selective-two",
+            DisclosureMode::SelectiveFields,
+            vec!["area", "status"],
+            1,
+            false,
+        ),
+        (
+            "tampered-signature",
+            DisclosureMode::SelectiveFields,
+            vec!["status"],
+            1,
+            true,
+        ),
+        (
+            "unsupported-schema",
+            DisclosureMode::FullRecord,
+            vec!["area", "registeredAt", "status"],
+            99,
+            false,
+        ),
+    ];
+
+    let vectors = cases
+        .into_iter()
+        .enumerate()
+        .map(|(case_index, (id, mode, disclosed_paths, schema_version, tamper_signature))| {
+            let record_commitment = record_commitment(
+                &registry_hash,
+                &record_id,
+                1,
+                &field_tree.root(),
+            );
+            let batch_leaf = batch_leaf_hash(&record_commitment);
+            let disclosed_fields = all_fields
+                .iter()
+                .filter(|field| disclosed_paths.contains(&field.path.as_str()))
+                .map(|field| (field.path.clone(), field.value.clone()))
+                .collect();
+            let field_salts = all_fields
+                .iter()
+                .filter(|field| disclosed_paths.contains(&field.path.as_str()))
+                .map(|field| (field.path.clone(), field_salt(&key, &field.path).unwrap()))
+                .collect();
+            let field_proofs = match mode {
+                DisclosureMode::FullRecord => Vec::new(),
+                DisclosureMode::SelectiveFields => disclosed_paths
+                    .iter()
+                    .map(|path| FieldProof {
+                        path: (*path).into(),
+                        leaf_index: field_tree.index_of(path).unwrap() as u32,
+                        siblings: field_tree.proof(path).unwrap(),
+                    })
+                    .collect(),
+            };
+            let mut body = CertificateBody {
+                certificate_id: [case_index as u8 + 1; 16],
+                registry_id: VECTOR_REGISTRY_ID.into(),
+                issued_at: "2026-07-31T00:00:00Z".into(),
+                record_id_commitment: record_id,
+                record_version: 1,
+                schema_version,
+                disclosure_mode: mode,
+                disclosed_fields,
+                field_salts,
+                field_root: field_tree.root(),
+                field_proofs,
+                batch_proof: MerkleProof {
+                    leaf_index: 0,
+                    leaf_hash: batch_leaf,
+                    siblings: vec![],
+                    expected_root: batch_leaf,
+                },
+                anchor: AnchorReference {
+                    batch_sequence: 1,
+                    registry_version: 1,
+                    merkle_root: batch_leaf,
+                    manifest_hash: [0x44; 32],
+                    solana_program_id: [0x55; 32],
+                    segment_index: 0,
+                    segment_pda: [0x66; 32],
+                    transaction_signature: [0x77; 64],
+                    anchor_slot: 412_345_678,
+                },
+                issuer_key_id: "pilot-issuer-1".into(),
+                issuer_public_key: [0; 32],
+            };
+            let signed = body.sign(&issuer_key).unwrap();
+            let mut signature = signed.issuer_signature;
+            if tamper_signature {
+                signature[0] ^= 0x80;
+            }
+            let package = body.package_cbor(&signature).unwrap();
+
+            json!({
+                "id": id,
+                "input": {
+                    "registry_id": VECTOR_REGISTRY_ID,
+                    "record_field_key": hx(&VECTOR_FIELD_KEY),
+                    "record_id_commitment": hx(&record_id),
+                    "record_version": "1",
+                    "schema_version": schema_version,
+                    "disclosure_mode": mode.as_str(),
+                    "disclosed_paths": disclosed_paths,
+                    "fields": all_fields.iter().map(|field| json!({
+                        "path": field.path,
+                        "value": value_json(&field.value),
+                    })).collect::<Vec<_>>(),
+                    "certificate_id": hx(&body.certificate_id),
+                    "issued_at": body.issued_at,
+                    "test_signing_key": hx(&issuer_key),
+                },
+                "expected": {
+                    "field_root": hx(&field_tree.root()),
+                    "record_commitment": hx(&record_commitment),
+                    "batch_leaf_hash": hx(&batch_leaf),
+                    "certificate_body_cbor": hx(&body.body_cbor().unwrap()),
+                    "certificate_hash": hx(&signed.certificate_hash),
+                    "issuer_public_key": hx(&body.issuer_public_key),
+                    "issuer_signature": hx(&signature),
+                    "certificate_package_cbor": hx(&package),
+                    "result": if tamper_signature { "CERT_SIGNATURE_INVALID" } else if schema_version != 1 { "SCHEMA_UNSUPPORTED" } else { "VALID" },
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    json!({
+        "spec": "spec/certificate-package-v1.md",
+        "vectors": vectors,
+    })
+}
+
 /// Имя файла → содержимое. Единственный источник для генератора и теста.
 pub fn all() -> Vec<(&'static str, J)> {
     vec![
@@ -612,6 +870,8 @@ pub fn all() -> Vec<(&'static str, J)> {
         ("merkle.json", merkle_vectors()),
         ("anchor.json", anchor_vectors()),
         ("batch.json", batch_vectors()),
+        ("manifest.json", manifest_vectors()),
+        ("certificate.json", certificate_vectors()),
     ]
 }
 

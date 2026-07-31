@@ -1,6 +1,6 @@
 # merkle-tree-v1
 
-**Статус:** draft (замораживается на выходе Gate B)
+**Статус:** frozen (Gate B)
 **Реализации:** `crates/merkle` (Rust), `packages/merkle-ts` (TypeScript, Gate B)
 **Векторы:** `spec/vectors/merkle.json`
 

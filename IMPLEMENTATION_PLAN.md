@@ -1,7 +1,8 @@
 # OneLayer — план имплементации
 
-**Базовый документ:** `OneLayer_Solana_Technical_Spec_RU.md` (v0.9)
-**Статус плана:** v2.2, 2026-07-31 · история версий — `CHANGELOG_IMPLEMENTATION_PLAN.md`
+**Базовый документ:** `OneLayer_Solana_Technical_Spec_RU.md` (v0.9, историческая проектная версия)
+**Источник заморозки протокола:** versioned-документы в `spec/`; пока их статус `draft`, решения §2 задают обязательные правки, а после Gate B замороженные документы имеют приоритет над планом и v0.9
+**Статус плана:** v2.3, 2026-07-31
 **Структура:** gate-ы A, B, C, D, E0, E — каждый с явным выходным решением
 **Горизонт:** Gate A–C (pilot на devnet) ≈ 5–7 месяцев; Gate D–E (production go-live) ≈ +10–12 месяцев; Phase 3 — отдельный горизонт после go-live
 
@@ -27,21 +28,20 @@
 
 ## 1. История ревизий
 
-Текущая версия — **v2.2**. Изменения относительно v2.1:
+Текущая версия — **v2.3**. Изменения относительно v2.2:
 
-- байтовые длины в `field_commitment` и `audit_preimage`: `byte_len` после UTF-8/CBOR-кодирования (§2.1);
-- `finalizedHeadSlot` верификатор запрашивает у RPC сам; при двух RPC берётся **больший** head, при большом расхождении — `RPC_DISAGREEMENT` (§2.3);
-- добавлен Gate E0 — Docker Recovery Lab: `spec/snapshot-package-v1.md`, иерархия DEK/KEK/shares, обращение с ключевым материалом, guards для разрушительных скриптов (§10);
-- Gate E0 и DPIA — параллельные ветки; security baseline (audit + pentest) до shadow pilot с боевыми данными (§11.1);
-- `publish_attempt`: сырые ответы RPC не хранятся (§6.2).
-
-Полная история v1.0 → v2.2 с обоснованиями — `CHANGELOG_IMPLEMENTATION_PLAN.md`.
+- `record_id_commitment` включён в `record_commitment`: Merkle proof теперь связывает содержимое с конкретной записью (§2.1);
+- контракт incident index scoped по `registryId`; индекс, не дошедший до anchor slot, получает `STALE` (§2.3);
+- результат `OL-A-04` принят в план: segmented ledger C′, 46 entries на сегмент (§8.2);
+- `publish_attempt` хранит неизменяемые байты подписанной попытки, но допускает однократное разрешение outcome (§6.2);
+- `SnapshotPackageV1` получил deterministic CBOR, однозначные AAD, DEK wrapping и lifecycle test KEK (§10.1);
+- удалена недоказательная проверка «соль нельзя вывести»; сохранены только проверяемые границы раскрытия (§7.2).
 
 ---
 
 ## 2. P0-решения: криптографический протокол
 
-Всё в этом разделе фиксируется **до** написания golden vectors и является предметом Gate B.
+Всё в этом разделе фиксируется **до регенерации и заморозки** golden vectors в Gate B. Существующие vectors Gate A считаются draft-артефактом.
 
 ### 2.1. Disclosure protocol — соли полей отделены от record nonce
 
@@ -76,6 +76,7 @@
 
 Внешнее дерево:
   record_commitment  = SHA256("ONELAYER:RECORD:V1" || registry_id_hash ||
+                              record_id_commitment ||
                               u64_be(record_version) || field_root)
 
   batch_leaf_hash    = SHA256(0x00 || record_commitment)                // RFC 6962 leaf
@@ -84,6 +85,8 @@
   merkle_root = корень RFC6962-дерева по batch_leaf_hash,
                 листья отсортированы по (record_id_commitment, record_version)
 ```
+
+`record_id_commitment` входит в хэшируемый preimage, а не только задаёт порядок листьев. Иначе две записи одного реестра с одинаковыми `record_version` и `field_root` дали бы один `record_commitment`, и batch-proof не связывал бы содержимое с заявленным record ID. До Gate B существующие `spec/leaf-v1.md`, `crates/canonical` и vectors обновляются вместе; обязательны один golden vector и один differential case: одинаковые `registry_id_hash` / `record_version` / `field_root`, разные `record_id_commitment` → разные `record_commitment`.
 
 **Двойное хэширование намеренное.** `*_commitment` — доменно-разделённое обязательство к содержимому; `*_leaf_hash` — RFC 6962-обёртка, отделяющая листья от внутренних узлов. Термины различаются нормативно, чтобы исключить неоднозначность при генерации golden vectors. Ни один вектор не использует слово «leaf» без префикса `field_tree_` или `batch_`.
 
@@ -104,8 +107,8 @@
 
 | Режим | Содержимое |
 |---|---|
-| `SELECTIVE_FIELDS` | значения раскрываемых полей, `field_salt` **только этих** путей, field-proof каждого, `field_root`, batch-proof |
-| `FULL_RECORD` | все значения и все `field_salt`, batch-proof (`field_root` пересчитывается) |
+| `SELECTIVE_FIELDS` | `record_id_commitment`, значения раскрываемых полей, `field_salt` **только этих** путей, field-proof каждого, `field_root`, batch-proof |
+| `FULL_RECORD` | `record_id_commitment`, все значения и все `field_salt`, batch-proof (`field_root` пересчитывается) |
 
 `record_field_key` не попадает в сертификат и не отдаётся ни одним API **никогда**. Раскрытие одной соли не даёт вычислить другие: HMAC с секретным ключом невосстановим по своим выходам.
 
@@ -165,7 +168,7 @@ anchor_hash = SHA-256(anchor_preimage)            // preimage ровно 260 б�
 
 **Решение для pilot (Gate C):**
 - `incident_sequence` назначает программа из монотонного счётчика `RegistryConfig.incident_count` — это необходимо для корректности назначения, а не индекс;
-- верификатор использует off-chain **incident index** (`GET /v1/incidents?batchSequence=`), построенный из on-chain событий `IncidentOpened`;
+- верификатор использует off-chain **incident index** (`GET /v1/incidents?registryId=&batchSequence=`), построенный из on-chain событий `IncidentOpened`; `registryId` обязателен, потому что `batch_sequence` монотонен только внутри реестра;
 - пустой ответ индекса сам по себе не является доказательством отсутствия инцидентов: индекс мог потерять событие, отстать от finalized head или остановиться на старом слоте. Поэтому индекс обязан публиковать **watermark полноты**.
 
 **Индекс сообщает только `indexedThroughSlot`. Голову цепочки верификатор берёт сам.** Если бы индекс отдавал и то, и другое, зависший или скомпрометированный индекс объявлял бы устаревшую цепочку актуальной — самозаверение полноты.
@@ -179,7 +182,7 @@ indexLagSlots        = rpcFinalizedHeadSlot − indexedThroughSlot
 Ответ индекса:
 
 ```json
-{ "indexedThroughSlot": 412345999, "incidents": [] }
+{ "registryId": "gov.registry.land", "indexedThroughSlot": 412345999, "incidents": [] }
 ```
 
 Ответ верификатора:
@@ -199,12 +202,12 @@ indexLagSlots        = rpcFinalizedHeadSlot − indexedThroughSlot
 | Статус | Условие | Влияние на итог |
 |---|---|---|
 | `CHECKED` | `0 <= indexLagSlots <= maxIndexLagSlots` **и** `indexedThroughSlot >= anchor_slot` | итог может быть `VERIFIED` |
-| `STALE` | индекс доступен, но `indexLagSlots > maxIndexLagSlots` | понижение до `VERIFIED_NO_INCIDENT_CHECK` |
+| `STALE` | индекс доступен, но `indexLagSlots > maxIndexLagSlots` **или** `indexedThroughSlot < anchor_slot` | понижение до `VERIFIED_NO_INCIDENT_CHECK` |
 | `UNAVAILABLE` | индекс недоступен или ответ без `indexedThroughSlot` | понижение до `VERIFIED_NO_INCIDENT_CHECK` |
 | `INDEX_INCONSISTENT` | `indexedThroughSlot > rpcFinalizedHeadSlot` — индекс утверждает, что обогнал finalized-голову | понижение до `VERIFIED_NO_INCIDENT_CHECK`, событие в лог как аномалия |
 | `RPC_DISAGREEMENT` | два RPC разошлись по высоте finalized-головы сильнее `maxRpcHeadDifference` (только при двух источниках, Gate E) | понижение до `VERIFIED_NO_INCIDENT_CHECK` |
 
-`maxIndexLagSlots` — конфигурируемый параметр верификатора, по умолчанию 300 слотов (≈2 минуты). Ответ без watermark трактуется как `UNAVAILABLE`, а не как `CHECKED`.
+`maxIndexLagSlots` — конфигурируемый параметр верификатора, по умолчанию 300 слотов (≈2 минуты). Ответ без watermark трактуется как `UNAVAILABLE`, а не как `CHECKED`. Условие `indexedThroughSlot < anchor_slot` проверяется отдельно от lag: индекс может укладываться в 300 слотов от head, но ещё не покрывать конкретный новый anchor.
 
 **Правило двух RPC (Gate E).** В pilot `rpcFinalizedHeadSlot` берётся у единственного RPC. При двух источниках консервативным является **больший** head: `indexLagSlots = head − indexedThroughSlot`, поэтому меньший head уменьшает измеренный лаг и может ошибочно перевести `STALE` в `CHECKED`.
 
@@ -344,7 +347,7 @@ audit_hash = SHA-256(audit_preimage)
 | `OL-A-01` | Аудит workflow-системы: подписываются ли операции персонально, чем, есть ли неотказуемость, есть ли внешние ссылки на дела | Отчёт: реализуем ли `authorized_workflow_event` без доработки реестра |
 | `OL-A-02` | Аудит источника: механизм CDC (logical replication / audit log / триггеры), семантика курсора, монотонность, объёмы, качество данных | Отчёт: какой курсор является источником истины и непрерывен ли он |
 | `OL-A-03` | Ed25519 HSM spike: подписать тестовую Solana-транзакцию ключом из HSM, замерить латентность и пропускную способность | Подписанная транзакция в devnet или отказ вендора |
-| `OL-A-04` | Large PDA allocation spike: создание аккаунта 20 840 байт через `init` и через `init` + `realloc` на локальном валидаторе | ADR: схема ledger A / B / C (§5.2) |
+| `OL-A-04` | **Закрыто:** large PDA allocation spike на локальном валидаторе | ADR-0002: C′, сегменты по 46 entries, seed с `segment_index`; прямой `init` 47+ entries отвергнут runtime (§8.2) |
 | `OL-A-05` | Disclosure design: закрыть §2.1, включая решение по padding field-дерева | Подписанный раздел `spec/leaf-v1.md` |
 | `OL-A-06` | Threat model v1 по **подтверждённым** trust boundaries (не по гипотетическим) | Документ + формальный sign-off по текущим границам (release gate 3, первое закрытие) |
 | `OL-A-07` | Ограничения целевой среды: что доступно (оркестрация, storage, сеть, KMS), а не что хотелось бы | Список ограничений, вход для Gate E |
@@ -367,12 +370,12 @@ audit_hash = SHA-256(audit_preimage)
 | Документ | Содержание |
 |---|---|
 | `spec/canonical-record-v1.md` | Deterministic CBOR (RFC 8949), Unicode NFC, RFC 3339 UTC без дробной части, decimal как строка с фиксированным scale, различение отсутствующего ключа и `null`, сортировка `rights`/`encumbrances`/`subjectCommitments`, полный перечень путей полей, отклонение полей вне схемы |
-| `spec/leaf-v1.md` | §2.1 полностью: `record_field_key`, `field_salt`, `field_commitment`, `field_tree_leaf_hash`, `field_root`, `record_commitment`, `batch_leaf_hash`, `record_id_commitment` |
+| `spec/leaf-v1.md` | §2.1 полностью: `record_field_key`, `field_salt`, `field_commitment`, `field_tree_leaf_hash`, `field_root`, `record_commitment` с обязательным `record_id_commitment`, `batch_leaf_hash` |
 | `spec/merkle-tree-v1.md` | RFC 6962: `leaf_hash=SHA256(0x00\|\|commitment)`, `node=SHA256(0x01\|\|left\|\|right)`, непарный узел поднимается без хэширования (дублирование запрещено), порядок листьев для обоих деревьев |
-| `spec/onchain-state-v1.md` | **Заморозка on-chain ABI и state:** все PDA seeds; поля и порядок в `RegistryConfig`, `OperatorRole`, `DailyAnchorLedger`, `IncidentNotice`, `AnchorEntryV1`; endianness и фиксированные размеры; `AnchorEntryInputV1` (instruction data, Borsh); поля, заполняемые программой (`operator`, `published_at`, `incident_sequence`); события и их поля; правило версионирования аккаунтов; семантика `incident_count`; семантика `capacity` и её неизменности; genesis-значения |
+| `spec/onchain-state-v1.md` | **Заморозка on-chain ABI и state:** все PDA seeds; поля и порядок в `RegistryConfig`, `OperatorRole`, `DailyAnchorLedgerSegment`, `IncidentNotice`, `AnchorEntryV1`; `segment_index`, capacity 46 и порядок sealing сегментов; endianness и фиксированные размеры; `AnchorEntryInputV1` (instruction data, Borsh); поля, заполняемые программой (`operator`, `published_at`, `incident_sequence`); события и их поля; правило версионирования аккаунтов; семантика `incident_count`; genesis-значения |
 | `spec/batch-manifest-v1.md` | Байтовая сериализация для подписи, `manifestHash` от манифеста без подписи, Ed25519 |
 | `spec/anchor-chain-v1.md` | §2.2 `anchor_preimage`, genesis, §2.4 границы гарантий |
-| `spec/certificate-package-v1.md` | CBOR-кодирование, что подписывает issuer, состав по режимам раскрытия (§2.1: `fieldSalts` только раскрытых путей, поле `nonce` спецификации удалено), формат QR |
+| `spec/certificate-package-v1.md` | CBOR-кодирование, что подписывает issuer, состав по режимам раскрытия (§2.1: `fieldSalts` только раскрытых путей, поле `nonce` спецификации удалено), `recordIdCommitment`, `segmentIndex` и segment PDA, формат QR |
 | `spec/error-codes.md` | Коды §9.5 спецификации + on-chain коды + добавленные статусы верификатора (`VERIFIED_NO_INCIDENT_CHECK`, `incidentIndexStatus` со значениями `CHECKED/STALE/UNAVAILABLE/INDEX_INCONSISTENT/RPC_DISAGREEMENT`), единый источник для обеих реализаций |
 
 ### 4.2. Golden vectors — около 50–70 суммарно
@@ -380,7 +383,7 @@ audit_hash = SHA-256(audit_preimage)
 | Набор | Количество | Что покрывает |
 |---|---:|---|
 | canonical | 20–30 | по одному на класс: Unicode NFC (кириллица/армянский с комбинирующими), surrogate pair, RTL-маркер, `0.10` vs `0.1`, отрицательный decimal, `-0`, отсутствующий ключ vs `null`, пустой массив, порядок массива, високосная секунда, граничная дата, поле вне схемы (отклонение) |
-| leaf / field tree | 8–12 | одно поле, все поля, selective с одним раскрытым, selective с несколькими, вложенное поле, отсутствующее поле. Каждый вектор содержит **раздельно** `field_commitment`, `field_tree_leaf_hash`, `field_root`, `record_commitment`, `batch_leaf_hash` — двойное хэширование фиксируется явно |
+| leaf / field tree | 8–12 | одно поле, все поля, selective с одним раскрытым, selective с несколькими, вложенное поле, отсутствующее поле, пара одинаковых roots/versions с разными `record_id_commitment`. Каждый вектор содержит **раздельно** `field_commitment`, `field_tree_leaf_hash`, `field_root`, `record_commitment`, `batch_leaf_hash` — двойное хэширование и привязка ID фиксируются явно |
 | merkle | 10–15 | 1, 2, 3, 4, 5, 7, 8 листьев (непарные узлы на разных уровнях), proof для первого/последнего/среднего |
 | manifest / anchor | 5–8 | `anchor_preimage`, genesis, snapshot_hash = нули и не-нули |
 | certificate | 5 | FULL_RECORD, SELECTIVE_FIELDS, повреждённая подпись, неподдерживаемая схема |
@@ -405,7 +408,7 @@ audit_hash = SHA-256(audit_preimage)
 
 **Выход Gate B:** заморожены и криптографический протокол, и on-chain ABI/state (release gate 2), обе реализации проходят все векторы, ADR приняты.
 
-`spec/onchain-state-v1.md` пишется после `OL-A-04` — схема ledger (A/B/C) должна быть известна до заморозки layout-а. Если Gate A даёт вариант B (доращивание аккаунта), Gate B удлиняется на неделю: добавляется инструкция роста и её место в ABI.
+`spec/onchain-state-v1.md` фиксирует уже принятое решение `OL-A-04`: segmented ledger C′ с capacity 46 и seed `["ledger", config, day_utc, u16_le(segment_index)]`. Инструкции роста в ABI нет. Возврат к realloc-варианту B возможен только через новый ADR, если `OL-A-02` докажет обязательность единого дневного аккаунта.
 
 Изменение любого замороженного документа после Gate B требует ADR и инкремента версии схемы — молчаливых правок layout-а или preimage быть не может.
 
@@ -424,17 +427,17 @@ synthetic change → canonicalize → batch → manifest → devnet anchor → c
 | ID | Задача |
 |---|---|
 | `OL-C-01` | On-chain: `initialize_registry`, `grant_operator`, `revoke_operator` |
-| `OL-C-02` | On-chain: `create_daily_ledger` по схеме из `OL-A-04` |
+| `OL-C-02` | On-chain: `create_ledger_segment` по ADR-0002, capacity 46, монотонный `segment_index` внутри дня |
 | `OL-C-03` | On-chain: `publish_anchor` (§5.4), `anchor_hash` по §2.2, события |
-| `OL-C-04` | On-chain: `seal_daily_ledger`, `entries_hash` |
+| `OL-C-04` | On-chain: `seal_daily_ledger` запечатывает все сегменты дня; `entries_hash` считается по `segment_index` |
 | `OL-C-05` | On-chain: `pause_registry` / `resume_registry` |
 | `OL-C-06` | On-chain: `open_incident` / `resolve_incident`, счётчик `incident_count` |
 | `OL-C-10` | `crates/canonical` + `crates/merkle`: реализация по Gate B |
 | `OL-C-11` | `apps/pilot-pipeline`: чтение synthetic-источника, сопоставление с workflow-событием, canonical version, batch, манифест |
 | `OL-C-12` | `apps/pilot-pipeline`: публикация в devnet (обычный blockhash, software-ключ), отслеживание `finalized`, durable queue в PostgreSQL |
-| `OL-C-13` | `apps/pilot-pipeline`: выдача сертификата, оба режима раскрытия, QR (основной формат: URL + id + hash) |
-| `OL-C-14` | `apps/verifier`: алгоритм §8.3 спецификации, один RPC, incident index с watermark и правилом статуса (§2.3), REST по §9.1 |
-| `OL-C-15` | Схема БД (§6.2): durable queue + append-only `publish_attempt`, append-only audit journal без hash-chain (§2.6) |
+| `OL-C-13` | `apps/pilot-pipeline`: выдача сертификата, оба режима раскрытия, `recordIdCommitment`, `segmentIndex` и segment PDA, QR (основной формат: URL + id + hash) |
+| `OL-C-14` | `apps/verifier`: алгоритм §8.3 спецификации, один RPC, проверка segment PDA, incident index scoped по `registryId` с watermark и правилом статуса (§2.3), REST по §9.1 |
+| `OL-C-15` | Схема БД (§6.2): durable queue + неизменяемые подписанные данные `publish_attempt` с однократным разрешением outcome, append-only audit journal без hash-chain (§2.6) |
 | `OL-C-20` | E2E smoke: synthetic change → VERIFIED в верификаторе |
 
 ### 5.2. Чего в Gate C нет
@@ -537,7 +540,7 @@ CREATE TABLE publish_queue (
   PRIMARY KEY (registry_id, batch_sequence)
 );
 
--- история попыток: append-only, ничего не перезаписывается
+-- история попыток: подписанные байты неизменяемы; outcome разрешается один раз
 CREATE TABLE publish_attempt (
   registry_id     TEXT   NOT NULL,
   batch_sequence  BIGINT NOT NULL,
@@ -570,7 +573,9 @@ CREATE TABLE source_cursor_state (
 
 **Ошибки не хранятся сырыми.** Ответ RPC-провайдера может содержать внутренние endpoint URL, идентификаторы провайдера и служебные заголовки. В `publish_attempt` пишутся: внутренний код из закрытого перечня, санитизированное сообщение и хэш сырого ответа для корреляции с логами провайдера. Сырой payload по умолчанию не сохраняется — при необходимости расследования он берётся из временных логов с коротким retention.
 
-**Почему `publish_attempt` append-only.** Каждая попытка — это подписанная транзакция, отправленная в сеть. Исход части попыток принципиально неопределён (`UNKNOWN`): RPC не ответил, но транзакция могла быть принята. В этом состоянии Publisher обязан **опрашивать статус по известной signature**, а не пересобирать транзакцию, — значит все предыдущие signature должны сохраняться. Перезапись строки уничтожила бы и эту возможность, и provenance-доказательство того, что именно публиковалось.
+**Почему `publish_attempt` не удаляется и не заменяется.** Каждая попытка — это подписанная транзакция, отправленная в сеть. Исход части попыток принципиально неопределён (`UNKNOWN`): RPC не ответил, но транзакция могла быть принята. В этом состоянии Publisher обязан **опрашивать статус по известной signature**, а не пересобирать транзакцию, — значит все предыдущие signature должны сохраняться.
+
+Неизменяемы `transaction_b64`, `signature`, `recent_blockhash`, `submitted_to`, `created_at` и ключ попытки. Разрешено ровно одно обновление результата из `SUBMITTED` или `UNKNOWN` в терминальный `FINALIZED` / `EXPIRED` / `FAILED` с заполнением `resolved_at` и санитизированной ошибки. Повторный или обратный переход запрещён. Этого достаточно для provenance; отдельная таблица наблюдений появится только при явном требовании хранить каждое status-poll событие.
 
 `audit_chain_head` в Gate C не создаётся — появляется вместе с включением hash-chain (`OL-DEC-07`).
 
@@ -602,8 +607,8 @@ gRPC и protobuf не вводятся, пока не появится вызо�
 `publish_anchor` (больше всего инвариантов):
 неавторизованный signer · отозванная роль · истёкшая роль · роль без `PERM_PUBLISH_ANCHOR` · роль чужого реестра · `batch_sequence` повтор/пропуск · неверный `previous_anchor_hash` · `registry_version` назад · `cursor_start > cursor_end` · sealed ledger · переполненный ledger · ledger чужого дня · ledger чужого реестра · `paused`.
 
-`create_daily_ledger`: повторное создание · чужой реестр · неавторизованная роль.
-`seal_daily_ledger`: повторный seal · чужой ledger · неавторизованная роль.
+`create_ledger_segment`: повторное создание · чужой реестр · неавторизованная роль · неверный следующий `segment_index` · capacity не равна 46.
+`seal_daily_ledger`: повторный seal · чужой сегмент · пропуск сегмента дня · неавторизованная роль.
 `grant_operator` / `revoke_operator`: не-governance signer · повторный grant.
 `pause` / `resume`: не-emergency signer на pause · не-governance на resume.
 `open_incident` / `resolve_incident`: роль без `PERM_REPORT_INCIDENT` · resolve не-governance · повторный resolve.
@@ -618,17 +623,16 @@ Focused property tests: Unicode NFC, decimal, сортировка массив�
 - дубликат CDC-события, событие вне порядка, пропуск курсора, рестарт посреди обработки;
 - изменение без workflow-события; workflow-событие без изменения;
 - повторная сборка диапазона → идентичный `manifestHash`;
-- параллельная попытка опубликовать один batch дважды;
-- сертификат с подменёнными: значением поля, солью, field-proof, batch-proof, `merkleRoot`, `programId`, ledger PDA;
+- параллельная попытка опубликовать один batch дважды; `UNKNOWN → FINALIZED` разрешается один раз без изменения подписанных байтов попытки;
+- сертификат с подменёнными: `recordIdCommitment`, значением поля, солью, field-proof, batch-proof, `merkleRoot`, `programId`, `segmentIndex`, segment PDA;
 - сертификат для batch с открытым инцидентом;
-- incident index недоступен / отдаёт лаг выше `maxIndexLagSlots` / отдаёт ответ без watermark → во всех трёх случаях `VERIFIED_NO_INCIDENT_CHECK`, статусы `UNAVAILABLE`/`STALE`/`UNAVAILABLE` соответственно;
+- incident index недоступен / отдаёт лаг выше `maxIndexLagSlots` / не дошёл до `anchor_slot` / отдаёт ответ без watermark → `VERIFIED_NO_INCIDENT_CHECK`, статусы `UNAVAILABLE`/`STALE`/`STALE`/`UNAVAILABLE` соответственно; запрос без совпадающего `registryId` отвергается;
 - RPC вернул `confirmed` вместо `finalized`.
 
 **Проверка изоляции солей (§2.1)** — вместо недоказуемого «восстановить соль невозможно» тестируется конкретный контракт:
 - сериализованный selective-сертификат не содержит `record_field_key` (поиск по байтам ключа в готовом пакете);
 - сертификат содержит соли ровно тех путей, что раскрыты, и ни одной другой;
 - ни один эндпоинт API не возвращает `record_field_key` и `record_field_key_encrypted` — проверка на сериализаторах ответов, а не на конкретных ручках;
-- `field_salt(path)`, вычисленная из всех публичных входов сертификата, не совпадает с фактической солью скрытого поля;
 - подмена соли раскрытого поля ломает field-proof.
 
 ### 7.3. Что не делается
@@ -641,7 +645,7 @@ Focused property tests: Unicode NFC, decimal, сортировка массив�
 
 ### 8.1. Zero-copy вместо `Vec`
 
-`Vec<AnchorEntryV1>` на 96 записей — ~20 КБ, десериализуемых в 32-килобайтный BPF heap при каждом `publish_anchor`. Решение — `#[account(zero_copy)]` с фиксированным массивом и явным padding.
+Единый `Vec<AnchorEntryV1>` на целевые 96 записей занял бы ~20 КБ и не создаётся прямым `init` через CPI. Решение — `#[account(zero_copy)]` с фиксированным массивом на 46 entries и явным padding; день состоит из последовательных сегментов.
 
 Entry: 216 байт (`repr(C)`, align 8, все padding-поля явные и обнуляемые — иначе `Pod` не выводится). Header ledger-а: 96 байт + 8 дискриминатор.
 
@@ -649,28 +653,29 @@ Entry: 216 байт (`repr(C)`, align 8, все padding-поля явные и �
 
 ### 8.2. Размеры и rent
 
-| capacity | entries | + header | итого | rent-exempt* | в год |
-|---:|---:|---:|---:|---:|---:|
-| 96 | 20 736 | 104 | 20 840 | 0.1459 SOL | 53.3 SOL (365) |
-| 192 | 41 472 | 104 | 41 576 | 0.2903 SOL | 105.9 SOL (365) |
-| 48 (полудневной) | 10 368 | 104 | 10 472 | 0.0738 SOL | 53.9 SOL (730) |
+| unit | capacity | entries | + header | итого | rent-exempt* |
+|---|---:|---:|---:|---:|---:|
+| один сегмент C′ | 46 | 9 936 | 104 | 10 040 | 0.07076928 SOL |
+| три сегмента/день | 138 | 29 808 | 312 | 30 120 | 0.21230784 SOL |
 
 \* `(128 + size) × 3480 × 2` lamports.
 
-Прирост данных аккаунта за инструкцию ограничен 10 240 байтами. Поведение `init` для аккаунта >10 КБ через CPI проверяется эмпирически (`OL-A-04`), результат определяет схему:
-**A** — прямой `init`, capacity 192, запас на backlog;
-**B** — `init` 10 240 + доращивание отдельной инструкцией до первого anchor;
-**C** — полудневной ledger, seed `["ledger", config, day_utc, half]`, capacity 96.
+`OL-A-04` эмпирически подтвердил: прямой `init` ограничен 10 240 байтами; 46 entries дают 10 040 байт и проходят, 47 entries дают 10 256 байт и отвергаются. Принят **C′**:
 
-При равенстве предпочтителен **C**: нет realloc-логики, тот же годовой rent, естественный запас на backlog.
+```text
+seed: ["ledger", config, day_utc, u16_le(segment_index)]
+capacity: 46 entries
+```
+
+Три сегмента покрывают 138 entries в сутки против целевых 96 без realloc-инструкции и промежуточного состояния «ledger создан, но не доращён». Если аккаунты хранятся навсегда, rent-exempt капитал растёт примерно на 77.49 SOL в год. Перед mainnet измерение повторяется на актуальном validator runtime; это проверка release gate 4, а не compatibility layer.
 
 ### 8.3. Модель хранения ledger — решение владельца
 
 | Вариант | Rent/год | Верификация |
 |---|---:|---|
-| A. Полные entries навсегда | 53–106 SOL | одно чтение PDA |
+| A. Полные entries навсегда | +~77.5 SOL rent-exempt капитала/год | чтение segment PDA, указанного в сертификате |
 | B. Только rolling `entries_hash` | ~0.6 SOL | entry из транзакции, PDA подтверждает целостность |
-| C. Hot window 90 дней + закрытие после | ~1.5 SOL | последние 90 дней — PDA, старше — digest + архив |
+| C. Hot window 90 дней + закрытие после | ~19.1 SOL steady-state для hot segments + ~0.6 SOL/год для digest | последние 90 дней — segment PDA, старше — digest + архив |
 
 Для pilot реализуется **A** (простейшая, соответствует §8.3 спецификации буквально). Переход на C не меняет формат entries и возможен в Gate E. Решение — за владельцем до go-live.
 
@@ -678,7 +683,7 @@ Entry: 216 байт (`repr(C)`, align 8, все padding-поля явные и �
 
 ### 8.4. `publish_anchor` — инварианты
 
-Порядок проверок: не приостановлен → роль принадлежит этому реестру и этому signer → роль активна по времени и не отозвана → есть право публикации → `batch_sequence == current + 1` → `registry_version` не назад → `cursor_start <= cursor_end` → `previous_anchor_hash == config.last_anchor_hash` → schema/hash/tree algorithm совпадают с config → ledger принадлежит реестру, день верный, не sealed, есть место.
+Порядок проверок: не приостановлен → роль принадлежит этому реестру и этому signer → роль активна по времени и не отозвана → есть право публикации → `batch_sequence == current + 1` → `registry_version` не назад → `cursor_start <= cursor_end` → `previous_anchor_hash == config.last_anchor_hash` → schema/hash/tree algorithm совпадают с config → segment принадлежит реестру, день и `segment_index` верны, segment не sealed, есть место.
 
 Затем: entry записывается с `operator` и `published_at` от программы; `anchor_hash` считается по §2.2; обновляются `last_anchor_hash`, `current_batch_sequence`, `current_registry_version`; эмитится событие `AnchorPublished`.
 
@@ -734,34 +739,51 @@ Acceptance criteria требуют AES-256-GCM, уникального DEK, AAD 
 
 ```text
 SnapshotPackageV1
-├── format_version
-├── registry_id
-├── snapshot_id
-├── snapshot_version
+├── format_version               // u16, значение 1
+├── registry_id                  // NFC UTF-8, byte_len <= 65535
+├── snapshot_id                  // UUID, ровно 16 байт
+├── snapshot_version             // u64
 ├── encryption_algorithm        // "AES-256-GCM"
-├── chunk_size                  // фиксирован для пакета
-├── total_chunks
+├── chunk_size                  // u32, фиксирован для пакета
+├── total_chunks                // u32
 ├── chunks[]
-│   ├── chunk_index
+│   ├── chunk_index             // u32, строго 0..total_chunks-1
 │   ├── nonce                   // 12 байт, уникален в пределах DEK
 │   ├── ciphertext
 │   └── auth_tag                // 16 байт
-├── wrapped_dek                 // DEK, зашифрованный KEK
-├── key_encryption_version      // версия KEK
+├── key_wrap_algorithm          // "AES-256-GCM"
+├── wrapped_dek                 // ciphertext, ровно 32 байта
+├── wrapped_dek_nonce           // 12 байт
+├── wrapped_dek_auth_tag        // 16 байт
+├── key_encryption_version      // NFC UTF-8, byte_len <= 65535
 ├── plaintext_hash              // SHA-256 всего plaintext
-└── ciphertext_hash             // SHA-256 сериализованного пакета без этого поля
+└── ciphertext_hash             // SHA-256 canonical CBOR пакета без этого поля
+
+registry_id_bytes = UTF-8(NFC(registry_id))
+key_version_bytes = UTF-8(NFC(key_encryption_version))
 
 AAD каждого chunk =
-    "ONELAYER:SNAPSHOT:V1"
- || registry_id || snapshot_id || u64_be(snapshot_version)
- || u32_be(chunk_index) || u32_be(total_chunks)
+    "ONELAYER:SNAPSHOT:CHUNK:V1"
+ || u16_be(byte_len(registry_id_bytes)) || registry_id_bytes
+ || snapshot_id || u64_be(snapshot_version)
+ || u32_be(chunk_size) || u32_be(chunk_index) || u32_be(total_chunks)
  || plaintext_hash
+
+AAD для wrapped_dek =
+    "ONELAYER:SNAPSHOT:DEKWRAP:V1"
+ || u16_be(byte_len(registry_id_bytes)) || registry_id_bytes
+ || snapshot_id || u64_be(snapshot_version)
+ || u16_be(byte_len(key_version_bytes)) || key_version_bytes
 ```
 
 Правила:
-- chunking обязателен: одно монолитное GCM-сообщение непригодно для streaming, ретраев и локализации повреждения на снимках реального размера;
+- пакет кодируется deterministic CBOR по тому же RFC 8949 profile, что и остальные нормативные документы; map keys, числовые диапазоны и кратчайшее кодирование integer, byte strings и порядок `chunks` фиксируются в `spec/snapshot-package-v1.md`;
+- `ciphertext_hash` считается от canonical CBOR всего пакета без поля `ciphertext_hash`; это единственный формат, который записывается custodian-ам и хэшируется после чтения;
+- chunking обязателен: одно монолитное GCM-сообщение непригодно для ретраев и локализации повреждения; `plaintext_hash` считается до шифрования и затем входит в AAD каждого chunk;
+- `chunk_size > 0`, `total_chunks > 0`; массив содержит каждый `chunk_index` ровно один раз в порядке `0..total_chunks-1`, все chunks кроме последнего имеют plaintext-длину `chunk_size`;
 - пара `(DEK, nonce)` уникальна глобально; nonce выводится как `u32_be(chunk_index)` в 12-байтовом поле с нулевым префиксом, поскольку DEK уникален на snapshot — счётчик не может повториться;
 - `chunk_index` и `total_chunks` входят в AAD: это защищает от перестановки, усечения и подмены chunk-ов между пакетами;
+- `wrapped_dek_nonce` генерируется CSPRNG для каждого snapshot; повтор пары `(KEK, wrapped_dek_nonce)` запрещён;
 - ошибка проверки auth tag завершает restore **fail-closed**: частично расшифрованные данные не используются и не сохраняются;
 - `plaintext_hash` проверяется после сборки всех chunk-ов, независимо от успешных тегов.
 
@@ -777,6 +799,8 @@ KEK   — шифрует DEK (wrapped_dek)
 
 Shamir-разделение применяется **только к KEK**. Отдельно делить каждый DEK не нужно: это множит церемонии пропорционально числу снимков и усложняет lifecycle без выигрыша — компрометация KEK и так раскрывает все DEK, а разделение DEK не защищает от неё.
 
+**Lifecycle в Gate E0:** test KEK генерируется один раз при инициализации lab, разделяется на пять shares и передаётся coordinator-у отдельным Compose secret только на фазу создания snapshot. Coordinator не получает ни одного share. После записи и перепроверки трёх replicas coordinator и его secret удаляются; recovery начинается только после этого. `clean-room-restore` получает выбранные shares через одноразовые файлы в `tmpfs`, восстанавливает KEK при 3-of-5, unwrap-ит DEK и уничтожается после drill. В Gate E место live KEK занимает подтверждённый `OL-A-07` KMS/HSM; threshold shares остаются recovery-копией этого KEK, а не механизмом на каждый штатный snapshot.
+
 ### 10.2. Изоляция внутри lab
 
 - отдельные Docker networks для storage, key holders и restore;
@@ -784,7 +808,8 @@ Shamir-разделение применяется **только к KEK**. От
 - custodian не имеет доступа к KEK и shares;
 - key holder не имеет доступа к backup storage;
 - restore-контейнер не имеет доступа к `source-db`;
-- coordinator ни в одной точке не держит все пять shares;
+- coordinator не имеет доступа ни к одному share; KEK присутствует у него только во время создания snapshot;
+- clean-room получает shares только после удаления coordinator и потери primary fixture;
 - production credentials отсутствуют полностью; только synthetic-данные и test keys.
 
 **Ключевой материал не передаётся через environment.** `environment:` и `.env` видны в `docker inspect` и регулярно попадают в диагностические выгрузки. Для shares, KEK и DEK используются: Compose secrets или одноразовые read-only файлы в `tmpfs`, доступные только на время реконструкции; после drill контейнер и ephemeral volume уничтожаются.
@@ -795,9 +820,9 @@ Shamir-разделение применяется **только к KEK**. От
 
 | # | Сценарий | Критерий |
 |---|---|---|
-| 1 | Создание snapshot | plaintext hash посчитан; AES-256-GCM; уникальный DEK на snapshot; AAD содержит registry ID, snapshot ID, version, plaintext hash |
+| 1 | Создание snapshot | plaintext hash посчитан; deterministic CBOR; AES-256-GCM; уникальный DEK на snapshot; chunk AAD однозначно содержит registry ID, snapshot ID, version, chunk size, indexes и plaintext hash; DEK wrapping имеет отдельный domain и auth tag |
 | 2 | Размещение | ciphertext записан в три MinIO с разными credentials и volume; ciphertext hash перепроверен **после** записи у каждого |
-| 3 | Threshold | `2-of-5` — восстановление KEK **отказывает**; `3-of-5` — успешно; shares не появляются в логах, артефактах и `docker inspect`; после drill ephemeral volume и контейнеры уничтожены |
+| 3 | Threshold | после удаления coordinator: `2-of-5` — восстановление KEK **отказывает**; `3-of-5` — успешно; coordinator не видел shares; shares не появляются в логах, артефактах и `docker inspect`; после drill ephemeral volume и контейнеры уничтожены |
 | 4 | Отказ custodian | один MinIO остановлен или его volume удалён → восстановление из оставшихся успешно |
 | 5 | Повреждение replica | изменён один байт → ciphertext hash не совпал → replica исключена, попытки расшифровать её как корректную нет |
 | 6 | Потеря primary | контейнер `source-db` удалён вместе с volume; clean-room поднимается с нуля; восстановление идёт только по документированной процедуре |
@@ -929,7 +954,7 @@ Gate E0 — единственный блок, выполнимый до зав�
 | R1 | Workflow-события не подписываются персонально | критическое | `OL-A-01` в первую неделю; при подтверждении — `redesign` на выходе Gate A |
 | R2 | HSM без Ed25519 | высокое | `OL-A-03`; запасной вариант — внешний signing appliance, меняет §13.2 спецификации |
 | R3 | Расхождение двух реализаций найдено поздно | высокое | общие векторы с Gate B, differential corpus в каждом PR |
-| R4 | Rent-нагрузка ledger не согласована с бюджетом | среднее | `OL-DEC-04` до go-live; вариант C снижает в ~35 раз |
+| R4 | Rent-нагрузка ledger не согласована с бюджетом | среднее | `OL-A-04` зафиксировал C′ и реальную стоимость allocation; `OL-DEC-04` выбирает retention до go-live по измеренному rent-exempt капиталу (§8.2–8.3) |
 | R5 | Физическое вмешательство в файлы primary DB в обход WAL | критическое | **Не устраняется сканированием реплики.** Реплика может не получить такое изменение и показать старое внутренне согласованное состояние. Periodic replica scan обнаруживает пропущенные и повреждённые CDC-события, но не гарантирует обнаружение произвольного физического вмешательства в primary. Для этого требуется независимый канал к primary, независимо созданный snapshot primary или storage-level attestation — вводится только при подтверждении такой модели угроз в `OL-A-06` |
 | R6 | Ложноположительные инциденты парализуют операции | среднее | 60-дневный shadow pilot с разбором каждого случая |
 | R7 | Компрометация upgrade authority | критическое | Gate E: multisig + timelock; после аудита — рассмотреть `authority = None` (`OL-DEC-06`) |
@@ -946,7 +971,7 @@ Gate E0 — единственный блок, выполнимый до зав�
 2. `OL-A-02` — CDC и семантика курсора.
 3. `OL-A-03` — Ed25519 HSM spike.
 4. `OL-A-05` — закрыть disclosure design по §2.1: случайный `record_field_key` на версию записи, соли только раскрытых полей в сертификате, разведённые термины commitment/leaf_hash.
-5. `OL-A-04` — large PDA allocation spike.
+5. `OL-A-04` — **закрыто**: принят segmented ledger C′, capacity 46; результат уже учтён в §8.2 и Gate B.
 6. Минимальный CI и только те каталоги, что нужны этим spike-ам: `spec/`, `onchain/`, `crates/canonical/`.
 
 Skeleton M1–M12 в первую неделю не создаётся.

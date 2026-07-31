@@ -1,0 +1,20 @@
+[package]
+name = "onelayer-pilot-pipeline"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+onelayer-canonical = { path = "../../crates/canonical" }
+onelayer-merkle = { path = "../../crates/merkle" }
+sha2.workspace = true
+hex.workspace = true
+postgres = "0.19"
+anchor-client = "1.1.2"
+onelayer-registry = { path = "../../onchain/programs/onelayer-registry", features = ["no-entrypoint"] }
+base64 = "0.22"
+bincode = "1"
+solana-keypair = "3"
+solana-signature = "3"
+serde.workspace = true
+serde_json.workspace = true

@@ -5,9 +5,9 @@
     {
       "description": "одно поле: field_root равен field_tree_leaf_hash",
       "expected": {
-        "batch_leaf_hash": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+        "batch_leaf_hash": "7f42f91725a5cf8274de8cbedc0212f395aee9621ce2178411359dc4fdb685d7",
         "field_root": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
-        "record_commitment": "bad3a2f1437adebd2c6964f22324bce28e90cb0211fd768b511c5a0cb318562c",
+        "record_commitment": "5ff2b0a3f0bdca099ec9909d806e7aa43fa2044dded5e1f3698bbfcca91bf6f1",
         "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
       },
       "fields": [
@@ -29,6 +29,7 @@
       "id": "single-field",
       "input": {
         "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_id_commitment": "fc4ca0acd40f4b18b63350ffa9b1de06fe1ec7471a89ab4dcf214fa82b31b615",
         "record_version": "1",
         "registry_id": "gov.registry.land"
       }
@@ -36,9 +37,9 @@
     {
       "description": "два поля, полная пара",
       "expected": {
-        "batch_leaf_hash": "6db13d85f5bbf7a597eb27e977c384f5b8f07149ca8d1ba43e83e5f58287aa2b",
+        "batch_leaf_hash": "1107e74ba87d693b025c5e4fe19f4cd9ab7ce4a9e113ed4d29e329f9687442d0",
         "field_root": "308d5f4f953323057c57e92bcf1c6a8936a37e54cdc83a640542b0bf9576eafe",
-        "record_commitment": "08817e41ff42b1aaf5dbf8a4c30b43cd9b69a257b77343987d8b73cf1175be8e",
+        "record_commitment": "9876c2785ff92a33c51a5f81e1478a27a858c7e4424882cce5b1b76d6ebf152c",
         "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
       },
       "fields": [
@@ -74,6 +75,7 @@
       "id": "two-fields",
       "input": {
         "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_id_commitment": "fc4ca0acd40f4b18b63350ffa9b1de06fe1ec7471a89ab4dcf214fa82b31b615",
         "record_version": "1",
         "registry_id": "gov.registry.land"
       }
@@ -81,9 +83,9 @@
     {
       "description": "три поля: непарный лист поднимается без хэширования",
       "expected": {
-        "batch_leaf_hash": "d5d20eba4f915dbacb57d01a49f46b0052eb8e3153acd9081f1ad258c2c02a91",
+        "batch_leaf_hash": "c001b78adcaf669615b5680af461728eaa3e9f7663bb8880026a6e5b04a29340",
         "field_root": "e6e85d77cb81362cbcab68f5dda698805d1979f16309d8aac5ea9257b3687b1c",
-        "record_commitment": "881177eacdb0e0bdcdf12c4518030ef5c12b82ff351781bd77febba65a301a79",
+        "record_commitment": "54320a25ab10d1249e782981a809e60b3d6071b853619585a999b52cbb4b383a",
         "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
       },
       "fields": [
@@ -133,6 +135,7 @@
       "id": "three-fields-unpaired",
       "input": {
         "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_id_commitment": "fc4ca0acd40f4b18b63350ffa9b1de06fe1ec7471a89ab4dcf214fa82b31b615",
         "record_version": "1",
         "registry_id": "gov.registry.land"
       }
@@ -140,9 +143,9 @@
     {
       "description": "вложенные пути с индексами массива",
       "expected": {
-        "batch_leaf_hash": "ea2a4fbd8d26cb6370763bb6f61a4ee9f93034b9a4856895638510e34ae56319",
+        "batch_leaf_hash": "c9183d53640dd7edcab0e9d57974b3cae490bd17c2f996164f4930cce9970837",
         "field_root": "894b9571dce0be7f7721dcb9d2335c25196c518d1ec9fecfc11fbc3d26056aa8",
-        "record_commitment": "9a180d2c11bbf7185025bcd44cd38cd05d1411f5966de9af482dc0862898b441",
+        "record_commitment": "199e052fd0e0613079f21b0f32b1357819b559a7460b75f47455cc70aa223b19",
         "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
       },
       "fields": [
@@ -206,6 +209,7 @@
       "id": "nested-paths",
       "input": {
         "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_id_commitment": "fc4ca0acd40f4b18b63350ffa9b1de06fe1ec7471a89ab4dcf214fa82b31b615",
         "record_version": "7",
         "registry_id": "gov.registry.land"
       }
@@ -213,9 +217,9 @@
     {
       "description": "порядок листьев — по path_bytes, не по code points: \"z\" < \"aa\" ложно",
       "expected": {
-        "batch_leaf_hash": "838334c45d551ba4f516ef853d74be294b4c091b0f252376f42fc7932666005f",
+        "batch_leaf_hash": "e61dc8096707ed8f7f16e40c40a1fbd237c0e45c077bceb74e94a7d1a1b263fd",
         "field_root": "ea4612f8ea6cd40ff32d66096106593f5bf7513b3639612af8ab1aa10522e92d",
-        "record_commitment": "41effc473783e29ef417efd159eb1d7d992a4207712f1f243375112f866f1127",
+        "record_commitment": "5daa71f64e3209675cc5988ffcad46a8d8f8b8676416c1e40630be300991fb5b",
         "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
       },
       "fields": [
@@ -265,6 +269,7 @@
       "id": "path-sorting-by-bytes",
       "input": {
         "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_id_commitment": "fc4ca0acd40f4b18b63350ffa9b1de06fe1ec7471a89ab4dcf214fa82b31b615",
         "record_version": "1",
         "registry_id": "gov.registry.land"
       }
@@ -272,9 +277,9 @@
     {
       "description": "путь нормализуется NFC до вычисления соли и длины",
       "expected": {
-        "batch_leaf_hash": "97bbcb8a3afae5760d0ed28d19ec4ace94ac5ee051765178fafda115b2d7f3dd",
+        "batch_leaf_hash": "38ae7d2513d74f93767caba47b6aaefb491d69d80656609814a915e41ddfabed",
         "field_root": "d7d3af744bb00a8f8de49846f7865e9de526edd8e6a6a919e6e96b1a8262e8eb",
-        "record_commitment": "9f8cac72843b42f52171ed3007c2bb629aaca278ca37f9ae01b4a22608184f0a",
+        "record_commitment": "88d50054ca32079c7ef8e52c744ce22741b425649d32070952662a8d650043b9",
         "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
       },
       "fields": [
@@ -296,6 +301,7 @@
       "id": "unicode-path-nfc",
       "input": {
         "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_id_commitment": "fc4ca0acd40f4b18b63350ffa9b1de06fe1ec7471a89ab4dcf214fa82b31b615",
         "record_version": "1",
         "registry_id": "gov.registry.land"
       }
@@ -303,9 +309,9 @@
     {
       "description": "поле со значением null присутствует в дереве",
       "expected": {
-        "batch_leaf_hash": "375f6e11a77844f7414830f0b02d4af5e68be4c821b51fde25e5e10818d12e7a",
+        "batch_leaf_hash": "09bf445d404894cb58dd584a8e2b2b6bdc566b94359b70c5eaa6d2761d1462fe",
         "field_root": "f94c069a376cfb9cd80a567efc69d17f9059138dfef58bceb38202fe46381918",
-        "record_commitment": "13af283040999dba8ce8a1271d727b96f653272c55b6329830fd808a8145feb0",
+        "record_commitment": "1e6431410bf96c57cc699c47651f3a6b6b351e987ec15013c0e0d5a6451daa37",
         "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
       },
       "fields": [
@@ -340,6 +346,7 @@
       "id": "null-value-field",
       "input": {
         "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_id_commitment": "fc4ca0acd40f4b18b63350ffa9b1de06fe1ec7471a89ab4dcf214fa82b31b615",
         "record_version": "2",
         "registry_id": "gov.registry.land"
       }
@@ -347,9 +354,9 @@
     {
       "description": "пустой массив отличается от null и от отсутствия поля",
       "expected": {
-        "batch_leaf_hash": "cd6676efc969646eec9c67a071aa6546e0a1324c913d05f7e1d73475909a71f5",
+        "batch_leaf_hash": "4ab6d4dc07813212a082b4e3c1bdcdc3573fe9fb05b3c4ec1b32ba66618d6df9",
         "field_root": "5975495883e69d0f07f6bb6de40bfdae1eec9d03f53be0860e9a1fb2c815e08e",
-        "record_commitment": "3d457ce714ad7bf6e0c771ce7dab8ed49dc661d6c7463aea1f38cae29c12bba6",
+        "record_commitment": "928d1fdecd184b8cc055e93b89506024579ea237d13885a9fc8ceca2058ce46d",
         "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
       },
       "fields": [
@@ -385,6 +392,7 @@
       "id": "empty-array-value",
       "input": {
         "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_id_commitment": "fc4ca0acd40f4b18b63350ffa9b1de06fe1ec7471a89ab4dcf214fa82b31b615",
         "record_version": "2",
         "registry_id": "gov.registry.land"
       }
@@ -392,9 +400,9 @@
     {
       "description": "record_version в record_commitment кодируется u64_be",
       "expected": {
-        "batch_leaf_hash": "268306b21b99e42466284efa765decc8267aa60119a948d39fe250f45ad2efac",
+        "batch_leaf_hash": "fcc855f7ac65ed7b984cc1f3af4d2bef39345922ae9729216727e1114205e7ce",
         "field_root": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
-        "record_commitment": "c24f994a6eaa3e441e14b8afebcbb42baab7b5f453de9a4aaa8603110bb00417",
+        "record_commitment": "8233c442e9086e2d5bf81c90c8fcf0c9fa1fd04475651451ee675b1865dae76c",
         "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
       },
       "fields": [
@@ -416,6 +424,7 @@
       "id": "high-record-version",
       "input": {
         "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_id_commitment": "fc4ca0acd40f4b18b63350ffa9b1de06fe1ec7471a89ab4dcf214fa82b31b615",
         "record_version": "18446744073709551615",
         "registry_id": "gov.registry.land"
       }

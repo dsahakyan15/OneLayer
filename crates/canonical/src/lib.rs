@@ -7,13 +7,20 @@
 
 pub mod anchor;
 pub mod cbor;
+pub mod certificate;
 pub mod commit;
+pub mod manifest;
 pub mod vectors;
 
 pub use anchor::{AnchorFields, ANCHOR_PREIMAGE_LEN};
 pub use cbor::{encode, nfc, CborError, Value};
+pub use certificate::{
+    AnchorReference, CertificateBody, CertificateError, DisclosureMode, FieldProof, MerkleProof,
+    SignedCertificate,
+};
 pub use commit::{
     batch_leaf_hash, field_commitment, field_salt, field_tree_leaf_hash, genesis_anchor_hash,
     record_commitment, record_id_commitment, registry_id_hash, BatchRecord, BatchTree, CommitError,
     FieldEntry, FieldTree, RecordFieldKey,
 };
+pub use manifest::{ManifestFields, SignedManifest};

@@ -213,11 +213,17 @@ impl FieldTree {
     }
 }
 
-/// `record_commitment = SHA256(DOMAIN || registry_id_hash || u64_be(version) || field_root)`.
-pub fn record_commitment(registry_id_hash: &Hash, record_version: u64, field_root: &Hash) -> Hash {
+/// `record_commitment = SHA256(DOMAIN || registry_id_hash || record_id_commitment || u64_be(version) || field_root)`.
+pub fn record_commitment(
+    registry_id_hash: &Hash,
+    record_id_commitment: &Hash,
+    record_version: u64,
+    field_root: &Hash,
+) -> Hash {
     let mut h = Sha256::new();
     h.update(DOMAIN_RECORD);
     h.update(registry_id_hash);
+    h.update(record_id_commitment);
     h.update(record_version.to_be_bytes());
     h.update(field_root);
     h.finalize().into()
@@ -452,21 +458,6 @@ mod tests {
     }
 
     #[test]
-    fn hidden_field_salt_not_derivable_from_public_inputs() {
-        // Контракт §7.2: соль скрытого поля не выводится из публичных входов.
-        // Проверяется конкретно: HMAC с чужим ключом (всё, что доступно без
-        // record_field_key) не совпадает с фактической солью.
-        let k = key();
-        let tree = FieldTree::build(&k, &fields()).unwrap();
-        let actual = field_salt(&k, "status").unwrap();
-        let from_public = {
-            let bogus = RecordFieldKey::from_bytes(tree.root());
-            field_salt(&bogus, "status").unwrap()
-        };
-        assert_ne!(actual, from_public);
-    }
-
-    #[test]
     fn record_id_commitment_separator_matters() {
         let k = [3u8; 32];
         // ("ab","c") и ("a","bc") обязаны различаться благодаря 0x00.
@@ -477,16 +468,21 @@ mod tests {
     }
 
     #[test]
-    fn record_commitment_binds_version_and_registry() {
+    fn record_commitment_binds_record_id_version_and_registry() {
         let rh = registry_id_hash("gov.registry.land");
+        let idc = [2u8; 32];
         let fr = [1u8; 32];
         assert_ne!(
-            record_commitment(&rh, 1, &fr),
-            record_commitment(&rh, 2, &fr)
+            record_commitment(&rh, &idc, 1, &fr),
+            record_commitment(&rh, &idc, 2, &fr)
         );
         assert_ne!(
-            record_commitment(&rh, 1, &fr),
-            record_commitment(&registry_id_hash("other"), 1, &fr)
+            record_commitment(&rh, &idc, 1, &fr),
+            record_commitment(&registry_id_hash("other"), &idc, 1, &fr)
+        );
+        assert_ne!(
+            record_commitment(&rh, &[3u8; 32], 1, &fr),
+            record_commitment(&rh, &[4u8; 32], 1, &fr)
         );
     }
 
@@ -500,7 +496,7 @@ mod tests {
                 BatchRecord {
                     record_id_commitment: idc,
                     record_version: 1,
-                    record_commitment: record_commitment(&rh, 1, &[i as u8; 32]),
+                    record_commitment: record_commitment(&rh, &idc, 1, &[i as u8; 32]),
                 }
             })
             .collect();

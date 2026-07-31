@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+expected=${1:?expected anchor root hex required}
+project=onelayer-recovery-lab
+database=${project}-clean-room-db-1
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/../../.." && pwd)
+"$script_dir/fixture-guard" container "$database"
+if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "expected root must be 64 lowercase hexadecimal characters" >&2
+  exit 50
+fi
+actual=$(docker exec "$database" sh -eu -c 'PGPASSWORD=$(cat /run/secrets/restore_db_password); export PGPASSWORD; psql -U onelayer_restore -d onelayer_restored -Atc "select json_agg(json_build_object('"'"'internalRecordId'"'"', internal_record_id, '"'"'recordVersion'"'"', record_version::text, '"'"'status'"'"', status, '"'"'recordFieldKeyHex'"'"', record_field_key_hex) order by source_cursor) from synthetic_registry_record"' | node "$repo_root/apps/monitor/src/root-cli.ts")
+if [[ "$expected" != "$actual" ]]; then
+  echo "restored root does not match the saved Solana anchor" >&2
+  exit 51
+fi
+echo "restored root matches the saved Solana anchor"
