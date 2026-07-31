@@ -2,3 +2,7 @@ target/
 node_modules/
 .env
 *.log
+.anchor/
+test-ledger/
+onchain/yarn.lock
+onchain/package-lock.json

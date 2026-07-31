@@ -23,6 +23,7 @@
 |---|---|
 | `crates/canonical` | deterministic CBOR (RFC 8949), NFC, `field_salt`, `field_commitment`, field- и batch-деревья, `anchor_preimage` |
 | `crates/merkle` | RFC 6962: leaf/node hash, непарный узел без дублирования, proof |
+| `onchain/programs/alloc-spike` | spike `OL-A-04`: измерение предела выделения PDA. В продукт не переносится |
 
 TypeScript-реализация (`packages/canonical-ts`, `packages/merkle-ts`) пишется
 в Gate B **по нормативным документам, а не по Rust-коду**: общая библиотека
