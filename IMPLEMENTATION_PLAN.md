@@ -1,8 +1,8 @@
 # OneLayer — план имплементации
 
 **Базовый документ:** `OneLayer_Solana_Technical_Spec_RU.md` (v0.9, историческая проектная версия)
-**Источник заморозки протокола:** versioned-документы в `spec/`; пока их статус `draft`, решения §2 задают обязательные правки, а после Gate B замороженные документы имеют приоритет над планом и v0.9
-**Статус плана:** v2.4, 2026-08-01
+**Источник истины протокола:** versioned-документы в `spec/` заморожены для Gate B и имеют приоритет над этим планом и v0.9; любое нормативное изменение требует ADR и новой версии schema/account/package
+**Статус плана:** v2.5, 2026-08-01
 **Структура:** gate-ы A, B, C, D, E0, E — каждый с явным выходным решением
 **Горизонт:** Gate A–C (pilot + визуальный MVP на devnet) ≈ 6–8 месяцев; Gate D–E (production go-live) ≈ +10–12 месяцев; Phase 3 — отдельный горизонт после go-live
 
@@ -15,10 +15,14 @@
 **Proportional Engineering.** Минимальный поддерживаемый scope. Только доказательно необходимые проверки и security controls. Без спекулятивного hardening. Инфраструктура и абстракции добавляются после подтверждения потребности, а не заранее.
 
 **Следствия для этого плана:**
-- количество тестов не является acceptance criterion; критерий — покрытые инварианты;
+- количество тестов не является acceptance criterion; критерий — покрытые инварианты; добавляются только те проверки, что доказывают изменённое поведение или предотвращают наблюдавшуюся регрессию;
 - сервис выделяется в отдельный процесс только при подтверждённой границе развёртывания или владения;
 - транспорт, оркестрация, storage-абстракции добавляются, когда появляется второй потребитель;
-- всё, что не нужно для проверки следующей гипотезы, откладывается до gate-а, где оно нужно.
+- всё, что не нужно для проверки следующей гипотезы, откладывается до gate-а, где оно нужно;
+- security-работа пропорциональна фактической границе доверия: обязательные safeguards сохраняются, уязвимости, внесённые или открытые задачей, устраняются, но новые защитные фреймворки без подтверждённой модели угроз не вводятся;
+- расширение scope требует названного acceptance criterion, наблюдавшегося отказа или зафиксированного риска. Если его нет — работа не делается; если расширение меняет решение по существу — решение принимает владелец.
+
+Эти правила не отменяют проверки, обязательные по контрактам репозитория и release gates, применимым к изменённому поведению.
 
 **Явно вне scope до Gate E:** Kubernetes/Helm/Terraform/OPA, SIEM, мультисиг и timelock, threshold-церемонии, три независимых storage, два RPC-провайдера, banking SDK, algorithm transition, массовая выдача сертификатов.
 
@@ -28,7 +32,16 @@
 
 ## 1. История ревизий
 
-Текущая версия — **v2.4**. Изменения относительно v2.3:
+Текущая версия — **v2.5**. Изменения относительно v2.4:
+
+- источник истины приведён к фактическому статусу: `spec/*.md` уже frozen для Gate B, E0 и E;
+- исправлен incident-index contract: индекс обрабатывает finalized `IncidentOpened` и `IncidentResolved`, а Gate C проверяет текущий, а не недоказуемый исторический статус;
+- визуальный MVP привязан к существующему guarded devnet-контуру, но разводит CLI approval digests и интерактивную Wallet Standard подпись;
+- `certificateHash` перенесён на этап после finalized anchor; transaction flow дополнен failure/expiry/unknown states, IDL→Codama client и доказуемым Admin API contract;
+- детерминированный browser E2E отделён от guarded live-devnet smoke; понятие clean room оставлено только recovery-сценарию;
+- схема БД, QR/HTTPS-граница, on-chain negative cases, testing pyramid и Gate E access-control scope сверены с frozen specs и текущими migrations.
+
+Сохранённая история v2.4:
 
 - в Gate C добавлен визуальный MVP: Admin-панель для synthetic-записей, devnet anchor и выдачи сертификатов; OneLayer-панель для QR-сканирования и верификации;
 - визуальный flow разводит `certificateHash` и on-chain anchor: в Solana публикуются `merkleRoot` / `manifestHash`, а связь сертификата доказывается package-подписью и Merkle proof;
@@ -47,7 +60,7 @@
 
 ## 2. P0-решения: криптографический протокол
 
-Всё в этом разделе фиксируется **до регенерации и заморозки** golden vectors в Gate B. Существующие vectors Gate A считаются draft-артефактом.
+Решения этого раздела уже внесены в frozen-документы и golden vectors Gate B. Раздел сохраняет обоснования; при расхождении побеждает `spec/`, а изменение протокола идёт через ADR и новую версию.
 
 ### 2.1. Disclosure protocol — соли полей отделены от record nonce
 
@@ -92,7 +105,7 @@
                 листья отсортированы по (record_id_commitment, record_version)
 ```
 
-`record_id_commitment` входит в хэшируемый preimage, а не только задаёт порядок листьев. Иначе две записи одного реестра с одинаковыми `record_version` и `field_root` дали бы один `record_commitment`, и batch-proof не связывал бы содержимое с заявленным record ID. До Gate B существующие `spec/leaf-v1.md`, `crates/canonical` и vectors обновляются вместе; обязательны один golden vector и один differential case: одинаковые `registry_id_hash` / `record_version` / `field_root`, разные `record_id_commitment` → разные `record_commitment`.
+`record_id_commitment` входит в хэшируемый preimage, а не только задаёт порядок листьев. Иначе две записи одного реестра с одинаковыми `record_version` и `field_root` дали бы один `record_commitment`, и batch-proof не связывал бы содержимое с заявленным record ID. Frozen `spec/leaf-v1.md`, `crates/canonical` и vectors содержат golden vector и differential case: одинаковые `registry_id_hash` / `record_version` / `field_root`, разные `record_id_commitment` → разные `record_commitment`.
 
 **Двойное хэширование намеренное.** `*_commitment` — доменно-разделённое обязательство к содержимому; `*_leaf_hash` — RFC 6962-обёртка, отделяющая листья от внутренних узлов. Термины различаются нормативно, чтобы исключить неоднозначность при генерации golden vectors. Ни один вектор не использует слово «leaf» без префикса `field_tree_` или `batch_`.
 
@@ -128,7 +141,7 @@ key_encryption_version     TEXT  NOT NULL   -- версия KEK/KMS-ключа, 
 
 Одно поле, один механизм. В production — envelope encryption через KMS; в pilot — software KEK, не коммитится и не пишется в логи. Ротация касается только KEK: перешифровать `record_field_key_encrypted` можно массово, не трогая ни сертификаты, ни якоря. Вечное хранение старых версий master-ключа больше не требуется — этого требования у v2.1 нет.
 
-**Оговорка.** Множество путей полей само по себе утечка структуры: при `SELECTIVE_FIELDS` число листьев field-дерева видно из proof-а. Скрытие требует дополнения дерева до фиксированной степени двойки. Решение владельца (`OL-DEC-05`), по умолчанию **не** реализуется.
+**Оговорка.** Множество путей полей само по себе утечка структуры: при `SELECTIVE_FIELDS` число листьев field-дерева видно из proof-а. Для frozen v1 решено **не** дополнять дерево до фиксированной степени двойки; возврат к padding требует ADR и новой версии `leaf-v*`.
 
 `OL-SPEC-01` (Gate B, блокирующая)
 
@@ -174,7 +187,7 @@ anchor_hash = SHA-256(anchor_preimage)            // preimage ровно 260 б�
 
 **Решение для pilot (Gate C):**
 - `incident_sequence` назначает программа из монотонного счётчика `RegistryConfig.incident_count` — это необходимо для корректности назначения, а не индекс;
-- верификатор использует off-chain **incident index** (`GET /v1/incidents?registryId=&batchSequence=`), построенный из on-chain событий `IncidentOpened`; `registryId` обязателен, потому что `batch_sequence` монотонен только внутри реестра;
+- верификатор использует off-chain **incident index** (`GET /v1/incidents?registryId=&batchSequence=`), построенный из finalized on-chain событий `IncidentOpened` **и** `IncidentResolved`; `registryId` обязателен, потому что `batch_sequence` монотонен только внутри реестра;
 - пустой ответ индекса сам по себе не является доказательством отсутствия инцидентов: индекс мог потерять событие, отстать от finalized head или остановиться на старом слоте. Поэтому индекс обязан публиковать **watermark полноты**.
 
 **Индекс сообщает только `indexedThroughSlot`. Голову цепочки верификатор берёт сам.** Если бы индекс отдавал и то, и другое, зависший или скомпрометированный индекс объявлял бы устаревшую цепочку актуальной — самозаверение полноты.
@@ -198,8 +211,7 @@ indexLagSlots        = rpcFinalizedHeadSlot − indexedThroughSlot
   "incidentIndexStatus": "CHECKED",
   "indexedThroughSlot": 412345999,
   "rpcFinalizedHeadSlot": 412346040,
-  "indexLagSlots": 41,
-  "checkedAt": "2026-07-31T00:00:00Z"
+  "indexLagSlots": 41
 }
 ```
 
@@ -234,17 +246,15 @@ rpcHeadDifference = abs(rpcA.finalizedHead − rpcB.finalizedHead)
 
 Расхождение RPC **по данным** finalized-слота (разное содержимое аккаунта или разные транзакции на одной высоте) — другой случай: он не понижает incident-статус, а даёт `ANCHOR_DISPUTED` по §9.5 спецификации. `RPC_DISAGREEMENT` относится только к расхождению высот при проверке свежести индекса.
 
-**Что именно проверяется — оба состояния:**
-1. был ли открыт инцидент, покрывающий диапазон batch, на момент anchor;
-2. открыт ли такой инцидент **сейчас**.
+**Что именно проверяется в Gate C:** существует ли **сейчас** открытый инцидент, покрывающий batch. Инцидент может быть открыт спустя месяцы после публикации якоря, поэтому индекс должен быть близок к текущему finalized head, а не только к слоту anchor; `indexedThroughSlot >= anchor_slot` — необходимое, но недостаточное условие для `CHECKED`.
 
-Второе — основной пользовательский вопрос: инцидент может быть открыт спустя месяцы после публикации якоря. Поэтому индекс должен быть близок к текущему finalized head, а не только к слоту anchor, и `indexedThroughSlot >= anchor_slot` — необходимое, но недостаточное условие для `CHECKED`.
+Определение исторического состояния «инцидент был открыт в момент anchor» текущий контракт `{ range, status }` не доказывает: для этого API должен вернуть проверяемые `opened_slot` / `resolved_slot` либо ссылки на finalized события. Такое расширение требует отдельной версии контракта. Статусы сертификата `VERIFIED_HISTORICAL` и `SUPERSEDED` при этом остаются частью frozen verifier contract и вычисляются по lifecycle самого сертификата, а не подменяются incident-index эвристикой.
 
 **Открытое решение владельца.** Полностью автономная проверка (без backend) требует одного из:
 - перебора всех PDA `0..incident_count` через `getMultipleAccounts` — работает при десятках инцидентов, деградирует при тысячах, и это лишь смягчение, а не полноценный индекс;
 - отдельной on-chain структуры «batch range → incident» — существенное расширение формата.
 
-Ни то, ни другое не реализуется, пока автономное обнаружение инцидентов не станет явным acceptance criterion. Пункт вносится в §10 как решение владельца.
+Ни то, ни другое не реализуется, пока автономное обнаружение инцидентов не станет явным acceptance criterion. Пункт зафиксирован в §12 как решение владельца.
 
 `OL-SPEC-03`, `OL-DEC-01`
 
@@ -336,7 +346,7 @@ audit_hash = SHA-256(audit_preimage)
 | 2 | `AnchorEntryInputV1` (instruction data) отделён от `AnchorEntryV1` (storage); `operator` и `published_at` заполняет программа |
 | 3 | Составной ключ `(registry_id, batch_sequence)` во всех таблицах |
 | 4 | `max_entries_per_day` в config — источник истины; `capacity` в ledger — снимок на момент создания |
-| 5 | `governance_authority` и `emergency_authority` — адреса мультисига; проверка **не** on-chain, а процедурная (ceremony gate) |
+| 5 | В Gate C `governance_authority` и `emergency_authority` — отдельные test pubkey; в Gate E они переводятся на multisig/timelock по процедуре key ceremony |
 | 6 | `day_utc` = день публикации, не день событий; backlog обрабатывается coalescing-ом |
 | 7 | Genesis `last_anchor_hash = SHA256("ONELAYER:GENESIS:V1" || registry_id_hash)` |
 | 8 | `record_id_commitment = HMAC-SHA256(id_key_vN, registry_id \|\| 0x00 \|\| internal_record_id)` — разделитель обязателен |
@@ -382,7 +392,7 @@ audit_hash = SHA-256(audit_preimage)
 | `spec/batch-manifest-v1.md` | Байтовая сериализация для подписи, `manifestHash` от манифеста без подписи, Ed25519 |
 | `spec/anchor-chain-v1.md` | §2.2 `anchor_preimage`, genesis, §2.4 границы гарантий |
 | `spec/certificate-package-v1.md` | CBOR-кодирование, что подписывает issuer, состав по режимам раскрытия (§2.1: `fieldSalts` только раскрытых путей, поле `nonce` спецификации удалено), `recordIdCommitment`, `segmentIndex` и segment PDA, формат QR |
-| `spec/error-codes.md` | Коды §9.5 спецификации + on-chain коды + добавленные статусы верификатора (`VERIFIED_NO_INCIDENT_CHECK`, `incidentIndexStatus` со значениями `CHECKED/STALE/UNAVAILABLE/INDEX_INCONSISTENT/RPC_DISAGREEMENT`), единый источник для обеих реализаций |
+| `spec/error-codes.md` | Коды §9.5 спецификации + on-chain коды; полный verifier contract `VERIFIED/VERIFIED_HISTORICAL/VERIFIED_NO_INCIDENT_CHECK/SUPERSEDED/DISPUTED/INVALID` и `incidentIndexStatus` `CHECKED/STALE/UNAVAILABLE/INDEX_INCONSISTENT/RPC_DISAGREEMENT`; единый источник для обеих реализаций |
 
 ### 4.2. Golden vectors — около 50–70 суммарно
 
@@ -392,7 +402,7 @@ audit_hash = SHA-256(audit_preimage)
 | leaf / field tree | 8–12 | одно поле, все поля, selective с одним раскрытым, selective с несколькими, вложенное поле, отсутствующее поле, пара одинаковых roots/versions с разными `record_id_commitment`. Каждый вектор содержит **раздельно** `field_commitment`, `field_tree_leaf_hash`, `field_root`, `record_commitment`, `batch_leaf_hash` — двойное хэширование и привязка ID фиксируются явно |
 | merkle | 10–15 | 1, 2, 3, 4, 5, 7, 8 листьев (непарные узлы на разных уровнях), proof для первого/последнего/среднего |
 | manifest / anchor | 5–8 | `anchor_preimage`, genesis, snapshot_hash = нули и не-нули |
-| certificate | 5 | FULL_RECORD, SELECTIVE_FIELDS, повреждённая подпись, неподдерживаемая схема |
+| certificate | 5 | FULL_RECORD, SELECTIVE_FIELDS, повреждённая подпись, неподдерживаемая схема, подменённое раскрытое поле/proof |
 
 Векторы выбираются по классам эквивалентности, а не по количеству. Каждый вектор в `spec/vectors/` содержит вход, промежуточные значения и итоговый хэш.
 
@@ -434,32 +444,40 @@ synthetic change → canonicalize → batch → manifest → devnet anchor → c
 |---|---|
 | `OL-C-01` | On-chain: `initialize_registry`, `grant_operator`, `revoke_operator` |
 | `OL-C-02` | On-chain: `create_ledger_segment` по ADR-0002, capacity 46, монотонный `segment_index` внутри дня |
-| `OL-C-03` | On-chain: `publish_anchor` (§5.4), `anchor_hash` по §2.2, события |
+| `OL-C-03` | On-chain: `publish_anchor` (§8.4), `anchor_hash` по §2.2, события |
 | `OL-C-04` | On-chain: `seal_daily_ledger` запечатывает все сегменты дня; `entries_hash` считается по `segment_index` |
 | `OL-C-05` | On-chain: `pause_registry` / `resume_registry` |
-| `OL-C-06` | On-chain: `open_incident` / `resolve_incident`, счётчик `incident_count` |
+| `OL-C-06` | On-chain: `open_incident` / `resolve_incident`, счётчик `incident_count`; resolve обязан проверять `incident.registry == config.key()` |
 | `OL-C-10` | `crates/canonical` + `crates/merkle`: реализация по Gate B |
 | `OL-C-11` | `apps/pilot-pipeline`: чтение synthetic-источника, сопоставление с workflow-событием, canonical version, batch, манифест |
-| `OL-C-12` | `apps/pilot-pipeline`: публикация в devnet (обычный blockhash, software-ключ), отслеживание `finalized`, durable queue в PostgreSQL |
+| `OL-C-12` | `apps/pilot-pipeline`: единый builder/publisher для devnet, отслеживание `finalized` и durable queue в PostgreSQL; 72-часовой pilot подписывает tmpfs software test key, визуальный MVP — Wallet Standard test operator |
 | `OL-C-13` | `apps/pilot-pipeline`: выдача сертификата, оба режима раскрытия, `recordIdCommitment`, `segmentIndex` и segment PDA, QR (основной формат: URL + id + hash) |
-| `OL-C-14` | `apps/verifier`: алгоритм §8.3 спецификации, один RPC, проверка segment PDA, incident index scoped по `registryId` с watermark и правилом статуса (§2.3), REST по §9.1 |
+| `OL-C-14` | `apps/verifier`: алгоритм §8.3 спецификации, один RPC, проверка segment PDA, lifecycle-статусы `VERIFIED_HISTORICAL` / `SUPERSEDED`, event-backed incident index scoped по `registryId` с watermark (§2.3), REST по §9.1 |
 | `OL-C-15` | Схема БД (§6.2): durable queue + неизменяемые подписанные данные `publish_attempt` с однократным разрешением outcome, append-only audit journal без hash-chain (§2.6) |
-| `OL-C-20` | E2E smoke: synthetic change → VERIFIED в верификаторе |
-| `OL-C-21` | `apps/mvp-web`: один React/Next.js-клиент с двумя route groups — закрытая Admin-панель и публичная OneLayer-панель; общие design tokens и status components, но разные trust boundaries |
-| `OL-C-22` | Admin: список и детали synthetic-сертификатов; wizard ручного ввода и JSON-импорта synthetic-записи; preview canonical payload, disclosed fields, `recordIdCommitment` и будущего `certificateHash` |
-| `OL-C-23` | Admin: подготовка batch и devnet anchor с видимыми `merkleRoot`, `manifestHash`, `previousAnchorHash`, program ID, segment PDA, fee payer, cluster, оценкой fee/rent и simulation logs |
-| `OL-C-24` | Wallet Standard через `@solana/kit-plugin-wallet` + `@solana/react`; только test wallet в `solana:devnet`, без загрузки keypair/seed в UI; явный review и click-to-sign после успешной simulation |
-| `OL-C-25` | Transaction state machine: `DRAFT → PREPARED → SIMULATED → SIGNED → SUBMITTED → FINALIZED → ISSUED`; blockhash-expiry retry с новой simulation, идемпотентность double-click/reload, запрет `ISSUED` до finalized account/transaction checks |
+| `OL-C-20` | Детерминированный integration smoke: synthetic change → `VERIFIED` в verifier на локальной Solana-среде |
+| `OL-C-21` | `apps/mvp-web`: один Next.js App Router client с двумя route groups — закрытая Admin-панель и публичная OneLayer-панель; общие design tokens/status components и разные trust boundaries |
+| `OL-C-22` | Admin: список и детали synthetic-сертификатов; wizard ручного ввода/JSON-импорта; до anchor показывает canonical payload, disclosed fields, `recordIdCommitment`, `fieldRoot`, `recordCommitment` и batch leaf; `certificateHash` появляется только после finalized anchor и выдачи package |
+| `OL-C-23` | Admin: review подготовленной транзакции показывает program ID, instruction, все accounts с signer/writable flags, registry, segment PDA, batch, roots, fee payer, fee/rent и simulation logs; RPC accounts проверяются по owner, длине и discriminator |
+| `OL-C-24` | Wallet Standard через `@solana/kit-plugin-wallet` + `@solana/react`; только browser test operator в `solana:devnet`, без keypair/seed в UI; browser подписывает точное prepared message, backend повторно проверяет intent/signature и передаёт signed wire transaction единственному durable publisher |
+| `OL-C-25` | Transaction state machine: `DRAFT → PREPARED → SIMULATED → SIGNED → SUBMITTED → FINALIZED → ISSUED` с ветками `SIMULATION_FAILED`, `SIGNING_REJECTED`, `EXPIRED`, `UNKNOWN`, `FAILED`; `UNKNOWN` только reconciles известную signature, `ISSUED` запрещён до finalized checks |
 | `OL-C-26` | Admin: выдача certificate package после `FINALIZED`, QR SVG/PNG, copy/download URL, transaction signature и Solana Explorer devnet link; timeline операции без секретов в logs |
 | `OL-C-27` | OneLayer: QR из камеры, image upload и manual URL/package input; проверка QR hash binding, issuer signature, field/batch proof, program/account ownership, finalized transaction и incident index |
-| `OL-C-28` | OneLayer: отдельные result views `VERIFIED`, `INVALID`, `DISPUTED`, `VERIFIED_NO_INCIDENT_CHECK`; показ причины, cluster, slot, signature, index lag и раскрытых полей без выдачи скрытых данных |
-| `OL-C-29` | Browser E2E: Admin создаёт synthetic-запись → simulation → test-wallet approval → finalized devnet anchor → certificate → QR → OneLayer `VERIFIED`; подмена package/QR → `INVALID`, direct synthetic DB tampering → `DISPUTED` |
+| `OL-C-28` | OneLayer: отдельные result views `VERIFIED`, `VERIFIED_HISTORICAL`, `SUPERSEDED`, `INVALID`, `DISPUTED`, `VERIFIED_NO_INCIDENT_CHECK`; причина, cluster, slot, signature, index lag и раскрытые поля без скрытых данных |
+| `OL-C-29` | Детерминированный browser E2E на локальном Surfpool с mock Wallet Standard: happy path до QR → `VERIFIED`, package/QR tampering → `INVALID`, direct synthetic DB tampering → `DISPUTED`; live devnet не является обычным CI-тестом |
+| `OL-C-30` | `apps/mvp-web` расширяет существующий Compose-проект `deploy/devnet-demo`: сохраняет labels/networks, synthetic marker, tmpfs server keys и loopback-only binding, добавляя один UI-port. Program deploy остаётся CLI-only с deploy approval digest; CLI publish сохраняет tx digest, а UI publish требует reviewed click + wallet prompt и exact-intent validation |
+| `OL-C-31` | Admin: runtime-generated test credentials в tmpfs, короткая server-side session с `HttpOnly`/`SameSite` cookie и CSRF-защитой mutation; `operator` может публиковать, `auditor` только читать; роль берётся только из server session, не из client state |
+| `OL-C-32` | Anchor IDL → Codama → checked-in Kit-native TypeScript client; CI регенерирует его и ломается при drift. Ручная Borsh-сериализация, PDA seeds и account layout во frontend запрещены |
+| `OL-C-33` | Versioned Admin API: idempotency key, immutable intent hash + expiry, server-session role checks и повторная валидация signed wire transaction перед сохранением/отправкой |
+| `OL-C-34` | Один guarded live-devnet browser smoke перед презентацией/release: отдельное явное approval, synthetic fixture/test keys, finalized transaction → certificate → QR → `VERIFIED`; в default CI не запускается |
+| `OL-C-35` | Presentation preflight проверяет Docker daemon/socket access, Compose, toolchain, devnet-only RPC, test-key balance/rent, ports и synthetic marker; отсутствие `rg` использует portable fallback, а недоступный обязательный dependency завершает запуск до создания новых demo artifacts |
 
 ### 5.2. Чего в Gate C нет
 
 HSM, durable nonce, два RPC, мультисиг, три хранилища манифестов (одно + локальная копия), Monitor, snapshots, recovery, algorithm transition, SIEM, Kubernetes, banking SDK.
 
-Обоснование по durable nonce: он решает протухание blockhash при медленной HSM-подписи (100–2000 мс + очередь). С software-ключом подпись занимает микросекунды, 150 слотов хватает с запасом. Механизм добавляется вместе с HSM в Gate E.
+Существующие `clean-fixture.dump` и `deploy/recovery-lab` — demo/prototype artifacts. Fixture-only reset/recovery в Gate C не является нормативным `SnapshotPackageV1`, threshold recovery или доказательством выхода Gate E0.
+
+В Gate C используется свежий blockhash, полученный непосредственно перед simulation/signing, вместе с `lastValidBlockHeight`. Интерактивный review может пережить окно валидности; в таком случае flow завершается `EXPIRED` и возвращается в `PREPARED` с новой simulation — старую транзакцию не отправляет. Durable nonce остаётся Gate E для offline/HSM-signing и длинных очередей.
 
 ### 5.3. Модель развёртывания pilot
 
@@ -469,7 +487,7 @@ HSM, durable nonce, два RPC, мультисиг, три хранилища м
 
 ### 5.4. Визуальный MVP
 
-**Цель:** превратить технический Gate C flow в два понятных пользовательских контура, не меняя замороженный криптографический протокол.
+**Цель:** превратить технический Gate C flow в два понятных пользовательских контура, не меняя замороженный криптографический протокол. После однократного guarded deploy программы и выдачи test operator role полный путь от synthetic-записи до публичной проверки сертификата выполняется через UI. Monitor (Gate D) и recovery-консоль (Gate E0) в MVP не входят.
 
 ```text
 Admin panel
@@ -486,22 +504,37 @@ OneLayer panel
     → QR hash binding
       → certificate + Merkle proof
         → finalized Solana anchor + incident index
-          → VERIFIED / INVALID / DISPUTED / VERIFIED_NO_INCIDENT_CHECK
+          → VERIFIED / VERIFIED_HISTORICAL / SUPERSEDED
+            / INVALID / DISPUTED / VERIFIED_NO_INCIDENT_CHECK
 ```
 
 **Граница on-chain.** Admin-панель не записывает отдельный `certificateHash` в Solana и не создаёт второй протокол. Программа якорит batch `merkleRoot` и `manifestHash`; certificate package содержит Merkle proof и связывает сертификат с finalized anchor. UI показывает эти две величины раздельно.
 
-**Архитектура UI.** Одно приложение `apps/mvp-web`, один Solana Kit client и общие визуальные primitives. Admin и OneLayer — разные route groups и access policies, но не два frontend-репозитория. Wallet hooks живут только в client leaf-components; публичная верификация не требует wallet.
+**Архитектура UI.** Одно приложение `apps/mvp-web` на Next.js App Router, один сгенерированный Solana Kit client и общие визуальные primitives. Admin и OneLayer — разные route groups и access policies, но не два frontend-репозитория. Wallet hooks живут только в client leaf-components; публичная верификация не требует wallet. Browser обращается к Admin API и verifier через same-origin `/api/admin/*` и `/api/verify/*` proxy; Compose-сервисы остаются во внутренней сети, новый широкий CORS не открывается.
+
+**Среда исполнения — существующий demo-контур.** MVP разворачивается в guarded Compose-проекте `deploy/devnet-demo` (`OL-C-30`): synthetic marker, tmpfs server keys, labels/networks и loopback-only binding сохраняются; добавляется только UI-port. Program deploy/upgrade остаётся CLI-only и требует deploy approval digest. CLI automated publish сохраняет tx approval digest; browser publish использует отдельную интерактивную границу — reviewed click, Wallet Standard prompt и server-side exact-intent validation. Эти механизмы не подменяют друг друга.
+
+Текущий fixture incident endpoint годится только для demo-сценария и не закрывает `OL-C-14`: выход Gate C требует индекса, построенного из finalized `IncidentOpened` / `IncidentResolved` с watermark. CLI-runner `deploy/devnet-demo/demo` остаётся воспроизводимым параллельным happy path, но browser E2E работает через UI/API, а не запускает shell-команды из браузера.
+
+CLI сохраняет one-command сценарии `demo happy-path`, `demo incident` и опциональный `demo recovery`. `demo reset` удаляет/пересоздаёт только явно названные fixture resources после label + synthetic-marker checks; broad Docker cleanup запрещён. Preflight обязан fail closed при недоступном Docker socket, а не оставлять certificate/QR от старого запуска как результат нового.
+
+**Design system.** Один документированный набор design tokens (цвет, типографика, spacing, radius, focus) и общие status components. Статус выражается парой «иконка + текст», никогда одним цветом. Для MVP обязательна одна доступная high-contrast тема; вторая тема опциональна только без дублирования state/layout logic.
+
+**Роли Admin.** `operator` — подготовка batch, simulation, запрос подписи, выдача сертификата; `auditor` — read-only список, детали и timeline. Runtime-generated test credentials живут в tmpfs; сервер выдаёт короткую `HttpOnly`/`SameSite` session cookie и требует CSRF token для mutations. Роль берётся из server session, а не из `localStorage`, query/body или скрытия кнопок. Это demo access separation; внешний IdP, production SSO/RBAC и аудит доступа — Gate E.
 
 **Админские экраны:** dashboard; certificate list/detail; create/import wizard; canonical/disclosure preview; batch preparation; transaction review + simulation; publish progress; issued certificate + QR; append-only operation timeline. Admin API — тонкий HTTP-адаптер в `pilot-pipeline`, а не новый сервис.
 
 **Экраны OneLayer:** scan; camera permission/fallback; image upload; manual input; checking progress; result; public certificate detail. Камера — progressive enhancement: отказ permission никогда не блокирует image/manual flow.
 
-**Transaction review — блокирующий шаг.** До wallet prompt UI обязан показать cluster `devnet`, program ID, registry, segment PDA, batch sequence, `merkleRoot`, `manifestHash`, fee payer, оценку fee/rent и simulation result. Поля транзакции после simulation ещё раз сверяются с prepared intent. Любой endpoint или wallet на mainnet отклоняется до подписи.
+**Transaction review — блокирующий шаг.** До wallet prompt UI показывает cluster `devnet`, program ID, instruction, accounts с signer/writable flags, registry, segment PDA, batch sequence, `merkleRoot`, `manifestHash`, `previousAnchorHash`, fee payer, fee/rent и simulation logs. RPC account data считается недоверенным и проверяется по owner, длине и discriminator. Любой endpoint/wallet не на devnet отклоняется до подписи.
 
-**Test identity.** Gate C использует только test wallet, отдельный от governance/upgrade authority. Его operator role выдаётся однократной guarded devnet-операцией с отдельным явным подтверждением. Browser не принимает keypair files, private keys и seed phrases.
+Admin API создаёт typed intent, строит message, фиксирует `intentHash`, idempotency key, expiry и simulation result. Browser подписывает именно эти байты. Backend до broadcast проверяет wallet signature и соответствие signed wire transaction сохранённому intent, атомарно создаёт `publish_attempt`, затем передаёт её единственному durable publisher. Второго client-side publisher нет; `UNKNOWN` reconciles известную signature и никогда не вызывает слепую пересборку.
 
-**Вне scope MVP:** mainnet, production credentials, реальные кадастровые данные, production SSO/RBAC, bulk issuance, native mobile app, push/email, внешняя публикация и analytics. Внешний staging и HTTPS-хостинг требуют отдельного разрешения; loopback demo остаётся базовым контуром.
+**Test identity.** Browser test wallet имеет только operator role и отделён от governance/upgrade authority. Issuer software test key остаётся server-side в tmpfs и никогда не попадает в browser. Operator role выдаётся однократной guarded devnet-операцией с отдельным явным подтверждением. Browser не принимает keypair files, private keys и seed phrases.
+
+**QR transport.** Нормативный QR использует HTTPS. Единственное исключение MVP — точный loopback origin (`http://127.0.0.1`/`http://localhost`), визуально помеченный `DEVNET SYNTHETIC DEMO`; любой другой HTTP URL отклоняется. Телефон не может открыть loopback хоста Docker, поэтому responsive/mobile и camera flow проверяются в fresh browser context/emulator на том же host. Cross-device phone scan требует отдельно разрешённого HTTPS staging и не входит в локальный DoD.
+
+**Вне scope MVP:** mainnet, production credentials, реальные кадастровые данные, внешний IdP и production SSO/RBAC (демо-роли `OL-C-31` их не заменяют), локализация интерфейса, PWA/офлайн-режим, формальная сертификация доступности, bulk issuance, native mobile app, push/email, внешняя публикация и analytics. Внешний staging и HTTPS-хостинг требуют отдельного разрешения; loopback demo остаётся базовым контуром.
 
 **Acceptance criteria визуального MVP:**
 
@@ -509,12 +542,17 @@ OneLayer panel
 2. Devnet-транзакция симулируется; review показывает все поля из блокирующего шага; подпись запрашивается только после успеха simulation.
 3. Повторный click/reload не создаёт второй batch или вторую транзакцию; протухший blockhash возвращает flow к preparation/simulation.
 4. Сертификат не выдаётся до `finalized`; после `finalized` Admin получает certificate package, `certificateHash`, QR и signature/slot.
-5. QR, отсканированный камерой или загруженный как image, даёт OneLayer `VERIFIED`; manual input даёт тот же результат.
-6. Подмена QR hash/package/field даёт `INVALID`; direct synthetic DB tampering даёт `DISPUTED`; stale/unavailable incident index не показывает зелёный `VERIFIED`, а даёт `VERIFIED_NO_INCIDENT_CHECK`.
+5. QR, прочитанный камерой или загруженный как image в fresh browser context на demo-host, даёт OneLayer `VERIFIED`; manual input даёт тот же результат. Cross-device scan проверяется только на отдельно разрешённом HTTPS staging.
+6. Подмена QR hash/package/field даёт `INVALID`; direct synthetic DB tampering даёт `DISPUTED`; stale/unavailable incident index не показывает зелёный `VERIFIED`, а даёт `VERIFIED_NO_INCIDENT_CHECK`; fixtures покрывают также `VERIFIED_HISTORICAL` и `SUPERSEDED`.
 7. UI адаптивен для desktop и mobile scan, управляется с клавиатуры, не полагается только на цвет для status и имеет camera fallback.
-8. Clean-room browser run проходит весь flow из `OL-C-29` и сохраняет screenshot/trace как demo artifact.
+8. Fresh browser context проходит локальный детерминированный flow `OL-C-29` и сохраняет screenshot/trace; guarded live-devnet evidence создаётся отдельно задачей `OL-C-34`.
+9. Оба контура собраны из одного набора design tokens/status components; обязательная high-contrast тема читается без опоры на цвет.
+10. Пользователь с ролью `auditor` видит данные, но не может подготовить batch, запросить подпись или выдать сертификат; ограничение проверяется на Admin API, а не только скрытием элементов UI.
+11. Synthetic marker проверяется до data operations. Deploy и CLI publish не проходят без своих approval digests; browser publish не проходит без reviewed intent, wallet prompt и server-side signed-transaction validation.
+12. Default CI проходит IDL→Codama drift check и детерминированный Surfpool/browser E2E без расхода SOL; один `OL-C-34` live-devnet smoke запускается только с отдельным подтверждением перед презентацией/release.
+13. На clean host preflight либо подтверждает все зависимости, либо сообщает точную remediation и выходит до mutation; one-command CLI happy path воспроизводим, а fixture-only reset не затрагивает другие Compose projects, containers, images или volumes.
 
-**Выход Gate C:** сквозной поток работает 72 часа на synthetic-нагрузке без ручного вмешательства; `anchor_sequence_gap_total = 0`; повторная сборка одного диапазона даёт идентичный `manifestHash`; clean-room browser flow `OL-C-29` заканчивается QR → `VERIFIED`, а tampering — `INVALID`/`DISPUTED` без ложного зелёного статуса.
+**Выход Gate C:** сквозной поток работает 72 часа на synthetic-нагрузке без ручного вмешательства; `anchor_sequence_gap_total = 0`; повторная сборка одного диапазона даёт идентичный `manifestHash`; event-backed incident index обрабатывает open/resolve; локальный browser flow `OL-C-29` и отдельный approved smoke `OL-C-34` заканчиваются QR → `VERIFIED`, а tampering — `INVALID`/`DISPUTED` без ложного зелёного статуса.
 
 ---
 
@@ -535,17 +573,19 @@ onelayer/
 │   └── merkle/
 ├── packages/
 │   ├── canonical-ts/        # независимая TS-реализация
-│   └── merkle-ts/
+│   ├── merkle-ts/
+│   └── onchain-client/       # Codama-generated Kit client; checked in + drift check
 ├── apps/
 │   ├── pilot-pipeline/      # Rust, один процесс, модули-библиотеки внутри
-│   ├── mvp-web/             # React/Next.js, Admin + public OneLayer route groups
+│   ├── mvp-web/             # Next.js App Router, Admin + public OneLayer route groups
 │   └── verifier/            # TS, REST
 ├── tests/e2e/
 ├── db/migrations/
+├── deploy/devnet-demo/       # guarded Compose-контур Gate C: фикстура, approval digests, CLI-runner
 └── docs/adr/
 ```
 
-Появляется позже, по факту потребности: `apps/monitor` (Gate D), `crates/hsm` + вынесенный publisher (Gate E), `tools/recovery` (Gate E), `deploy/` (Gate E, после `OL-A-07`).
+Появляется позже, по факту потребности: `apps/monitor` (Gate D), `crates/hsm` + вынесенный publisher (Gate E), `tools/recovery` (Gate E), production-топология в `deploy/` (Gate E, после `OL-A-07`).
 
 ### 6.2. Схема БД — целевой вид
 
@@ -565,7 +605,7 @@ CREATE TABLE anchor_batch (
   merkle_root     BYTEA  NOT NULL,
   manifest_hash   BYTEA  NOT NULL,
   previous_anchor_hash BYTEA NOT NULL,
-  anchor_hash     BYTEA  NOT NULL,          -- §2.2, для сверки с on-chain
+  anchor_hash     BYTEA,                    -- появляется после on-chain publish
   snapshot_hash   BYTEA,
   status          TEXT   NOT NULL CHECK (status IN
                     ('PREPARED','SIGNED','SUBMITTED','FINALIZED','DISPUTED','FAILED')),
@@ -573,6 +613,8 @@ CREATE TABLE anchor_batch (
   solana_slot     BIGINT,
   prepared_at     TIMESTAMPTZ NOT NULL,
   finalized_at    TIMESTAMPTZ,
+  CHECK (anchor_hash IS NULL OR octet_length(anchor_hash) = 32),
+  CHECK (status <> 'FINALIZED' OR anchor_hash IS NOT NULL),
   PRIMARY KEY (registry_id, batch_sequence)
 );
 
@@ -608,7 +650,7 @@ CREATE TABLE publish_attempt (
   registry_id     TEXT   NOT NULL,
   batch_sequence  BIGINT NOT NULL,
   attempt_no      INT    NOT NULL,
-  transaction_b64 TEXT   NOT NULL,          -- построенная транзакция
+  transaction_b64 TEXT   NOT NULL,          -- точные signed wire bytes попытки
   signature       TEXT   NOT NULL,          -- подпись этой попытки
   recent_blockhash TEXT  NOT NULL,
   submitted_to    TEXT[] NOT NULL DEFAULT '{}',
@@ -650,6 +692,9 @@ CREATE TABLE source_cursor_state (
 |---|---|
 | Внутри pipeline | вызовы функций в одном процессе; состояние — транзакции PostgreSQL |
 | Pipeline → Publisher | `publish_queue` с claim/lease |
+| Browser → `mvp-web` | same-origin HTTPS; exact loopback HTTP разрешён только для devnet demo |
+| `mvp-web` → Admin API / verifier | server-side same-origin proxy; внутренний HTTP в Compose network, без публичного CORS |
+| Publisher → Solana | JSON-RPC только к allowlisted devnet endpoint в Gate C |
 | Публичный verifier | REST |
 | Monitor → источники | прямое чтение (реплика, Solana RPC, хранилище манифестов) |
 
@@ -668,15 +713,15 @@ gRPC и protobuf не вводятся, пока не появится вызо�
 Для каждой инструкции — минимальный набор негативных тестов, соответствующий её уникальным account constraints и state invariants.
 
 `publish_anchor` (больше всего инвариантов):
-неавторизованный signer · отозванная роль · истёкшая роль · роль без `PERM_PUBLISH_ANCHOR` · роль чужого реестра · `batch_sequence` повтор/пропуск · неверный `previous_anchor_hash` · `registry_version` назад · `cursor_start > cursor_end` · sealed ledger · переполненный ledger · ledger чужого дня · ledger чужого реестра · `paused`.
+неавторизованный signer · отозванная роль · истёкшая роль · роль без `PERM_PUBLISH_ANCHOR` · роль чужого реестра · пустой batch · `batch_sequence` повтор/пропуск · неверный `previous_anchor_hash` · `registry_version` назад · `cursor_start > cursor_end` · несовпадение schema/hash/tree algorithm · sealed ledger · переполненный ledger · ledger чужого дня · ledger чужого реестра · `paused`.
 
-`create_ledger_segment`: повторное создание · чужой реестр · неавторизованная роль · неверный следующий `segment_index` · capacity не равна 46.
-`seal_daily_ledger`: повторный seal · чужой сегмент · пропуск сегмента дня · неавторизованная роль.
+`create_ledger_segment`: повторное создание · чужой реестр · неавторизованная роль · неверный следующий `segment_index` · capacity не равна 46 · paused registry · неверный `day_utc`.
+`seal_daily_ledger`: повторный seal · чужой сегмент · пропуск сегмента дня · пустой день · неавторизованная роль.
 `grant_operator` / `revoke_operator`: не-governance signer · повторный grant.
 `pause` / `resume`: не-emergency signer на pause · не-governance на resume.
-`open_incident` / `resolve_incident`: роль без `PERM_REPORT_INCIDENT` · resolve не-governance · повторный resolve.
+`open_incident` / `resolve_incident`: роль без `PERM_REPORT_INCIDENT` · неверный/пустой batch range · resolve не-governance · повторный resolve · incident чужого registry.
 
-Плюс: property-тест стабильности zero-copy layout (размер и смещения не менялись), замер CU по `publish_anchor` с регресс-гейтом, один fuzz-прогон instruction data перед релизом.
+Пирамида: быстрые property/invariant tests в LiteSVM или Mollusk; integration в Surfpool с synthetic fixtures; browser E2E с mock Wallet Standard. Плюс property-тест стабильности zero-copy layout, замер CU по `publish_anchor` с regression gate и fuzz instruction data перед release. Live devnet запускается только guarded smoke `OL-C-34`, не на каждый PR.
 
 ### 7.2. Off-chain
 
@@ -690,7 +735,8 @@ Focused property tests: Unicode NFC, decimal, сортировка массив�
 - сертификат с подменёнными: `recordIdCommitment`, значением поля, солью, field-proof, batch-proof, `merkleRoot`, `programId`, `segmentIndex`, segment PDA;
 - сертификат для batch с открытым инцидентом;
 - incident index недоступен / отдаёт лаг выше `maxIndexLagSlots` / не дошёл до `anchor_slot` / отдаёт ответ без watermark → `VERIFIED_NO_INCIDENT_CHECK`, статусы `UNAVAILABLE`/`STALE`/`STALE`/`UNAVAILABLE` соответственно; запрос без совпадающего `registryId` отвергается;
-- RPC вернул `confirmed` вместо `finalized`.
+- lifecycle fixtures для `VERIFIED_HISTORICAL` и `SUPERSEDED`; finalized `IncidentOpened` / `IncidentResolved` меняют текущий результат индекса без попытки вывести недоступное историческое состояние;
+- RPC вернул `confirmed` вместо `finalized`;
 - Admin UI: mainnet endpoint/wallet, неуспешная simulation, wallet rejection, blockhash expiry, reload/double-click в каждом transaction state; ни один сценарий не выдаёт certificate до `finalized`;
 - OneLayer UI: camera denied/unavailable, QR image без payload, неверный QR hash, подменённый package, `DISPUTED`, устаревший incident index; все статусы проверяются browser E2E и не сводятся к цвету.
 
@@ -702,7 +748,7 @@ Focused property tests: Unicode NFC, decimal, сортировка массив�
 
 ### 7.3. Что не делается
 
-Квоты «N тестов на инструкцию», 95%-покрытие как самоцель, 100 повторных сборок (достаточно 3), ежедневные прогоны на 10⁶ записей, ежедневный полный devnet E2E (достаточно одного smoke-теста в CI и полного прогона перед релизом).
+Квоты «N тестов на инструкцию», 95%-покрытие как самоцель, 100 повторных сборок (достаточно 3), ежедневные прогоны на 10⁶ записей и live-devnet транзакции в default CI. Детерминированный локальный E2E выполняется в CI; guarded devnet smoke — один раз перед презентацией/release.
 
 ---
 
@@ -732,7 +778,7 @@ seed: ["ledger", config, day_utc, u16_le(segment_index)]
 capacity: 46 entries
 ```
 
-Три сегмента покрывают 138 entries в сутки против целевых 96 без realloc-инструкции и промежуточного состояния «ledger создан, но не доращён». Если аккаунты хранятся навсегда, rent-exempt капитал растёт примерно на 77.49 SOL в год. Перед mainnet измерение повторяется на актуальном validator runtime; это проверка release gate 4, а не compatibility layer.
+Три сегмента покрывают 138 entries в сутки против целевых 96 без realloc-инструкции и промежуточного состояния «ledger создан, но не доращён». Если аккаунты хранятся навсегда, rent-exempt капитал растёт примерно на 77.49 SOL в год. Перед mainnet измерение повторяется на актуальном validator runtime как вход в program audit и budget review; само измерение release gate 4 не закрывает.
 
 ### 8.3. Модель хранения ledger — решение владельца
 
@@ -928,7 +974,7 @@ Shamir-разделение применяется **только к KEK**. От
 
 ### 10.6. Артефакты
 
-Каталог создаётся **при наступлении Gate E0**, не раньше:
+Каталог `deploy/recovery-lab/` уже существует как prototype. Его наличие не означает прохождение Gate E0: при наступлении gate-а он обязан удовлетворить контрактам §10.1–10.5 и пройти полный acceptance drill.
 
 ```text
 deploy/recovery-lab/
@@ -958,7 +1004,8 @@ Gate E0 выполняется на synthetic-данных и потому **н�
 | Ключи | HSM-интеграция (operator, issuer), durable nonce, разделение fee payer / operator, мультисиг + timelock на governance и upgrade authority, key ceremony, ротация с перекрытием (UC-15) |
 | Надёжность | Два независимых RPC + правило разрешения расхождений, три независимых хранилища манифестов, backlog coalescing (§2.7 п.6) |
 | Recovery | Snapshot Coordinator, custodian replicas с Object Lock, threshold 3-of-5, Recovery Toolkit (воспроизводимая офлайн-сборка), **обязательный restore drill** (release gate 7) |
-| Аудит | Внешний аудит программы (gate 4), penetration test (gate 5), security exercises §15.3 спецификации |
+| Доступ | Реальный IdP/SSO, production RBAC, CSRF/session policy, least privilege и аудит административных действий |
+| Аудит | Внешний аудит программы (gate 4); penetration test (gate 5) охватывает backend, Admin/OneLayer web, API/proxy, wallet intent/signing flow; security exercises §15.3 спецификации |
 | Развёртывание | Топология по результатам `OL-A-07`, изоляция Publisher, DMZ для verifier, наблюдаемость и алерты по §14.1 спецификации |
 | Протокол | `transition_algorithm`, `rotate_governance` |
 | Pilot | 60-дневный shadow pilot на боевых данных без юридических последствий (gate 6), FP rate < 0.1% |
@@ -1005,10 +1052,9 @@ Gate E0 — единственный блок, выполнимый до зав�
 | `OL-DEC-02` | `last_source_cursor_end` on-chain (§2.4) | низкая, но жёсткая связка с семантикой курсора | после Gate A |
 | `OL-DEC-03` | Sentinel-контракт для пустых интервалов (§2.5) | средняя | если требует внешний аудит |
 | `OL-DEC-04` | Модель хранения ledger A/B/C (§8.3) | C — средняя | до go-live |
-| `OL-DEC-05` | Padding field-дерева до степени двойки (скрытие числа полей, §2.1) | низкая | до Gate B, если утечка структуры неприемлема |
 | `OL-DEC-06` | Immutable program vs governed upgrades после аудита | — | Gate E |
 | `OL-DEC-07` | Audit hash-chain и её якорение в batch (§2.6) | низкая, контракт определён заранее | при требовании доказывать целостность журнала внешней стороне |
-| `OL-DEC-08` | `maxIndexLagSlots` (по умолчанию 300 слотов) и `maxRpcHeadDifference` для incident index (§2.3) | — | `maxIndexLagSlots` — до Gate C; `maxRpcHeadDifference` — до Gate E, вместе со вторым RPC |
+| `OL-DEC-08` | `maxRpcHeadDifference` для incident index (§2.3); `maxIndexLagSlots = 300` уже зафиксирован как Gate C default | — | Gate E, вместе со вторым RPC |
 
 ---
 
@@ -1028,6 +1074,7 @@ Gate E0 — единственный блок, выполнимый до зав�
 | R10 | Смена схемы после production | высокое | `transition_algorithm` в Gate E; репетиция перехода — обязательное условие Phase 3 |
 | R11 | Преждевременная декомпозиция замедляет pilot | среднее | §5.3: один процесс до подтверждённой границы развёртывания |
 | R12 | UI показывает «успех» после signature, но до finalization, или повторно публикует batch | высокое | §5.4: явная transaction state machine, simulation-before-signing, idempotency key, account/transaction checks и `ISSUED` только после `finalized` |
+| R13 | Демо-логин `OL-C-31` воспринимается как готовый контроль доступа | среднее | §5.4: роли ограничивают Admin API, но не заменяют SSO/RBAC; MVP работает только на loopback и synthetic-данных, реальный access control — Gate E |
 
 ---
 
