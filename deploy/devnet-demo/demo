@@ -15,6 +15,25 @@ export ONELAYER_WEBSOCKET_URL=wss://api.devnet.solana.com
 export ONELAYER_TEST_KEYPAIR_PATH="$runtime/test-payer.json"
 export ONELAYER_PROGRAM_ID=6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo
 
+ensure_docker_access() {
+  docker info >/dev/null 2>&1 && return
+
+  local current_user docker_members quoted_command
+  current_user=$(id -un)
+  docker_members=$(getent group docker 2>/dev/null | cut -d: -f4 || true)
+  if [[ ${ONELAYER_DOCKER_GROUP_REEXEC:-0} != 1 && ",$docker_members," == *",$current_user,"* ]]; then
+    printf -v quoted_command '%q ' "$demo_dir/demo" "$@"
+    exec sg docker -c "ONELAYER_DOCKER_GROUP_REEXEC=1 $quoted_command"
+  fi
+
+  echo "Docker daemon is not accessible; user $current_user must be a member of the docker group" >&2
+  exit 41
+}
+
+case "$command" in
+  happy-path|incident|recovery|reset) ensure_docker_access "$@" ;;
+esac
+
 verify_certificate() {
   curl --fail-with-body --silent --show-error http://127.0.0.1:8090/v1/certificates/08080808080808080808080808080808/package > "$artifacts/package.json"
   node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).package_base64url))' < "$artifacts/package.json" > "$artifacts/package.txt"

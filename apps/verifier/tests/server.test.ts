@@ -43,6 +43,7 @@ test("public REST verifies canonical package and exposes scoped lookups", async 
       async getAnchor(sequence) { return sequence === body.anchor.batchSequence ? { batchSequence: sequence } : null; },
       async getCertificateStatus(id) { return id === Buffer.from(body.certificateId).toString("hex") ? { status: "ACTIVE" } : null; },
     },
+    corsAllowedOrigin: "http://127.0.0.1:8090",
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   context.after(() => new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())));
@@ -60,6 +61,20 @@ test("public REST verifies canonical package and exposes scoped lookups", async 
   });
   assert.equal(verification.status, 200);
   assert.equal((await verification.json()).status, "VERIFIED");
+
+  const preflight = await fetch(`${base}/v1/verify`, {
+    method: "OPTIONS",
+    headers: { origin: "http://127.0.0.1:8090", "access-control-request-method": "POST" },
+  });
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "http://127.0.0.1:8090");
+
+  const rejectedPreflight = await fetch(`${base}/v1/verify`, {
+    method: "OPTIONS",
+    headers: { origin: "https://example.invalid", "access-control-request-method": "POST" },
+  });
+  assert.equal(rejectedPreflight.status, 403);
+  assert.equal(rejectedPreflight.headers.get("access-control-allow-origin"), null);
 
   const incidents = await fetch(
     `${base}/v1/incidents?registryId=${encodeURIComponent(body.registryId)}&batchSequence=${body.anchor.batchSequence}`,

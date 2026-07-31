@@ -82,6 +82,7 @@ services:
       ONELAYER_INCIDENT_INDEX_URL: http://demo-api:8090
       ONELAYER_LOOKUP_URL: http://demo-api:8090
       ONELAYER_MAX_INDEX_LAG_SLOTS: "5000"
+      ONELAYER_CORS_ALLOWED_ORIGIN: http://127.0.0.1:8090
     ports: ["127.0.0.1:8080:8080"]
     tmpfs: [/tmp]
     networks: [data, devnet]

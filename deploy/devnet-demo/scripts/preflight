@@ -12,13 +12,15 @@ for command in git docker node cargo solana solana-keygen anchor curl sha256sum;
   command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 32; }
 done
 docker compose version >/dev/null
+docker info >/dev/null 2>&1 || { echo "Docker daemon is not accessible" >&2; exit 40; }
 [[ $(node --version) == v24.* ]] || { echo "Node.js 24 is required" >&2; exit 33; }
 [[ $(solana --version) == solana-cli\ 3.1.10* ]] || { echo "Solana CLI 3.1.10 is required" >&2; exit 34; }
 [[ $(anchor --version) == anchor-cli\ 1.1.2 ]] || { echo "Anchor CLI 1.1.2 is required" >&2; exit 35; }
 [[ -s "$runtime/test-payer.json" ]] || { echo "initialize-runtime must run first" >&2; exit 36; }
 [[ $(stat -c %a "$runtime/test-payer.json") == 600 ]] || { echo "test payer permissions must be 0600" >&2; exit 37; }
 [[ $(NO_DNA=1 solana-keygen pubkey "$runtime/onelayer_registry-keypair.json") == 6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo ]] || { echo "program test key does not match declare_id" >&2; exit 38; }
-if git -C "$repo_root" ls-files | rg --quiet '(^|/)(id\.json|.*keypair\.json|\.env)$'; then
+tracked_credential=$(git -C "$repo_root" ls-files | awk '/(^|\/)(id\.json|.*keypair\.json|\.env)$/ { print; exit }')
+if [[ -n "$tracked_credential" ]]; then
   echo "tracked credential-like file detected" >&2
   exit 39
 fi

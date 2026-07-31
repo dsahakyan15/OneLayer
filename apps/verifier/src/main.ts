@@ -27,6 +27,7 @@ const server = createVerifierServer({
   chain,
   incidents: new HttpIncidentIndex(required("ONELAYER_INCIDENT_INDEX_URL")),
   lookup: new HttpPublicLookup(required("ONELAYER_LOOKUP_URL")),
+  corsAllowedOrigin: process.env.ONELAYER_CORS_ALLOWED_ORIGIN,
   verifyOptions: { maxIndexLagSlots, maxRpcHeadDifference },
 });
 

@@ -19,6 +19,7 @@ export interface VerifierServices {
   incidents: IncidentIndex;
   lookup: PublicLookup;
   verifyOptions?: VerifyOptions;
+  corsAllowedOrigin?: string;
 }
 
 function writeJson(response: ServerResponse, status: number, body: unknown): void {
@@ -109,6 +110,18 @@ async function handle(request: IncomingMessage, response: ServerResponse, servic
 
 export function createVerifierServer(services: VerifierServices): Server {
   return createServer((request, response) => {
+    const origin = request.headers.origin;
+    if (services.corsAllowedOrigin !== undefined && origin === services.corsAllowedOrigin) {
+      response.setHeader("access-control-allow-origin", origin);
+      response.setHeader("access-control-allow-methods", "GET, POST, OPTIONS");
+      response.setHeader("access-control-allow-headers", "content-type");
+      response.setHeader("vary", "origin");
+    }
+    if (request.method === "OPTIONS") {
+      response.writeHead(origin === services.corsAllowedOrigin ? 204 : 403, { "cache-control": "no-store" });
+      response.end();
+      return;
+    }
     handle(request, response, services).catch((error: unknown) => {
       const code = error instanceof RangeError && error.message === "REQUEST_TOO_LARGE"
         ? "REQUEST_TOO_LARGE"

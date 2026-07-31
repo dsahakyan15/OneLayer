@@ -5,6 +5,7 @@ import { Pool } from "pg";
 import QRCode from "qrcode";
 import { fixtureRoot, type SyntheticFixtureRow } from "./reconcile.ts";
 import { qrHashHex } from "./qr.ts";
+import { safeIndexedThroughSlot } from "./solana-index.ts";
 
 const MAX_BODY = 1_048_576;
 const REGISTRY_ID = "gov.registry.land";
@@ -211,9 +212,10 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
       ),
       pool.query("SELECT COALESCE(max(anchor_slot), 0)::text AS slot FROM demo_anchor WHERE registry_id=$1", [REGISTRY_ID]),
     ]);
+    const indexedThroughSlot = await safeIndexedThroughSlot(rpcUrl, BigInt(unsigned(watermark.rows[0].slot, "indexedThroughSlot")));
     json(response, 200, {
       registryId: REGISTRY_ID,
-      indexedThroughSlot: unsigned(watermark.rows[0].slot, "indexedThroughSlot"),
+      indexedThroughSlot,
       incidents: result.rows.map((row) => ({ firstBatchSequence: row.first_suspect_batch, lastBatchSequence: row.last_suspect_batch, status: row.status })),
     });
     return;
