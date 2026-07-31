@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode=${1:-plan}
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/../../.." && pwd)
+runtime=/dev/shm/onelayer-devnet-demo
+program_id=6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo
+program_so="$repo_root/onchain/target/deploy/onelayer_registry.so"
+program_key="$runtime/onelayer_registry-keypair.json"
+payer="$runtime/test-payer.json"
+rpc=https://api.devnet.solana.com
+[[ -s "$program_so" && -s "$program_key" && -s "$payer" ]] || { echo "build and initialize-runtime are required" >&2; exit 40; }
+binary_hash=$(sha256sum "$program_so" | cut -d' ' -f1)
+payer_pubkey=$(NO_DNA=1 solana-keygen pubkey "$payer")
+airdrop_max_lamports=6000000000
+approval_digest=$(printf '%s\0%s\0%s\0%s\0%s\0%s' ONELAYER_SYNTHETIC_DEVNET_PROGRAM_V1 "$rpc" "$program_id" "$payer_pubkey" "$binary_hash" "$airdrop_max_lamports" | sha256sum | cut -d' ' -f1)
+program_bytes=$(stat -c %s "$program_so")
+rent_estimate=$(NO_DNA=1 solana rent "$program_bytes" --url devnet --lamports 2>/dev/null || echo unavailable)
+current_balance=$(NO_DNA=1 solana balance "$payer_pubkey" --url devnet --lamports 2>/dev/null | tr -dc '0-9')
+printf 'cluster=devnet\nrpc=%s\nfee_payer=%s\nrecipient=%s\nairdrop_recipient=%s\ntoken=SOL\nprogram_bytes=%s\nrent_estimate_lamports=%s\nairdrop_max_lamports=%s\ncurrent_balance_lamports=%s\nbinary_sha256=%s\napproval_digest=%s\n' \
+  "$rpc" "$payer_pubkey" "$program_id" "$payer_pubkey" "$program_bytes" "$rent_estimate" "$airdrop_max_lamports" "${current_balance:-unavailable}" "$binary_hash" "$approval_digest"
+if NO_DNA=1 solana program show "$program_id" --url devnet >/dev/null 2>&1; then
+  echo "deploy=already-finalized"
+  exit 0
+fi
+[[ "$mode" == plan ]] && { echo "deploy=blocked"; exit 0; }
+[[ "$mode" == apply ]] || { echo "usage: program-deploy [plan|apply]" >&2; exit 41; }
+[[ ${ONELAYER_DEVNET_DEPLOY_APPROVED:-} == "$approval_digest" ]] || { echo "ONELAYER_DEVNET_DEPLOY_APPROVED must equal approval_digest" >&2; exit 42; }
+balance=${current_balance:-0}
+for _ in 1 2 3; do
+  (( balance >= 5000000000 )) && break
+  NO_DNA=1 solana airdrop 2 "$payer_pubkey" --url devnet --commitment finalized
+  balance=$(NO_DNA=1 solana balance "$payer_pubkey" --url devnet --lamports | tr -dc '0-9')
+done
+(( balance >= 3000000000 )) || { echo "test payer needs at least 3 devnet SOL after approved faucet attempts" >&2; exit 43; }
+NO_DNA=1 solana program deploy "$program_so" \
+  --url devnet --ws wss://api.devnet.solana.com --commitment finalized --use-rpc \
+  --keypair "$payer" --fee-payer "$payer" --upgrade-authority "$payer" \
+  --program-id "$program_key" --output json
+NO_DNA=1 solana program show "$program_id" --url devnet --output json-compact

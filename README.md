@@ -41,6 +41,18 @@ cargo run -p onelayer-canonical --bin gen-vectors
 git diff --exit-code -- spec/vectors
 ```
 
+## Synthetic devnet demo
+
+Presentation flow, guarded Compose project, approval digests, QR verification,
+tampering incident, fixture-only reset, and optional clean-room recovery are in
+[`deploy/devnet-demo/README.md`](deploy/devnet-demo/README.md). Start with:
+
+```bash
+./deploy/devnet-demo/demo plan
+```
+
+`plan` builds and prepares deterministic artifacts but sends no Solana transaction.
+
 ## Границы
 
 Система доказывает, что состояние данных существовало не позднее

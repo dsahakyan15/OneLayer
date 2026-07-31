@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+command=${1:-plan}
+demo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$demo_dir/../.." && pwd)
+scripts="$demo_dir/scripts"
+compose="$demo_dir/compose.yaml"
+runtime=/dev/shm/onelayer-devnet-demo
+artifacts="$demo_dir/artifacts"
+mkdir -p "$artifacts"
+
+export ONELAYER_RPC_URL=https://api.devnet.solana.com
+export ONELAYER_WEBSOCKET_URL=wss://api.devnet.solana.com
+export ONELAYER_TEST_KEYPAIR_PATH="$runtime/test-payer.json"
+export ONELAYER_PROGRAM_ID=6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo
+
+verify_certificate() {
+  curl --fail-with-body --silent --show-error http://127.0.0.1:8090/v1/certificates/08080808080808080808080808080808/package > "$artifacts/package.json"
+  node -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).package_base64url))' < "$artifacts/package.json" > "$artifacts/package.txt"
+  node -e 'const fs=require("fs");process.stdout.write(JSON.stringify({certificatePackage:fs.readFileSync(process.argv[1],"utf8"),requiredCommitment:"finalized"}))' "$artifacts/package.txt" > "$artifacts/verify-request.json"
+  curl --fail-with-body --silent --show-error -H 'content-type: application/json' --data-binary @"$artifacts/verify-request.json" http://127.0.0.1:8080/v1/verify | tee "$artifacts/verification.json"
+  echo
+}
+
+case "$command" in
+  plan)
+    (cd "$repo_root/onchain" && NO_DNA=1 anchor build)
+    "$scripts/initialize-runtime"
+    cargo run -q -p onelayer-pilot-pipeline --bin devnet_demo_fixture -- prepare | tee "$artifacts/prepared-batch.json"
+    "$scripts/program-deploy" plan | tee "$artifacts/program-plan.txt"
+    cargo run -q -p onelayer-pilot-pipeline --bin devnet_demo_chain -- plan | tee "$artifacts/chain-plan.txt"
+    ;;
+  happy-path)
+    (cd "$repo_root/onchain" && NO_DNA=1 anchor build)
+    "$scripts/initialize-runtime"
+    "$scripts/preflight"
+    "$scripts/program-deploy" apply | tee "$artifacts/program-deploy.json"
+    if [[ ! -s "$artifacts/finalized-anchor.env" ]]; then
+      cargo run -q -p onelayer-pilot-pipeline --bin devnet_demo_chain -- apply | tee "$artifacts/chain-apply.txt"
+      signature=$(awk -F= '$1=="transaction_signature" {print $2}' "$artifacts/chain-apply.txt")
+      slot=$(awk -F= '$1=="anchor_slot" {print $2}' "$artifacts/chain-apply.txt")
+      anchor_hash=$(awk -F= '$1=="anchor_hash" {print $2}' "$artifacts/chain-apply.txt")
+      segment=$(awk -F= '$1=="ledger_segment" {print $2}' "$artifacts/chain-apply.txt")
+      [[ "$signature" =~ ^[1-9A-HJ-NP-Za-km-z]{80,90}$ && "$slot" =~ ^[1-9][0-9]*$ && "$anchor_hash" =~ ^[0-9a-f]{64}$ && "$segment" =~ ^[1-9A-HJ-NP-Za-km-z]{32,44}$ ]] || { echo "finalized anchor output is invalid" >&2; exit 80; }
+      printf 'ONELAYER_TRANSACTION_SIGNATURE=%q\nONELAYER_ANCHOR_SLOT=%q\nONELAYER_ANCHOR_HASH=%q\nONELAYER_SEGMENT_PDA=%q\n' "$signature" "$slot" "$anchor_hash" "$segment" > "$artifacts/finalized-anchor.env"
+    fi
+    # shellcheck disable=SC1090
+    source "$artifacts/finalized-anchor.env"
+    export ONELAYER_TRANSACTION_SIGNATURE ONELAYER_ANCHOR_SLOT ONELAYER_ANCHOR_HASH ONELAYER_SEGMENT_PDA
+    export ONELAYER_VERIFIER_BASE_URL=http://127.0.0.1:8090
+    cargo run -q -p onelayer-pilot-pipeline --bin devnet_demo_fixture -- certificate > "$artifacts/certificate.json"
+    docker compose -p onelayer-devnet-demo -f "$compose" up -d --build postgres migrate demo-api verifier
+    for _ in $(seq 1 60); do
+      curl --silent --fail http://127.0.0.1:8090/v1/health >/dev/null 2>&1 && curl --silent --fail http://127.0.0.1:8080/v1/health >/dev/null 2>&1 && break
+      sleep 1
+    done
+    curl --fail-with-body --silent --show-error -X POST \
+      -H "Authorization: Bearer $(cat "$runtime/internal-token")" \
+      -H 'content-type: application/json' --data-binary @"$artifacts/certificate.json" \
+      http://127.0.0.1:8090/internal/register
+    echo
+    "$scripts/snapshot"
+    verify_certificate
+    node -e 'const fs=require("fs");const v=JSON.parse(fs.readFileSync(process.argv[1]));if(v.status!=="VERIFIED")throw new Error(`expected VERIFIED, got ${v.status}`)' "$artifacts/verification.json"
+    curl --fail-with-body --silent --show-error http://127.0.0.1:8090/v1/qr/08080808080808080808080808080808.svg > "$artifacts/certificate-qr.svg"
+    echo "VERIFIED certificate=08080808080808080808080808080808 qr=$artifacts/certificate-qr.svg"
+    ;;
+  verify)
+    verify_certificate
+    ;;
+  incident)
+    TAMPER_ONELAYER_FIXTURE=yes "$scripts/tamper"
+    verify_certificate
+    node -e 'const fs=require("fs");const v=JSON.parse(fs.readFileSync(process.argv[1]));if(v.status!=="DISPUTED")throw new Error(`expected DISPUTED, got ${v.status}`)' "$artifacts/verification.json"
+    echo "DISPUTED synthetic direct-DB tampering incident is open"
+    ;;
+  recovery)
+    RECOVER_ONELAYER_FIXTURE=yes "$scripts/recover"
+    ;;
+  reset)
+    RESET_ONELAYER_FIXTURE=yes "$scripts/reset-fixture"
+    ;;
+  *)
+    echo "usage: deploy/devnet-demo/demo [plan|happy-path|verify|incident|recovery|reset]" >&2
+    exit 2
+    ;;
+esac

@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ ${RECOVER_ONELAYER_FIXTURE:-} == yes ]] || { echo "RECOVER_ONELAYER_FIXTURE=yes is required" >&2; exit 70; }
+project=onelayer-devnet-demo
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/../../.." && pwd)
+compose="$repo_root/deploy/devnet-demo/compose.yaml"
+dump="$repo_root/deploy/devnet-demo/artifacts/clean-fixture.dump"
+[[ -s "$dump" ]] || { echo "clean fixture snapshot is missing" >&2; exit 71; }
+sha256sum -c "$dump.sha256"
+container=${project}-clean-room-db-1
+volume=${project}_clean-room-data
+if docker inspect "$container" >/dev/null 2>&1; then
+  "$script_dir/fixture-guard" container "$container"
+  docker rm -f "$container"
+fi
+if docker volume inspect "$volume" >/dev/null 2>&1; then
+  "$script_dir/fixture-guard" volume "$volume"
+  docker volume rm "$volume"
+fi
+docker compose -p "$project" -f "$compose" --profile recovery up -d clean-room-db
+for _ in $(seq 1 30); do
+  [[ $(docker inspect --format '{{.State.Health.Status}}' "$container") == healthy ]] && break
+  sleep 1
+done
+"$script_dir/fixture-guard" container "$container"
+docker exec -i "$container" sh -eu -c 'export PGPASSWORD=$(cat /run/secrets/restore_password); pg_restore -U onelayer_restore -d onelayer_restored --no-owner' < "$dump"
+actual=$(docker exec "$container" sh -eu -c 'export PGPASSWORD=$(cat /run/secrets/restore_password); psql -U onelayer_restore -d onelayer_restored -Atc "select json_agg(json_build_object('"'"'internalRecordId'"'"',internal_record_id,'"'"'recordVersion'"'"',record_version::text,'"'"'status'"'"',status,'"'"'recordFieldKeyHex'"'"',record_field_key_hex) order by source_cursor) from synthetic_registry_record"' | node "$repo_root/apps/monitor/src/root-cli.ts")
+expected=$(docker exec ${project}-postgres-1 sh -eu -c 'export PGPASSWORD=$(cat /run/secrets/postgres_password); psql -U onelayer_demo -d onelayer_demo -Atc "select encode(merkle_root,'"'"'hex'"'"') from demo_anchor where registry_id='"'"'gov.registry.land'"'"' order by batch_sequence desc limit 1"')
+[[ "$actual" == "$expected" ]] || { echo "clean-room root mismatch: expected=$expected actual=$actual" >&2; exit 72; }
+echo "clean-room restore root matches finalized devnet anchor: $actual"

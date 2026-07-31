@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project=onelayer-devnet-demo
+container=${project}-postgres-1
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/../../.." && pwd)
+artifact_dir="$repo_root/deploy/devnet-demo/artifacts"
+mkdir -p "$artifact_dir"
+"$script_dir/fixture-guard" container "$container"
+docker exec "$container" sh -eu -c 'export PGPASSWORD=$(cat /run/secrets/postgres_password); test "$(psql -U onelayer_demo -d onelayer_demo -Atc "select marker from demo_fixture_marker")" = ONELAYER_SYNTHETIC_DEVNET_DEMO_V1; pg_dump -U onelayer_demo -d onelayer_demo --format=custom --table=demo_fixture_marker --table=synthetic_registry_record' > "$artifact_dir/clean-fixture.dump"
+sha256sum "$artifact_dir/clean-fixture.dump" > "$artifact_dir/clean-fixture.dump.sha256"
+echo "$artifact_dir/clean-fixture.dump"

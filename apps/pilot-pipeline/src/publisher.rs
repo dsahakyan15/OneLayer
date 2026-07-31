@@ -34,6 +34,12 @@ pub struct FinalizedObservation {
     pub anchor_hash: [u8; 32],
 }
 
+pub struct SimulationSummary {
+    pub logs: Vec<String>,
+    pub units_consumed: Option<u64>,
+    pub fee: Option<u64>,
+}
+
 pub struct PilotPublisher {
     client: Client<Rc<Keypair>>,
     operator: Rc<Keypair>,
@@ -98,6 +104,25 @@ impl PilotPublisher {
             .rpc()
             .send_transaction(&signed.transaction)
             .map_err(|error| error.to_string())
+    }
+
+    pub fn simulate(&self, signed: &SignedPublishTransaction) -> Result<SimulationSummary, String> {
+        let program = self
+            .client
+            .program(onelayer_registry::ID)
+            .map_err(|error| error.to_string())?;
+        let response = program
+            .rpc()
+            .simulate_transaction(&signed.transaction)
+            .map_err(|error| error.to_string())?;
+        if let Some(error) = response.value.err {
+            return Err(format!("publish simulation failed: {error:?}"));
+        }
+        Ok(SimulationSummary {
+            logs: response.value.logs.unwrap_or_default(),
+            units_consumed: response.value.units_consumed,
+            fee: response.value.fee,
+        })
     }
 
     pub fn finalized_status(

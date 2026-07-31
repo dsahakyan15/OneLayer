@@ -6,3 +6,5 @@ node_modules/
 test-ledger/
 onchain/yarn.lock
 onchain/package-lock.json
+deploy/devnet-demo/artifacts/
+deploy/devnet-demo/.runtime/

@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub mod artifacts;
+pub mod demo;
 pub mod publisher;
 pub mod store;
 

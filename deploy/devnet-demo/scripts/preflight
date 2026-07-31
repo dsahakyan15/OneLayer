@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/../../.." && pwd)
+runtime=/dev/shm/onelayer-devnet-demo
+rpc=${ONELAYER_RPC_URL:-https://api.devnet.solana.com}
+ws=${ONELAYER_WEBSOCKET_URL:-wss://api.devnet.solana.com}
+[[ "$rpc" == https://api.devnet.solana.com ]] || { echo "RPC must be canonical devnet" >&2; exit 30; }
+[[ "$ws" == wss://api.devnet.solana.com ]] || { echo "WebSocket must be canonical devnet" >&2; exit 31; }
+for command in git docker node cargo solana solana-keygen anchor curl sha256sum; do
+  command -v "$command" >/dev/null || { echo "$command is required" >&2; exit 32; }
+done
+docker compose version >/dev/null
+[[ $(node --version) == v24.* ]] || { echo "Node.js 24 is required" >&2; exit 33; }
+[[ $(solana --version) == solana-cli\ 3.1.10* ]] || { echo "Solana CLI 3.1.10 is required" >&2; exit 34; }
+[[ $(anchor --version) == anchor-cli\ 1.1.2 ]] || { echo "Anchor CLI 1.1.2 is required" >&2; exit 35; }
+[[ -s "$runtime/test-payer.json" ]] || { echo "initialize-runtime must run first" >&2; exit 36; }
+[[ $(stat -c %a "$runtime/test-payer.json") == 600 ]] || { echo "test payer permissions must be 0600" >&2; exit 37; }
+[[ $(NO_DNA=1 solana-keygen pubkey "$runtime/onelayer_registry-keypair.json") == 6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo ]] || { echo "program test key does not match declare_id" >&2; exit 38; }
+if git -C "$repo_root" ls-files | rg --quiet '(^|/)(id\.json|.*keypair\.json|\.env)$'; then
+  echo "tracked credential-like file detected" >&2
+  exit 39
+fi
+docker compose -p onelayer-devnet-demo -f "$repo_root/deploy/devnet-demo/compose.yaml" config --quiet
+echo "preflight ok: synthetic fixture, loopback ports, Solana devnet"

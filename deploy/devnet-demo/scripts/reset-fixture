@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+[[ ${RESET_ONELAYER_FIXTURE:-} == yes ]] || { echo "RESET_ONELAYER_FIXTURE=yes is required" >&2; exit 50; }
+project=onelayer-devnet-demo
+container=${project}-postgres-1
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/../../.." && pwd)
+"$script_dir/fixture-guard" container "$container"
+docker exec "$container" sh -eu -c 'export PGPASSWORD=$(cat /run/secrets/postgres_password); test "$(psql -U onelayer_demo -d onelayer_demo -Atc "select marker from demo_fixture_marker")" = ONELAYER_SYNTHETIC_DEVNET_DEMO_V1; psql -v ON_ERROR_STOP=1 -U onelayer_demo -d onelayer_demo -c "TRUNCATE demo_certificate, demo_anchor, integrity_incident, synthetic_registry_record"'
+docker exec -i "$container" sh -eu -c 'export PGPASSWORD=$(cat /run/secrets/postgres_password); psql -v ON_ERROR_STOP=1 -U onelayer_demo -d onelayer_demo' < "$repo_root/db/fixtures/devnet-demo.sql"
+echo "fixture-only reset complete"

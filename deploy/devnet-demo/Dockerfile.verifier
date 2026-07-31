@@ -1,0 +1,9 @@
+FROM node:24.10.0-bookworm-slim
+WORKDIR /opt/onelayer/apps/verifier
+COPY apps/verifier/package.json apps/verifier/package-lock.json ./
+RUN npm ci --omit=dev
+COPY apps/verifier/src ./src
+COPY packages/canonical-ts/src /opt/onelayer/packages/canonical-ts/src
+COPY packages/merkle-ts/src /opt/onelayer/packages/merkle-ts/src
+USER node
+ENTRYPOINT ["node", "--experimental-strip-types", "src/main.ts"]
