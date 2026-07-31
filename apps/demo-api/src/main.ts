@@ -4,6 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { Pool } from "pg";
 import QRCode from "qrcode";
 import { fixtureRoot, type SyntheticFixtureRow } from "./reconcile.ts";
+import { qrHashHex } from "./qr.ts";
 
 const MAX_BODY = 1_048_576;
 const REGISTRY_ID = "gov.registry.land";
@@ -67,17 +68,6 @@ function unsigned(value: unknown, name: string): string {
   return text(String(value), name, /^(?:0|[1-9][0-9]*)$/);
 }
 
-async function finalizedSlot(): Promise<string> {
-  const rpcResponse = await fetch(rpcUrl, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "getSlot", params: [{ commitment: "finalized" }] }),
-  });
-  if (!rpcResponse.ok) throw new Error(`devnet RPC HTTP ${rpcResponse.status}`);
-  const rpcBody: any = await rpcResponse.json();
-  return unsigned(rpcBody.result, "finalized slot");
-}
-
 async function ensureFixture(): Promise<void> {
   const result = await pool.query("SELECT marker FROM demo_fixture_marker");
   if (result.rows.length !== 1 || result.rows[0].marker !== MARKER) throw new Error("synthetic fixture marker missing");
@@ -98,8 +88,8 @@ async function registerArtifact(input: Record<string, unknown>): Promise<void> {
   const certificateId = text(input.certificateId, "certificateId", /^[0-9a-f]{32}$/);
   const certificateHash = text(input.certificateHash, "certificateHash", /^[0-9a-f]{64}$/);
   const certificatePackage = text(input.certificatePackage, "certificatePackage", /^[A-Za-z0-9_-]+$/);
-  const qrUrl = text(input.qrUrl, "qrUrl", /^http:\/\/127\.0\.0\.1:8090\/c\/[0-9a-f]{32}\?h=[0-9a-f]{64}$/);
-  if (new URL(qrUrl).searchParams.get("h") !== certificateHash) throw new TypeError("QR hash does not match certificate hash");
+  const qrUrl = text(input.qrUrl, "qrUrl", /^http:\/\/127\.0\.0\.1:8090\/c\/[0-9a-f]{32}\?h=[A-Za-z0-9_-]{43}$/);
+  if (qrHashHex(new URL(qrUrl).searchParams.get("h")) !== certificateHash) throw new TypeError("QR hash does not match certificate hash");
   const issuedAt = text(input.issuedAt, "issuedAt", /^20[0-9]{2}-[0-9]{2}-[0-9]{2}T/);
   const client = await pool.connect();
   try {
@@ -214,13 +204,16 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   if (request.method === "GET" && url.pathname === "/v1/incidents") {
     if (url.searchParams.get("registryId") !== REGISTRY_ID) throw new TypeError("registryId is invalid");
     const batchSequence = unsigned(url.searchParams.get("batchSequence"), "batchSequence");
-    const result = await pool.query(
-      "SELECT first_suspect_batch::text, last_suspect_batch::text, status FROM integrity_incident WHERE registry_id=$1 AND first_suspect_batch <= $2 AND last_suspect_batch >= $2",
-      [REGISTRY_ID, batchSequence],
-    );
+    const [result, watermark] = await Promise.all([
+      pool.query(
+        "SELECT first_suspect_batch::text, last_suspect_batch::text, status FROM integrity_incident WHERE registry_id=$1 AND first_suspect_batch <= $2 AND last_suspect_batch >= $2",
+        [REGISTRY_ID, batchSequence],
+      ),
+      pool.query("SELECT COALESCE(max(anchor_slot), 0)::text AS slot FROM demo_anchor WHERE registry_id=$1", [REGISTRY_ID]),
+    ]);
     json(response, 200, {
       registryId: REGISTRY_ID,
-      indexedThroughSlot: await finalizedSlot(),
+      indexedThroughSlot: unsigned(watermark.rows[0].slot, "indexedThroughSlot"),
       incidents: result.rows.map((row) => ({ firstBatchSequence: row.first_suspect_batch, lastBatchSequence: row.last_suspect_batch, status: row.status })),
     });
     return;
@@ -250,7 +243,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   if (request.method === "GET" && page) {
     const certificateId = page[1];
     const certificate = await pool.query("SELECT encode(certificate_hash,'hex') AS certificate_hash FROM demo_certificate WHERE certificate_id=$1", [certificateId]);
-    if (!certificate.rows.length || url.searchParams.get("h") !== certificate.rows[0].certificate_hash) {
+    if (!certificate.rows.length || qrHashHex(url.searchParams.get("h")) !== certificate.rows[0].certificate_hash) {
       json(response, 422, { code: "QR_HASH_MISMATCH" });
       return;
     }

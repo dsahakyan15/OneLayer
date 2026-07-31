@@ -14,10 +14,18 @@ printf 'postgresql://onelayer_demo:%s@postgres:5432/onelayer_demo\n' "$(cat "$ru
 if [[ ! -s "$runtime/test-payer.json" ]]; then
   NO_DNA=1 solana-keygen new --no-bip39-passphrase --silent --force -o "$runtime/test-payer.json"
 fi
+if [[ ! -s "$runtime/program-buffer-keypair.json" ]]; then
+  NO_DNA=1 solana-keygen new --no-bip39-passphrase --silent --force -o "$runtime/program-buffer-keypair.json"
+fi
 program_keypair="$repo_root/onchain/target/deploy/onelayer_registry-keypair.json"
 if [[ -s "$program_keypair" ]]; then
   cp "$program_keypair" "$runtime/onelayer_registry-keypair.json"
   chmod 600 "$runtime/onelayer_registry-keypair.json"
 fi
 chmod 600 "$runtime"/*
+chmod 644 \
+  "$runtime/postgres-password" \
+  "$runtime/restore-password" \
+  "$runtime/database-url" \
+  "$runtime/internal-token"
 echo "synthetic devnet runtime initialized in tmpfs"

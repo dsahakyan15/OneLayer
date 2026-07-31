@@ -9,8 +9,9 @@ program_id=6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo
 program_so="$repo_root/onchain/target/deploy/onelayer_registry.so"
 program_key="$runtime/onelayer_registry-keypair.json"
 payer="$runtime/test-payer.json"
+buffer_key="$runtime/program-buffer-keypair.json"
 rpc=https://api.devnet.solana.com
-[[ -s "$program_so" && -s "$program_key" && -s "$payer" ]] || { echo "build and initialize-runtime are required" >&2; exit 40; }
+[[ -s "$program_so" && -s "$program_key" && -s "$payer" && -s "$buffer_key" ]] || { echo "build and initialize-runtime are required" >&2; exit 40; }
 binary_hash=$(sha256sum "$program_so" | cut -d' ' -f1)
 payer_pubkey=$(NO_DNA=1 solana-keygen pubkey "$payer")
 airdrop_max_lamports=6000000000
@@ -30,12 +31,12 @@ fi
 balance=${current_balance:-0}
 for _ in 1 2 3; do
   (( balance >= 5000000000 )) && break
-  NO_DNA=1 solana airdrop 2 "$payer_pubkey" --url devnet --commitment finalized
+  NO_DNA=1 solana airdrop 2 "$payer_pubkey" --url devnet --commitment finalized || true
   balance=$(NO_DNA=1 solana balance "$payer_pubkey" --url devnet --lamports | tr -dc '0-9')
 done
 (( balance >= 3000000000 )) || { echo "test payer needs at least 3 devnet SOL after approved faucet attempts" >&2; exit 43; }
 NO_DNA=1 solana program deploy "$program_so" \
-  --url devnet --ws wss://api.devnet.solana.com --commitment finalized --use-rpc \
+  --url devnet --ws wss://api.devnet.solana.com --commitment finalized --use-quic \
   --keypair "$payer" --fee-payer "$payer" --upgrade-authority "$payer" \
-  --program-id "$program_key" --output json
+  --program-id "$program_key" --buffer "$buffer_key" --max-sign-attempts 10 --output json
 NO_DNA=1 solana program show "$program_id" --url devnet --output json-compact

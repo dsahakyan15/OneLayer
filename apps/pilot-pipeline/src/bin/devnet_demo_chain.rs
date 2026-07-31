@@ -35,6 +35,32 @@ fn keypair_path() -> Result<String, String> {
     Ok(path)
 }
 
+fn utc_day(timestamp: u64) -> Result<u32, String> {
+    let days = i64::try_from(timestamp / 86_400)
+        .map_err(|_| "current UTC timestamp exceeds i64".to_string())?;
+    let shifted = days
+        .checked_add(719_468)
+        .ok_or_else(|| "current UTC day overflow".to_string())?;
+    let era = if shifted >= 0 {
+        shifted
+    } else {
+        shifted - 146_096
+    } / 146_097;
+    let day_of_era = shifted - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let mut year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_prime = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_prime + 2) / 5 + 1;
+    let month = month_prime + if month_prime < 10 { 3 } else { -9 };
+    year += i64::from(month <= 2);
+    year.checked_mul(10_000)
+        .and_then(|value| value.checked_add(month * 100 + day))
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| "current UTC day cannot be encoded as YYYYMMDD".to_string())
+}
+
 fn approval_digest(
     payer: &Pubkey,
     config: &Pubkey,
@@ -133,14 +159,12 @@ fn main() -> Result<(), String> {
         &[b"operator", config.as_ref(), payer.pubkey().as_ref()],
         &onelayer_registry::ID,
     );
-    let day_utc = u32::try_from(
+    let day_utc = utc_day(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|error| error.to_string())?
-            .as_secs()
-            / 86_400,
-    )
-    .map_err(|_| "current UTC day exceeds u32".to_string())?;
+            .as_secs(),
+    )?;
     let (segment, _) = Pubkey::find_program_address(
         &[
             b"ledger",
@@ -337,4 +361,15 @@ fn main() -> Result<(), String> {
     println!("commitment=finalized");
     println!("send=complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::utc_day;
+
+    #[test]
+    fn utc_day_uses_calendar_encoding_expected_by_the_program() {
+        assert_eq!(utc_day(0).unwrap(), 19700101);
+        assert_eq!(utc_day(1_785_456_000).unwrap(), 20260731);
+    }
 }

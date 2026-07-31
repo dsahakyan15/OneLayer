@@ -7,7 +7,7 @@ container=${project}-postgres-1
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 runtime=/dev/shm/onelayer-devnet-demo
 "$script_dir/fixture-guard" container "$container"
-docker exec "$container" sh -eu -c 'export PGPASSWORD=$(cat /run/secrets/postgres_password); test "$(psql -U onelayer_demo -d onelayer_demo -Atc "select marker from demo_fixture_marker")" = ONELAYER_SYNTHETIC_DEVNET_DEMO_V1; test "$(psql -U onelayer_demo -d onelayer_demo -Atc "update synthetic_registry_record set status='"'"'TAMPERED'"'"' where internal_record_id='"'"'SYNTHETIC-1'"'"' returning internal_record_id")" = SYNTHETIC-1'
+docker exec "$container" sh -eu -c 'export PGPASSWORD=$(cat /run/secrets/postgres_password); test "$(psql -U onelayer_demo -d onelayer_demo -Atq -c "select marker from demo_fixture_marker")" = ONELAYER_SYNTHETIC_DEVNET_DEMO_V1; test "$(psql -U onelayer_demo -d onelayer_demo -Atq -c "update synthetic_registry_record set status='"'"'TAMPERED'"'"' where internal_record_id='"'"'SYNTHETIC-1'"'"' returning internal_record_id")" = SYNTHETIC-1'
 curl --fail-with-body --silent --show-error -X POST \
   -H "Authorization: Bearer $(cat "$runtime/internal-token")" \
   http://127.0.0.1:8090/internal/reconcile
