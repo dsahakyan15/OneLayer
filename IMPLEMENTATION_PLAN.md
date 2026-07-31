@@ -2,9 +2,9 @@
 
 **Базовый документ:** `OneLayer_Solana_Technical_Spec_RU.md` (v0.9, историческая проектная версия)
 **Источник заморозки протокола:** versioned-документы в `spec/`; пока их статус `draft`, решения §2 задают обязательные правки, а после Gate B замороженные документы имеют приоритет над планом и v0.9
-**Статус плана:** v2.3, 2026-07-31
+**Статус плана:** v2.4, 2026-08-01
 **Структура:** gate-ы A, B, C, D, E0, E — каждый с явным выходным решением
-**Горизонт:** Gate A–C (pilot на devnet) ≈ 5–7 месяцев; Gate D–E (production go-live) ≈ +10–12 месяцев; Phase 3 — отдельный горизонт после go-live
+**Горизонт:** Gate A–C (pilot + визуальный MVP на devnet) ≈ 6–8 месяцев; Gate D–E (production go-live) ≈ +10–12 месяцев; Phase 3 — отдельный горизонт после go-live
 
 > План покрывает инженерную реализацию. Юридические решения (§17 спецификации) — отдельный трек, блокирующий Gate E.
 
@@ -28,7 +28,13 @@
 
 ## 1. История ревизий
 
-Текущая версия — **v2.3**. Изменения относительно v2.2:
+Текущая версия — **v2.4**. Изменения относительно v2.3:
+
+- в Gate C добавлен визуальный MVP: Admin-панель для synthetic-записей, devnet anchor и выдачи сертификатов; OneLayer-панель для QR-сканирования и верификации;
+- визуальный flow разводит `certificateHash` и on-chain anchor: в Solana публикуются `merkleRoot` / `manifestHash`, а связь сертификата доказывается package-подписью и Merkle proof;
+- в MVP зафиксированы Wallet Standard, simulation-before-signing, явный transaction review и запрет выдачи сертификата до `finalized`.
+
+Сохранённая история v2.3:
 
 - `record_id_commitment` включён в `record_commitment`: Merkle proof теперь связывает содержимое с конкретной записью (§2.1);
 - контракт incident index scoped по `registryId`; индекс, не дошедший до anchor slot, получает `STALE` (§2.3);
@@ -439,6 +445,15 @@ synthetic change → canonicalize → batch → manifest → devnet anchor → c
 | `OL-C-14` | `apps/verifier`: алгоритм §8.3 спецификации, один RPC, проверка segment PDA, incident index scoped по `registryId` с watermark и правилом статуса (§2.3), REST по §9.1 |
 | `OL-C-15` | Схема БД (§6.2): durable queue + неизменяемые подписанные данные `publish_attempt` с однократным разрешением outcome, append-only audit journal без hash-chain (§2.6) |
 | `OL-C-20` | E2E smoke: synthetic change → VERIFIED в верификаторе |
+| `OL-C-21` | `apps/mvp-web`: один React/Next.js-клиент с двумя route groups — закрытая Admin-панель и публичная OneLayer-панель; общие design tokens и status components, но разные trust boundaries |
+| `OL-C-22` | Admin: список и детали synthetic-сертификатов; wizard ручного ввода и JSON-импорта synthetic-записи; preview canonical payload, disclosed fields, `recordIdCommitment` и будущего `certificateHash` |
+| `OL-C-23` | Admin: подготовка batch и devnet anchor с видимыми `merkleRoot`, `manifestHash`, `previousAnchorHash`, program ID, segment PDA, fee payer, cluster, оценкой fee/rent и simulation logs |
+| `OL-C-24` | Wallet Standard через `@solana/kit-plugin-wallet` + `@solana/react`; только test wallet в `solana:devnet`, без загрузки keypair/seed в UI; явный review и click-to-sign после успешной simulation |
+| `OL-C-25` | Transaction state machine: `DRAFT → PREPARED → SIMULATED → SIGNED → SUBMITTED → FINALIZED → ISSUED`; blockhash-expiry retry с новой simulation, идемпотентность double-click/reload, запрет `ISSUED` до finalized account/transaction checks |
+| `OL-C-26` | Admin: выдача certificate package после `FINALIZED`, QR SVG/PNG, copy/download URL, transaction signature и Solana Explorer devnet link; timeline операции без секретов в logs |
+| `OL-C-27` | OneLayer: QR из камеры, image upload и manual URL/package input; проверка QR hash binding, issuer signature, field/batch proof, program/account ownership, finalized transaction и incident index |
+| `OL-C-28` | OneLayer: отдельные result views `VERIFIED`, `INVALID`, `DISPUTED`, `VERIFIED_NO_INCIDENT_CHECK`; показ причины, cluster, slot, signature, index lag и раскрытых полей без выдачи скрытых данных |
+| `OL-C-29` | Browser E2E: Admin создаёт synthetic-запись → simulation → test-wallet approval → finalized devnet anchor → certificate → QR → OneLayer `VERIFIED`; подмена package/QR → `INVALID`, direct synthetic DB tampering → `DISPUTED` |
 
 ### 5.2. Чего в Gate C нет
 
@@ -452,7 +467,54 @@ HSM, durable nonce, два RPC, мультисиг, три хранилища м
 
 Разделение на отдельные сервисы происходит при появлении подтверждённой границы: Publisher выносится, когда появляется HSM в изолированной подсети (Gate E); Monitor изначально отдельный процесс с отдельными credentials (Gate D) — это требование модели угроз, а не архитектурная эстетика.
 
-**Выход Gate C:** сквозной поток работает 72 часа на synthetic-нагрузке без ручного вмешательства; `anchor_sequence_gap_total = 0`; повторная сборка одного диапазона даёт идентичный `manifestHash`.
+### 5.4. Визуальный MVP
+
+**Цель:** превратить технический Gate C flow в два понятных пользовательских контура, не меняя замороженный криптографический протокол.
+
+```text
+Admin panel
+  synthetic record / JSON import
+    → canonical preview
+      → batch + Merkle root + manifest hash
+        → simulate devnet transaction
+          → explicit wallet review/sign
+            → finalized anchor
+              → signed certificate package + QR
+
+OneLayer panel
+  camera / image / URL
+    → QR hash binding
+      → certificate + Merkle proof
+        → finalized Solana anchor + incident index
+          → VERIFIED / INVALID / DISPUTED / VERIFIED_NO_INCIDENT_CHECK
+```
+
+**Граница on-chain.** Admin-панель не записывает отдельный `certificateHash` в Solana и не создаёт второй протокол. Программа якорит batch `merkleRoot` и `manifestHash`; certificate package содержит Merkle proof и связывает сертификат с finalized anchor. UI показывает эти две величины раздельно.
+
+**Архитектура UI.** Одно приложение `apps/mvp-web`, один Solana Kit client и общие визуальные primitives. Admin и OneLayer — разные route groups и access policies, но не два frontend-репозитория. Wallet hooks живут только в client leaf-components; публичная верификация не требует wallet.
+
+**Админские экраны:** dashboard; certificate list/detail; create/import wizard; canonical/disclosure preview; batch preparation; transaction review + simulation; publish progress; issued certificate + QR; append-only operation timeline. Admin API — тонкий HTTP-адаптер в `pilot-pipeline`, а не новый сервис.
+
+**Экраны OneLayer:** scan; camera permission/fallback; image upload; manual input; checking progress; result; public certificate detail. Камера — progressive enhancement: отказ permission никогда не блокирует image/manual flow.
+
+**Transaction review — блокирующий шаг.** До wallet prompt UI обязан показать cluster `devnet`, program ID, registry, segment PDA, batch sequence, `merkleRoot`, `manifestHash`, fee payer, оценку fee/rent и simulation result. Поля транзакции после simulation ещё раз сверяются с prepared intent. Любой endpoint или wallet на mainnet отклоняется до подписи.
+
+**Test identity.** Gate C использует только test wallet, отдельный от governance/upgrade authority. Его operator role выдаётся однократной guarded devnet-операцией с отдельным явным подтверждением. Browser не принимает keypair files, private keys и seed phrases.
+
+**Вне scope MVP:** mainnet, production credentials, реальные кадастровые данные, production SSO/RBAC, bulk issuance, native mobile app, push/email, внешняя публикация и analytics. Внешний staging и HTTPS-хостинг требуют отдельного разрешения; loopback demo остаётся базовым контуром.
+
+**Acceptance criteria визуального MVP:**
+
+1. Admin создаёт или импортирует synthetic-запись; UI показывает canonical preview и не принимает запись без marker/schema validation.
+2. Devnet-транзакция симулируется; review показывает все поля из блокирующего шага; подпись запрашивается только после успеха simulation.
+3. Повторный click/reload не создаёт второй batch или вторую транзакцию; протухший blockhash возвращает flow к preparation/simulation.
+4. Сертификат не выдаётся до `finalized`; после `finalized` Admin получает certificate package, `certificateHash`, QR и signature/slot.
+5. QR, отсканированный камерой или загруженный как image, даёт OneLayer `VERIFIED`; manual input даёт тот же результат.
+6. Подмена QR hash/package/field даёт `INVALID`; direct synthetic DB tampering даёт `DISPUTED`; stale/unavailable incident index не показывает зелёный `VERIFIED`, а даёт `VERIFIED_NO_INCIDENT_CHECK`.
+7. UI адаптивен для desktop и mobile scan, управляется с клавиатуры, не полагается только на цвет для status и имеет camera fallback.
+8. Clean-room browser run проходит весь flow из `OL-C-29` и сохраняет screenshot/trace как demo artifact.
+
+**Выход Gate C:** сквозной поток работает 72 часа на synthetic-нагрузке без ручного вмешательства; `anchor_sequence_gap_total = 0`; повторная сборка одного диапазона даёт идентичный `manifestHash`; clean-room browser flow `OL-C-29` заканчивается QR → `VERIFIED`, а tampering — `INVALID`/`DISPUTED` без ложного зелёного статуса.
 
 ---
 
@@ -476,6 +538,7 @@ onelayer/
 │   └── merkle-ts/
 ├── apps/
 │   ├── pilot-pipeline/      # Rust, один процесс, модули-библиотеки внутри
+│   ├── mvp-web/             # React/Next.js, Admin + public OneLayer route groups
 │   └── verifier/            # TS, REST
 ├── tests/e2e/
 ├── db/migrations/
@@ -628,6 +691,8 @@ Focused property tests: Unicode NFC, decimal, сортировка массив�
 - сертификат для batch с открытым инцидентом;
 - incident index недоступен / отдаёт лаг выше `maxIndexLagSlots` / не дошёл до `anchor_slot` / отдаёт ответ без watermark → `VERIFIED_NO_INCIDENT_CHECK`, статусы `UNAVAILABLE`/`STALE`/`STALE`/`UNAVAILABLE` соответственно; запрос без совпадающего `registryId` отвергается;
 - RPC вернул `confirmed` вместо `finalized`.
+- Admin UI: mainnet endpoint/wallet, неуспешная simulation, wallet rejection, blockhash expiry, reload/double-click в каждом transaction state; ни один сценарий не выдаёт certificate до `finalized`;
+- OneLayer UI: camera denied/unavailable, QR image без payload, неверный QR hash, подменённый package, `DISPUTED`, устаревший incident index; все статусы проверяются browser E2E и не сводятся к цвету.
 
 **Проверка изоляции солей (§2.1)** — вместо недоказуемого «восстановить соль невозможно» тестируется конкретный контракт:
 - сериализованный selective-сертификат не содержит `record_field_key` (поиск по байтам ключа в готовом пакете);
@@ -962,6 +1027,7 @@ Gate E0 — единственный блок, выполнимый до зав�
 | R9 | Регулятор признаёт linkability по хэшам недостаточной | высокое | `OL-A-08` в Gate A; per-field соли из секретного ключа уже заложены (§2.1) |
 | R10 | Смена схемы после production | высокое | `transition_algorithm` в Gate E; репетиция перехода — обязательное условие Phase 3 |
 | R11 | Преждевременная декомпозиция замедляет pilot | среднее | §5.3: один процесс до подтверждённой границы развёртывания |
+| R12 | UI показывает «успех» после signature, но до finalization, или повторно публикует batch | высокое | §5.4: явная transaction state machine, simulation-before-signing, idempotency key, account/transaction checks и `ISSUED` только после `finalized` |
 
 ---
 
