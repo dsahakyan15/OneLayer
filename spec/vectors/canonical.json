@@ -1,0 +1,439 @@
+{
+  "profile": "RFC 8949 core deterministic; floats запрещены; NFC до кодирования",
+  "spec": "spec/canonical-record-v1.md",
+  "vectors": [
+    {
+      "description": "нижняя граница короткой формы",
+      "expected": {
+        "byte_len": 1,
+        "cbor_hex": "00"
+      },
+      "id": "int-zero",
+      "input": {
+        "type": "int",
+        "value": "0"
+      }
+    },
+    {
+      "description": "последнее значение в заголовке",
+      "expected": {
+        "byte_len": 1,
+        "cbor_hex": "17"
+      },
+      "id": "int-23",
+      "input": {
+        "type": "int",
+        "value": "23"
+      }
+    },
+    {
+      "description": "переход на 1-байтовый argument",
+      "expected": {
+        "byte_len": 2,
+        "cbor_hex": "1818"
+      },
+      "id": "int-24",
+      "input": {
+        "type": "int",
+        "value": "24"
+      }
+    },
+    {
+      "description": "граница 1 байта",
+      "expected": {
+        "byte_len": 2,
+        "cbor_hex": "18ff"
+      },
+      "id": "int-255",
+      "input": {
+        "type": "int",
+        "value": "255"
+      }
+    },
+    {
+      "description": "переход на 2 байта",
+      "expected": {
+        "byte_len": 3,
+        "cbor_hex": "190100"
+      },
+      "id": "int-256",
+      "input": {
+        "type": "int",
+        "value": "256"
+      }
+    },
+    {
+      "description": "переход на 4 байта",
+      "expected": {
+        "byte_len": 5,
+        "cbor_hex": "1a00010000"
+      },
+      "id": "int-65536",
+      "input": {
+        "type": "int",
+        "value": "65536"
+      }
+    },
+    {
+      "description": "переход на 8 байт",
+      "expected": {
+        "byte_len": 9,
+        "cbor_hex": "1b0000000100000000"
+      },
+      "id": "int-4294967296",
+      "input": {
+        "type": "int",
+        "value": "4294967296"
+      }
+    },
+    {
+      "description": "major type 1, кратчайшая форма",
+      "expected": {
+        "byte_len": 1,
+        "cbor_hex": "20"
+      },
+      "id": "int-neg-1",
+      "input": {
+        "type": "int",
+        "value": "-1"
+      }
+    },
+    {
+      "description": "последнее значение в заголовке",
+      "expected": {
+        "byte_len": 1,
+        "cbor_hex": "37"
+      },
+      "id": "int-neg-24",
+      "input": {
+        "type": "int",
+        "value": "-24"
+      }
+    },
+    {
+      "description": "переход на 1-байтовый argument",
+      "expected": {
+        "byte_len": 2,
+        "cbor_hex": "3818"
+      },
+      "id": "int-neg-25",
+      "input": {
+        "type": "int",
+        "value": "-25"
+      }
+    },
+    {
+      "description": "null отличается от отсутствующего ключа",
+      "expected": {
+        "byte_len": 1,
+        "cbor_hex": "f6"
+      },
+      "id": "null",
+      "input": {
+        "type": "null"
+      }
+    },
+    {
+      "description": "простое значение",
+      "expected": {
+        "byte_len": 1,
+        "cbor_hex": "f5"
+      },
+      "id": "bool-true",
+      "input": {
+        "type": "bool",
+        "value": true
+      }
+    },
+    {
+      "description": "простое значение",
+      "expected": {
+        "byte_len": 1,
+        "cbor_hex": "f4"
+      },
+      "id": "bool-false",
+      "input": {
+        "type": "bool",
+        "value": false
+      }
+    },
+    {
+      "description": "пустая строка",
+      "expected": {
+        "byte_len": 1,
+        "cbor_hex": "60"
+      },
+      "id": "text-empty",
+      "input": {
+        "type": "text",
+        "value": ""
+      }
+    },
+    {
+      "description": "U+0439 — NFC-форма",
+      "expected": {
+        "byte_len": 3,
+        "cbor_hex": "62d0b9"
+      },
+      "id": "text-cyrillic-precomposed",
+      "input": {
+        "type": "text",
+        "value": "й"
+      }
+    },
+    {
+      "description": "U+0438 U+0306 — обязан дать те же байты, что precomposed",
+      "expected": {
+        "byte_len": 3,
+        "cbor_hex": "62d0b9"
+      },
+      "id": "text-cyrillic-decomposed",
+      "input": {
+        "type": "text",
+        "value": "й"
+      }
+    },
+    {
+      "description": "U+0587 не разлагается под NFC (в отличие от NFKC)",
+      "expected": {
+        "byte_len": 3,
+        "cbor_hex": "62d687"
+      },
+      "id": "text-armenian-ligature",
+      "input": {
+        "type": "text",
+        "value": "և"
+      }
+    },
+    {
+      "description": "U+1F600: суррогатная пара в UTF-16, 4 байта в UTF-8",
+      "expected": {
+        "byte_len": 5,
+        "cbor_hex": "64f09f9880"
+      },
+      "id": "text-non-bmp",
+      "input": {
+        "type": "text",
+        "value": "😀"
+      }
+    },
+    {
+      "description": "U+200F значим и не удаляется",
+      "expected": {
+        "byte_len": 6,
+        "cbor_hex": "6561e2808f62"
+      },
+      "id": "text-rtl-marker",
+      "input": {
+        "type": "text",
+        "value": "a‏b"
+      }
+    },
+    {
+      "description": "0.10 и 0.1 различны: decimal — строка с фиксированным scale",
+      "expected": {
+        "byte_len": 5,
+        "cbor_hex": "64302e3130"
+      },
+      "id": "decimal-scale-preserved",
+      "input": {
+        "type": "text",
+        "value": "0.10"
+      }
+    },
+    {
+      "description": "парный вектор к decimal-scale-preserved",
+      "expected": {
+        "byte_len": 4,
+        "cbor_hex": "63302e31"
+      },
+      "id": "decimal-scale-alt",
+      "input": {
+        "type": "text",
+        "value": "0.1"
+      }
+    },
+    {
+      "description": "отрицательный decimal остаётся строкой",
+      "expected": {
+        "byte_len": 9,
+        "cbor_hex": "682d313233342e3530"
+      },
+      "id": "decimal-negative",
+      "input": {
+        "type": "text",
+        "value": "-1234.50"
+      }
+    },
+    {
+      "description": "-0 отличается от 0 как строка",
+      "expected": {
+        "byte_len": 3,
+        "cbor_hex": "622d30"
+      },
+      "id": "decimal-negative-zero",
+      "input": {
+        "type": "text",
+        "value": "-0"
+      }
+    },
+    {
+      "description": "UTC без дробной части",
+      "expected": {
+        "byte_len": 21,
+        "cbor_hex": "74323032362d30372d33315430303a30303a30305a"
+      },
+      "id": "timestamp-rfc3339",
+      "input": {
+        "type": "text",
+        "value": "2026-07-31T00:00:00Z"
+      }
+    },
+    {
+      "description": "60-я секунда допустима в RFC 3339 и должна кодироваться как есть",
+      "expected": {
+        "byte_len": 21,
+        "cbor_hex": "74323031362d31322d33315432333a35393a36305a"
+      },
+      "id": "timestamp-leap-second",
+      "input": {
+        "type": "text",
+        "value": "2016-12-31T23:59:60Z"
+      }
+    },
+    {
+      "description": "пустой массив",
+      "expected": {
+        "byte_len": 1,
+        "cbor_hex": "80"
+      },
+      "id": "array-empty",
+      "input": {
+        "items": [],
+        "type": "array"
+      }
+    },
+    {
+      "description": "порядок массива значим",
+      "expected": {
+        "byte_len": 5,
+        "cbor_hex": "8261616162"
+      },
+      "id": "array-order-ab",
+      "input": {
+        "items": [
+          {
+            "type": "text",
+            "value": "a"
+          },
+          {
+            "type": "text",
+            "value": "b"
+          }
+        ],
+        "type": "array"
+      }
+    },
+    {
+      "description": "парный вектор к array-order-ab",
+      "expected": {
+        "byte_len": 5,
+        "cbor_hex": "8261626161"
+      },
+      "id": "array-order-ba",
+      "input": {
+        "items": [
+          {
+            "type": "text",
+            "value": "b"
+          },
+          {
+            "type": "text",
+            "value": "a"
+          }
+        ],
+        "type": "array"
+      }
+    },
+    {
+      "description": "пустая map",
+      "expected": {
+        "byte_len": 1,
+        "cbor_hex": "a0"
+      },
+      "id": "map-empty",
+      "input": {
+        "entries": {},
+        "type": "map"
+      }
+    },
+    {
+      "description": "ключи сортируются по закодированным байтам: \"z\" перед \"aa\"",
+      "expected": {
+        "byte_len": 8,
+        "cbor_hex": "a2617a0262616101"
+      },
+      "id": "map-key-order",
+      "input": {
+        "entries": {
+          "aa": {
+            "type": "int",
+            "value": "1"
+          },
+          "z": {
+            "type": "int",
+            "value": "2"
+          }
+        },
+        "type": "map"
+      }
+    },
+    {
+      "description": "явный null в map",
+      "expected": {
+        "byte_len": 4,
+        "cbor_hex": "a16161f6"
+      },
+      "id": "map-with-null",
+      "input": {
+        "entries": {
+          "a": {
+            "type": "null"
+          }
+        },
+        "type": "map"
+      }
+    },
+    {
+      "description": "вложенная структура",
+      "expected": {
+        "byte_len": 35,
+        "cbor_hex": "a16672696768747381a26474797065694f574e45525348495065736861726563312f32"
+      },
+      "id": "map-nested",
+      "input": {
+        "entries": {
+          "rights": {
+            "items": [
+              {
+                "entries": {
+                  "share": {
+                    "type": "text",
+                    "value": "1/2"
+                  },
+                  "type": {
+                    "type": "text",
+                    "value": "OWNERSHIP"
+                  }
+                },
+                "type": "map"
+              }
+            ],
+            "type": "array"
+          }
+        },
+        "type": "map"
+      }
+    }
+  ]
+}

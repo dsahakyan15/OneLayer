@@ -1,0 +1,150 @@
+{
+  "spec": "spec/leaf-v1.md",
+  "vectors": [
+    {
+      "description": "листья сортируются по (record_id_commitment, record_version) независимо от порядка подачи",
+      "expected": {
+        "leaf_order": [
+          "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+          "b3754c1198c1c155d6c0d482ed6755cd642bc2ac970ad72785e0c298272f5587",
+          "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+          "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+          "daf13a5e73ab9df387ea71deaacfbf7273e9f23af00d968cf92ad38edd856b3f"
+        ],
+        "merkle_root": "e19c0232ae273e70cca32705054e63881e7f3890dc94a0218cd54d802c876cc4"
+      },
+      "id": "batch-five-records-unsorted-input",
+      "input": {
+        "id_key": "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a",
+        "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "records": [
+          {
+            "batch_leaf_hash": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+            "field_root": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
+            "internal_record_id": "record-c",
+            "record_commitment": "bad3a2f1437adebd2c6964f22324bce28e90cb0211fd768b511c5a0cb318562c",
+            "record_id_commitment": "c3d4d62ef7d45c5b225d0789ffcae9c037e37ecd4b1f3151548d0a81dcdbdb45",
+            "record_version": "1"
+          },
+          {
+            "batch_leaf_hash": "daf13a5e73ab9df387ea71deaacfbf7273e9f23af00d968cf92ad38edd856b3f",
+            "field_root": "2d0f9bdb66dac48b2be0095611760607a8d66977ae26b8ba186e5512c8e78da0",
+            "internal_record_id": "record-a",
+            "record_commitment": "d290f95df072e86662e3b84968a4715ee3bf069fb1c4ba7b4c4928244915b533",
+            "record_id_commitment": "e1bea18cafced687c6991b158ccc0c5e4430f6dc41c48b07167ad6475c0db537",
+            "record_version": "2"
+          },
+          {
+            "batch_leaf_hash": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+            "field_root": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
+            "internal_record_id": "record-a",
+            "record_commitment": "bad3a2f1437adebd2c6964f22324bce28e90cb0211fd768b511c5a0cb318562c",
+            "record_id_commitment": "e1bea18cafced687c6991b158ccc0c5e4430f6dc41c48b07167ad6475c0db537",
+            "record_version": "1"
+          },
+          {
+            "batch_leaf_hash": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+            "field_root": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
+            "internal_record_id": "record-b",
+            "record_commitment": "bad3a2f1437adebd2c6964f22324bce28e90cb0211fd768b511c5a0cb318562c",
+            "record_id_commitment": "0c9561a51c81df50abf0921b0fa609369afe21cf253e0929ced54634153dec04",
+            "record_version": "1"
+          },
+          {
+            "batch_leaf_hash": "b3754c1198c1c155d6c0d482ed6755cd642bc2ac970ad72785e0c298272f5587",
+            "field_root": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
+            "internal_record_id": "record-b",
+            "record_commitment": "b54a3aab8424c661e25a10d335886275998080b1518ee46ecdc2cd9cc8e2ade9",
+            "record_id_commitment": "0c9561a51c81df50abf0921b0fa609369afe21cf253e0929ced54634153dec04",
+            "record_version": "3"
+          }
+        ],
+        "registry_id": "gov.registry.land"
+      },
+      "proofs": [
+        {
+          "leaf_hash": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+          "leaf_index": 0,
+          "path": [
+            {
+              "sibling": "b3754c1198c1c155d6c0d482ed6755cd642bc2ac970ad72785e0c298272f5587",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "5859787fae53891dd46b27c69e17844e53365ac71cc9f0bb2f5e62041cfa8456",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "daf13a5e73ab9df387ea71deaacfbf7273e9f23af00d968cf92ad38edd856b3f",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_hash": "b3754c1198c1c155d6c0d482ed6755cd642bc2ac970ad72785e0c298272f5587",
+          "leaf_index": 1,
+          "path": [
+            {
+              "sibling": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "5859787fae53891dd46b27c69e17844e53365ac71cc9f0bb2f5e62041cfa8456",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "daf13a5e73ab9df387ea71deaacfbf7273e9f23af00d968cf92ad38edd856b3f",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_hash": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+          "leaf_index": 2,
+          "path": [
+            {
+              "sibling": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "aba4132a4f4f970043fcdd44cedb2ee0e089e6d36632859612c2ec461aebb25e",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "daf13a5e73ab9df387ea71deaacfbf7273e9f23af00d968cf92ad38edd856b3f",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_hash": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+          "leaf_index": 3,
+          "path": [
+            {
+              "sibling": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "aba4132a4f4f970043fcdd44cedb2ee0e089e6d36632859612c2ec461aebb25e",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "daf13a5e73ab9df387ea71deaacfbf7273e9f23af00d968cf92ad38edd856b3f",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_hash": "daf13a5e73ab9df387ea71deaacfbf7273e9f23af00d968cf92ad38edd856b3f",
+          "leaf_index": 4,
+          "path": [
+            {
+              "sibling": "bc1582b83d5b8142bc153c0ad7af6ca3c41533d65159ae850478e53d1f6cd4be",
+              "side": "LEFT"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

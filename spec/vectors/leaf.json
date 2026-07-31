@@ -1,0 +1,424 @@
+{
+  "note": "record_field_key присутствует только в векторе; в сертификате и API он не появляется никогда",
+  "spec": "spec/leaf-v1.md",
+  "vectors": [
+    {
+      "description": "одно поле: field_root равен field_tree_leaf_hash",
+      "expected": {
+        "batch_leaf_hash": "2f66991cdbd0c81ff69c2e91e695477c64fddb818488be03aeab76c3544b8fb9",
+        "field_root": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
+        "record_commitment": "bad3a2f1437adebd2c6964f22324bce28e90cb0211fd768b511c5a0cb318562c",
+        "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
+      },
+      "fields": [
+        {
+          "field_commitment": "504b60c3eecd095a21590f721c7da5469a73205b386884562b7be2db6e7353af",
+          "field_salt": "ddc6ef8d68909462eebdefac623d2a288febb7a621aa7118a51052ce766d183e",
+          "field_tree_leaf_hash": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
+          "leaf_index": 0,
+          "path": "status",
+          "path_byte_len": 6,
+          "path_bytes_hex": "737461747573",
+          "value": {
+            "type": "text",
+            "value": "ACTIVE"
+          },
+          "value_cbor_hex": "66414354495645"
+        }
+      ],
+      "id": "single-field",
+      "input": {
+        "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_version": "1",
+        "registry_id": "gov.registry.land"
+      }
+    },
+    {
+      "description": "два поля, полная пара",
+      "expected": {
+        "batch_leaf_hash": "6db13d85f5bbf7a597eb27e977c384f5b8f07149ca8d1ba43e83e5f58287aa2b",
+        "field_root": "308d5f4f953323057c57e92bcf1c6a8936a37e54cdc83a640542b0bf9576eafe",
+        "record_commitment": "08817e41ff42b1aaf5dbf8a4c30b43cd9b69a257b77343987d8b73cf1175be8e",
+        "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
+      },
+      "fields": [
+        {
+          "field_commitment": "504b60c3eecd095a21590f721c7da5469a73205b386884562b7be2db6e7353af",
+          "field_salt": "ddc6ef8d68909462eebdefac623d2a288febb7a621aa7118a51052ce766d183e",
+          "field_tree_leaf_hash": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
+          "leaf_index": 1,
+          "path": "status",
+          "path_byte_len": 6,
+          "path_bytes_hex": "737461747573",
+          "value": {
+            "type": "text",
+            "value": "ACTIVE"
+          },
+          "value_cbor_hex": "66414354495645"
+        },
+        {
+          "field_commitment": "ed7a63ec612a323c9111f236f93e9f1f5ea72015488132baab1b8f38cf52f3b1",
+          "field_salt": "3f94c84414b4dacc71a7bc40908ebb298ab074b639ecda835d15bfb9ecf3e8d3",
+          "field_tree_leaf_hash": "847d9f5e1f20871102f04ea3826bf088c91401668ce2139547c7696bf06347f2",
+          "leaf_index": 0,
+          "path": "area",
+          "path_byte_len": 4,
+          "path_bytes_hex": "61726561",
+          "value": {
+            "type": "text",
+            "value": "1234.50"
+          },
+          "value_cbor_hex": "67313233342e3530"
+        }
+      ],
+      "id": "two-fields",
+      "input": {
+        "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_version": "1",
+        "registry_id": "gov.registry.land"
+      }
+    },
+    {
+      "description": "три поля: непарный лист поднимается без хэширования",
+      "expected": {
+        "batch_leaf_hash": "d5d20eba4f915dbacb57d01a49f46b0052eb8e3153acd9081f1ad258c2c02a91",
+        "field_root": "e6e85d77cb81362cbcab68f5dda698805d1979f16309d8aac5ea9257b3687b1c",
+        "record_commitment": "881177eacdb0e0bdcdf12c4518030ef5c12b82ff351781bd77febba65a301a79",
+        "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
+      },
+      "fields": [
+        {
+          "field_commitment": "504b60c3eecd095a21590f721c7da5469a73205b386884562b7be2db6e7353af",
+          "field_salt": "ddc6ef8d68909462eebdefac623d2a288febb7a621aa7118a51052ce766d183e",
+          "field_tree_leaf_hash": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
+          "leaf_index": 2,
+          "path": "status",
+          "path_byte_len": 6,
+          "path_bytes_hex": "737461747573",
+          "value": {
+            "type": "text",
+            "value": "ACTIVE"
+          },
+          "value_cbor_hex": "66414354495645"
+        },
+        {
+          "field_commitment": "ed7a63ec612a323c9111f236f93e9f1f5ea72015488132baab1b8f38cf52f3b1",
+          "field_salt": "3f94c84414b4dacc71a7bc40908ebb298ab074b639ecda835d15bfb9ecf3e8d3",
+          "field_tree_leaf_hash": "847d9f5e1f20871102f04ea3826bf088c91401668ce2139547c7696bf06347f2",
+          "leaf_index": 0,
+          "path": "area",
+          "path_byte_len": 4,
+          "path_bytes_hex": "61726561",
+          "value": {
+            "type": "text",
+            "value": "1234.50"
+          },
+          "value_cbor_hex": "67313233342e3530"
+        },
+        {
+          "field_commitment": "57b73c67aea4d273684314e8fa469411b190abfdbfa84eff14b00936c72e462c",
+          "field_salt": "597397b1cde8dbd10811b2697bc5a58da10341a65958136a9b27a8b676e0912a",
+          "field_tree_leaf_hash": "71e91603610ea2b8c00434fafb2b922970d8e94b62baa32803f2f813e6910a13",
+          "leaf_index": 1,
+          "path": "registeredAt",
+          "path_byte_len": 12,
+          "path_bytes_hex": "726567697374657265644174",
+          "value": {
+            "type": "text",
+            "value": "2026-07-31T00:00:00Z"
+          },
+          "value_cbor_hex": "74323032362d30372d33315430303a30303a30305a"
+        }
+      ],
+      "id": "three-fields-unpaired",
+      "input": {
+        "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_version": "1",
+        "registry_id": "gov.registry.land"
+      }
+    },
+    {
+      "description": "вложенные пути с индексами массива",
+      "expected": {
+        "batch_leaf_hash": "ea2a4fbd8d26cb6370763bb6f61a4ee9f93034b9a4856895638510e34ae56319",
+        "field_root": "894b9571dce0be7f7721dcb9d2335c25196c518d1ec9fecfc11fbc3d26056aa8",
+        "record_commitment": "9a180d2c11bbf7185025bcd44cd38cd05d1411f5966de9af482dc0862898b441",
+        "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
+      },
+      "fields": [
+        {
+          "field_commitment": "3007a3205e4adc9463feca5a4d2df0c93a08890de80311571a6527ef58170840",
+          "field_salt": "b777e89bdecd4fceb81cb387787194d58a6bc3887e7554df4023b8d77e71ad5d",
+          "field_tree_leaf_hash": "039992a19bd9a433ef4e369fd83de09ea6b774042e0e286ca4c1988e6f48f043",
+          "leaf_index": 1,
+          "path": "rights/0/type",
+          "path_byte_len": 13,
+          "path_bytes_hex": "7269676874732f302f74797065",
+          "value": {
+            "type": "text",
+            "value": "OWNERSHIP"
+          },
+          "value_cbor_hex": "694f574e455253484950"
+        },
+        {
+          "field_commitment": "fcf633b649d12f2527b752bf68ad67c85d56fca26e26982575c9bdad8a273848",
+          "field_salt": "be94bd764ce85b1e4035d6dcfa7a62c04a0f79a824b646fbd5e140442b108ab6",
+          "field_tree_leaf_hash": "280975643ffd76c7588f927c778d85fff80515392d32365f04b5bb2d2d5bcab1",
+          "leaf_index": 0,
+          "path": "rights/0/share",
+          "path_byte_len": 14,
+          "path_bytes_hex": "7269676874732f302f7368617265",
+          "value": {
+            "type": "text",
+            "value": "1/2"
+          },
+          "value_cbor_hex": "63312f32"
+        },
+        {
+          "field_commitment": "6c5a322dfc28e43c34501ed6932a2ea5df5e37312fa0e6950bb2d0145e8498ff",
+          "field_salt": "66e374940fe5c128283e9b722ace016be17a3cbb40ee6788d89e2d0d302d870f",
+          "field_tree_leaf_hash": "fe2a44386e4a4f64374edde248baccf2282c36cbd1bdda974ff4de0058680f8b",
+          "leaf_index": 2,
+          "path": "rights/1/type",
+          "path_byte_len": 13,
+          "path_bytes_hex": "7269676874732f312f74797065",
+          "value": {
+            "type": "text",
+            "value": "MORTGAGE"
+          },
+          "value_cbor_hex": "684d4f525447414745"
+        },
+        {
+          "field_commitment": "504b60c3eecd095a21590f721c7da5469a73205b386884562b7be2db6e7353af",
+          "field_salt": "ddc6ef8d68909462eebdefac623d2a288febb7a621aa7118a51052ce766d183e",
+          "field_tree_leaf_hash": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
+          "leaf_index": 3,
+          "path": "status",
+          "path_byte_len": 6,
+          "path_bytes_hex": "737461747573",
+          "value": {
+            "type": "text",
+            "value": "ACTIVE"
+          },
+          "value_cbor_hex": "66414354495645"
+        }
+      ],
+      "id": "nested-paths",
+      "input": {
+        "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_version": "7",
+        "registry_id": "gov.registry.land"
+      }
+    },
+    {
+      "description": "порядок листьев — по path_bytes, не по code points: \"z\" < \"aa\" ложно",
+      "expected": {
+        "batch_leaf_hash": "838334c45d551ba4f516ef853d74be294b4c091b0f252376f42fc7932666005f",
+        "field_root": "ea4612f8ea6cd40ff32d66096106593f5bf7513b3639612af8ab1aa10522e92d",
+        "record_commitment": "41effc473783e29ef417efd159eb1d7d992a4207712f1f243375112f866f1127",
+        "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
+      },
+      "fields": [
+        {
+          "field_commitment": "c4600566838386b43552949086266073f90e91b8120d9ce51ddbf18686e953f8",
+          "field_salt": "ba4ef3c383024cbb72af6de5cae6719836e80ba5910a26ad9542c8cc874c283c",
+          "field_tree_leaf_hash": "06c59b39f1a45689dcd85e1e5083f0dd3118bb1b6314a10b50d8fe2b0f81466c",
+          "leaf_index": 1,
+          "path": "z",
+          "path_byte_len": 1,
+          "path_bytes_hex": "7a",
+          "value": {
+            "type": "int",
+            "value": "1"
+          },
+          "value_cbor_hex": "01"
+        },
+        {
+          "field_commitment": "c9360a211adf40d40a5cb1bc06bc7e1961d1efb4a3c4448f18086b669d122321",
+          "field_salt": "879b877d80d529b5c3aedb9dc967bd3b52f27e0f6c2dfd04d73fc1ef4628d7ac",
+          "field_tree_leaf_hash": "9a1b864a600743deaf42d15d9f07d9c41ae1923bf1f3d36b402fe0d5260478c0",
+          "leaf_index": 0,
+          "path": "aa",
+          "path_byte_len": 2,
+          "path_bytes_hex": "6161",
+          "value": {
+            "type": "int",
+            "value": "2"
+          },
+          "value_cbor_hex": "02"
+        },
+        {
+          "field_commitment": "50a63cf61298866c5c4f5a1a74533e73c09c1a22868b129742913aba01334b7c",
+          "field_salt": "4478c97bd2a779406ff52699ec2c2314f76f50e004e65e5fbdf35fa7e50bb380",
+          "field_tree_leaf_hash": "45424e35d9d57c9c56d7d5b550504b6e9109d3a9eb75ac1a26a7a33dd8cc269f",
+          "leaf_index": 2,
+          "path": "а",
+          "path_byte_len": 2,
+          "path_bytes_hex": "d0b0",
+          "value": {
+            "type": "int",
+            "value": "3"
+          },
+          "value_cbor_hex": "03"
+        }
+      ],
+      "id": "path-sorting-by-bytes",
+      "input": {
+        "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_version": "1",
+        "registry_id": "gov.registry.land"
+      }
+    },
+    {
+      "description": "путь нормализуется NFC до вычисления соли и длины",
+      "expected": {
+        "batch_leaf_hash": "97bbcb8a3afae5760d0ed28d19ec4ace94ac5ee051765178fafda115b2d7f3dd",
+        "field_root": "d7d3af744bb00a8f8de49846f7865e9de526edd8e6a6a919e6e96b1a8262e8eb",
+        "record_commitment": "9f8cac72843b42f52171ed3007c2bb629aaca278ca37f9ae01b4a22608184f0a",
+        "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
+      },
+      "fields": [
+        {
+          "field_commitment": "fb1d9d9ea601a54bea0a230d0368063a86755d4611e7395c857b524291a7cb0e",
+          "field_salt": "3c15893205bb641bd57288ca115ebadc151988d387b40737d54f04be10d1efd7",
+          "field_tree_leaf_hash": "d7d3af744bb00a8f8de49846f7865e9de526edd8e6a6a919e6e96b1a8262e8eb",
+          "leaf_index": 0,
+          "path": "й",
+          "path_byte_len": 2,
+          "path_bytes_hex": "d0b9",
+          "value": {
+            "type": "text",
+            "value": "значение"
+          },
+          "value_cbor_hex": "70d0b7d0bdd0b0d187d0b5d0bdd0b8d0b5"
+        }
+      ],
+      "id": "unicode-path-nfc",
+      "input": {
+        "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_version": "1",
+        "registry_id": "gov.registry.land"
+      }
+    },
+    {
+      "description": "поле со значением null присутствует в дереве",
+      "expected": {
+        "batch_leaf_hash": "375f6e11a77844f7414830f0b02d4af5e68be4c821b51fde25e5e10818d12e7a",
+        "field_root": "f94c069a376cfb9cd80a567efc69d17f9059138dfef58bceb38202fe46381918",
+        "record_commitment": "13af283040999dba8ce8a1271d727b96f653272c55b6329830fd808a8145feb0",
+        "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
+      },
+      "fields": [
+        {
+          "field_commitment": "2f29677999e2101706354fc87d2fdde21b997a56e425fbbe8a826b6a8890ace6",
+          "field_salt": "455dc5f49d4eabfb81e25eae11e98fad01e8a9efbb6f027e52db76eba7229b2d",
+          "field_tree_leaf_hash": "c7db7c1be25a20af873586b3e86f06618d1067ddfe429465a038ccb16d889aff",
+          "leaf_index": 0,
+          "path": "encumbrances",
+          "path_byte_len": 12,
+          "path_bytes_hex": "656e63756d6272616e636573",
+          "value": {
+            "type": "null"
+          },
+          "value_cbor_hex": "f6"
+        },
+        {
+          "field_commitment": "504b60c3eecd095a21590f721c7da5469a73205b386884562b7be2db6e7353af",
+          "field_salt": "ddc6ef8d68909462eebdefac623d2a288febb7a621aa7118a51052ce766d183e",
+          "field_tree_leaf_hash": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
+          "leaf_index": 1,
+          "path": "status",
+          "path_byte_len": 6,
+          "path_bytes_hex": "737461747573",
+          "value": {
+            "type": "text",
+            "value": "ACTIVE"
+          },
+          "value_cbor_hex": "66414354495645"
+        }
+      ],
+      "id": "null-value-field",
+      "input": {
+        "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_version": "2",
+        "registry_id": "gov.registry.land"
+      }
+    },
+    {
+      "description": "пустой массив отличается от null и от отсутствия поля",
+      "expected": {
+        "batch_leaf_hash": "cd6676efc969646eec9c67a071aa6546e0a1324c913d05f7e1d73475909a71f5",
+        "field_root": "5975495883e69d0f07f6bb6de40bfdae1eec9d03f53be0860e9a1fb2c815e08e",
+        "record_commitment": "3d457ce714ad7bf6e0c771ce7dab8ed49dc661d6c7463aea1f38cae29c12bba6",
+        "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
+      },
+      "fields": [
+        {
+          "field_commitment": "e45e2aa3c0203820af85e8eb4b71109a71010abc285914e663cb20f15e49532b",
+          "field_salt": "455dc5f49d4eabfb81e25eae11e98fad01e8a9efbb6f027e52db76eba7229b2d",
+          "field_tree_leaf_hash": "285c69d77eee3f22cdcb92a4ea462c6b182610e2e1eacc2949729c38a10ba4b9",
+          "leaf_index": 0,
+          "path": "encumbrances",
+          "path_byte_len": 12,
+          "path_bytes_hex": "656e63756d6272616e636573",
+          "value": {
+            "items": [],
+            "type": "array"
+          },
+          "value_cbor_hex": "80"
+        },
+        {
+          "field_commitment": "504b60c3eecd095a21590f721c7da5469a73205b386884562b7be2db6e7353af",
+          "field_salt": "ddc6ef8d68909462eebdefac623d2a288febb7a621aa7118a51052ce766d183e",
+          "field_tree_leaf_hash": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
+          "leaf_index": 1,
+          "path": "status",
+          "path_byte_len": 6,
+          "path_bytes_hex": "737461747573",
+          "value": {
+            "type": "text",
+            "value": "ACTIVE"
+          },
+          "value_cbor_hex": "66414354495645"
+        }
+      ],
+      "id": "empty-array-value",
+      "input": {
+        "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_version": "2",
+        "registry_id": "gov.registry.land"
+      }
+    },
+    {
+      "description": "record_version в record_commitment кодируется u64_be",
+      "expected": {
+        "batch_leaf_hash": "268306b21b99e42466284efa765decc8267aa60119a948d39fe250f45ad2efac",
+        "field_root": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
+        "record_commitment": "c24f994a6eaa3e441e14b8afebcbb42baab7b5f453de9a4aaa8603110bb00417",
+        "registry_id_hash": "df3ef0379f353cc7d2600034e8606c0a7c315edafbdca2317de2ea5695139fcc"
+      },
+      "fields": [
+        {
+          "field_commitment": "504b60c3eecd095a21590f721c7da5469a73205b386884562b7be2db6e7353af",
+          "field_salt": "ddc6ef8d68909462eebdefac623d2a288febb7a621aa7118a51052ce766d183e",
+          "field_tree_leaf_hash": "7264ecb98032d0368e7898c5d643b1fce19df540cabd14741d278c8ab51f9826",
+          "leaf_index": 0,
+          "path": "status",
+          "path_byte_len": 6,
+          "path_bytes_hex": "737461747573",
+          "value": {
+            "type": "text",
+            "value": "ACTIVE"
+          },
+          "value_cbor_hex": "66414354495645"
+        }
+      ],
+      "id": "high-record-version",
+      "input": {
+        "record_field_key": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+        "record_version": "18446744073709551615",
+        "registry_id": "gov.registry.land"
+      }
+    }
+  ]
+}

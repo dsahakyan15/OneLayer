@@ -1,0 +1,515 @@
+{
+  "rules": {
+    "leaf": "SHA256(0x00 || commitment)",
+    "node": "SHA256(0x01 || left || right)",
+    "unpaired": "поднимается на следующий уровень без хэширования; дублирование запрещено"
+  },
+  "spec": "spec/merkle-tree-v1.md",
+  "vectors": [
+    {
+      "description": "1 листьев; непарные узлы поднимаются без дублирования",
+      "expected": {
+        "root": "7f9c9e31ac8256ca2f258583df262dbc7d6f68f2a03043d5c99a4ae5a7396ce9"
+      },
+      "id": "leaves-1",
+      "leaf_hashes": [
+        "7f9c9e31ac8256ca2f258583df262dbc7d6f68f2a03043d5c99a4ae5a7396ce9"
+      ],
+      "proofs": [
+        {
+          "leaf_index": 0,
+          "path": []
+        }
+      ]
+    },
+    {
+      "description": "2 листьев; непарные узлы поднимаются без дублирования",
+      "expected": {
+        "root": "fc1cb46daa84d0e650f2e714a970936d1de022735e136e275eb27fa010402a6f"
+      },
+      "id": "leaves-2",
+      "leaf_hashes": [
+        "7f9c9e31ac8256ca2f258583df262dbc7d6f68f2a03043d5c99a4ae5a7396ce9",
+        "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f"
+      ],
+      "proofs": [
+        {
+          "leaf_index": 0,
+          "path": [
+            {
+              "sibling": "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 1,
+          "path": [
+            {
+              "sibling": "7f9c9e31ac8256ca2f258583df262dbc7d6f68f2a03043d5c99a4ae5a7396ce9",
+              "side": "LEFT"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "description": "3 листьев; непарные узлы поднимаются без дублирования",
+      "expected": {
+        "root": "66b8d1a5f040f71eafdff2e177d32003ea0ee51178ca3a9219c33c3dec04cda7"
+      },
+      "id": "leaves-3",
+      "leaf_hashes": [
+        "7f9c9e31ac8256ca2f258583df262dbc7d6f68f2a03043d5c99a4ae5a7396ce9",
+        "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+        "58cc2f44d3a27866874701fbad573da9ad1cfd88fa3145531c822f20a58beea1"
+      ],
+      "proofs": [
+        {
+          "leaf_index": 0,
+          "path": [
+            {
+              "sibling": "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "58cc2f44d3a27866874701fbad573da9ad1cfd88fa3145531c822f20a58beea1",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 1,
+          "path": [
+            {
+              "sibling": "7f9c9e31ac8256ca2f258583df262dbc7d6f68f2a03043d5c99a4ae5a7396ce9",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "58cc2f44d3a27866874701fbad573da9ad1cfd88fa3145531c822f20a58beea1",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 2,
+          "path": [
+            {
+              "sibling": "fc1cb46daa84d0e650f2e714a970936d1de022735e136e275eb27fa010402a6f",
+              "side": "LEFT"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "description": "4 листьев; непарные узлы поднимаются без дублирования",
+      "expected": {
+        "root": "5614dc04cedb9876bb69c2129121c67df5efb7d7d7169aa6aea33f94670d6633"
+      },
+      "id": "leaves-4",
+      "leaf_hashes": [
+        "7f9c9e31ac8256ca2f258583df262dbc7d6f68f2a03043d5c99a4ae5a7396ce9",
+        "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+        "58cc2f44d3a27866874701fbad573da9ad1cfd88fa3145531c822f20a58beea1",
+        "d9cf8add8675a1b25627d7b0ec33bc177cb3930b0b6e995d79c386b980b2f4d6"
+      ],
+      "proofs": [
+        {
+          "leaf_index": 0,
+          "path": [
+            {
+              "sibling": "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "1e25b3f5bc79ec1c001a58846dc6c6468340da1c02d40b14d3c0e3cd98c87664",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 2,
+          "path": [
+            {
+              "sibling": "d9cf8add8675a1b25627d7b0ec33bc177cb3930b0b6e995d79c386b980b2f4d6",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "fc1cb46daa84d0e650f2e714a970936d1de022735e136e275eb27fa010402a6f",
+              "side": "LEFT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 3,
+          "path": [
+            {
+              "sibling": "58cc2f44d3a27866874701fbad573da9ad1cfd88fa3145531c822f20a58beea1",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "fc1cb46daa84d0e650f2e714a970936d1de022735e136e275eb27fa010402a6f",
+              "side": "LEFT"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "description": "5 листьев; непарные узлы поднимаются без дублирования",
+      "expected": {
+        "root": "37711ec04165b198c08e06c9e970964a142747de607efd657d85759c5eed5e3c"
+      },
+      "id": "leaves-5",
+      "leaf_hashes": [
+        "7f9c9e31ac8256ca2f258583df262dbc7d6f68f2a03043d5c99a4ae5a7396ce9",
+        "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+        "58cc2f44d3a27866874701fbad573da9ad1cfd88fa3145531c822f20a58beea1",
+        "d9cf8add8675a1b25627d7b0ec33bc177cb3930b0b6e995d79c386b980b2f4d6",
+        "82f02cf2ac0074619e6d747c35e08b29431a16943ddf81cfd9065c004ee6364a"
+      ],
+      "proofs": [
+        {
+          "leaf_index": 0,
+          "path": [
+            {
+              "sibling": "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "1e25b3f5bc79ec1c001a58846dc6c6468340da1c02d40b14d3c0e3cd98c87664",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "82f02cf2ac0074619e6d747c35e08b29431a16943ddf81cfd9065c004ee6364a",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 2,
+          "path": [
+            {
+              "sibling": "d9cf8add8675a1b25627d7b0ec33bc177cb3930b0b6e995d79c386b980b2f4d6",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "fc1cb46daa84d0e650f2e714a970936d1de022735e136e275eb27fa010402a6f",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "82f02cf2ac0074619e6d747c35e08b29431a16943ddf81cfd9065c004ee6364a",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 4,
+          "path": [
+            {
+              "sibling": "5614dc04cedb9876bb69c2129121c67df5efb7d7d7169aa6aea33f94670d6633",
+              "side": "LEFT"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "description": "7 листьев; непарные узлы поднимаются без дублирования",
+      "expected": {
+        "root": "9b2f1295c253ef1c0cd2077e99368c407a84c525de4a441b443ed525a7730a64"
+      },
+      "id": "leaves-7",
+      "leaf_hashes": [
+        "7f9c9e31ac8256ca2f258583df262dbc7d6f68f2a03043d5c99a4ae5a7396ce9",
+        "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+        "58cc2f44d3a27866874701fbad573da9ad1cfd88fa3145531c822f20a58beea1",
+        "d9cf8add8675a1b25627d7b0ec33bc177cb3930b0b6e995d79c386b980b2f4d6",
+        "82f02cf2ac0074619e6d747c35e08b29431a16943ddf81cfd9065c004ee6364a",
+        "086fb60bd968fe68ecec6a8d826ea5aa7d3d8020e644d7c5d0e07ded456ca3e8",
+        "fe04167824f4e7f0d509a6eff6f5eb2776ebee179c0917ce9507dbd6a78ac81e"
+      ],
+      "proofs": [
+        {
+          "leaf_index": 0,
+          "path": [
+            {
+              "sibling": "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "1e25b3f5bc79ec1c001a58846dc6c6468340da1c02d40b14d3c0e3cd98c87664",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "8ec8795881ef07020829010cca2e053c5baa923cff2355e4b4e7fbb8a34f63a0",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 3,
+          "path": [
+            {
+              "sibling": "58cc2f44d3a27866874701fbad573da9ad1cfd88fa3145531c822f20a58beea1",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "fc1cb46daa84d0e650f2e714a970936d1de022735e136e275eb27fa010402a6f",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "8ec8795881ef07020829010cca2e053c5baa923cff2355e4b4e7fbb8a34f63a0",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 6,
+          "path": [
+            {
+              "sibling": "8902c13fd03fff02028488b641b406acd48fa5fe0d3636f704eccf400363b3c6",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "5614dc04cedb9876bb69c2129121c67df5efb7d7d7169aa6aea33f94670d6633",
+              "side": "LEFT"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "description": "8 листьев; непарные узлы поднимаются без дублирования",
+      "expected": {
+        "root": "36e6b3d01521d1e5eec7fa2dc58ff7cb8620126a312d561e1fab2edb77371f1a"
+      },
+      "id": "leaves-8",
+      "leaf_hashes": [
+        "7f9c9e31ac8256ca2f258583df262dbc7d6f68f2a03043d5c99a4ae5a7396ce9",
+        "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+        "58cc2f44d3a27866874701fbad573da9ad1cfd88fa3145531c822f20a58beea1",
+        "d9cf8add8675a1b25627d7b0ec33bc177cb3930b0b6e995d79c386b980b2f4d6",
+        "82f02cf2ac0074619e6d747c35e08b29431a16943ddf81cfd9065c004ee6364a",
+        "086fb60bd968fe68ecec6a8d826ea5aa7d3d8020e644d7c5d0e07ded456ca3e8",
+        "fe04167824f4e7f0d509a6eff6f5eb2776ebee179c0917ce9507dbd6a78ac81e",
+        "36ca344219d739d971ddbe4046065dcc95c594a160afa4b8e223c6b4fab6fc63"
+      ],
+      "proofs": [
+        {
+          "leaf_index": 0,
+          "path": [
+            {
+              "sibling": "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "1e25b3f5bc79ec1c001a58846dc6c6468340da1c02d40b14d3c0e3cd98c87664",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "892d02f8da915ecfe23e1e1bd8d2e856c585b12788eae413dd64ed6e64191082",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 4,
+          "path": [
+            {
+              "sibling": "086fb60bd968fe68ecec6a8d826ea5aa7d3d8020e644d7c5d0e07ded456ca3e8",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "0fc4280e471b13c71923202bb52e19db91d3937ca54a5a5fc5cbc3fca793222b",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "5614dc04cedb9876bb69c2129121c67df5efb7d7d7169aa6aea33f94670d6633",
+              "side": "LEFT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 7,
+          "path": [
+            {
+              "sibling": "fe04167824f4e7f0d509a6eff6f5eb2776ebee179c0917ce9507dbd6a78ac81e",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "8902c13fd03fff02028488b641b406acd48fa5fe0d3636f704eccf400363b3c6",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "5614dc04cedb9876bb69c2129121c67df5efb7d7d7169aa6aea33f94670d6633",
+              "side": "LEFT"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "description": "9 листьев; непарные узлы поднимаются без дублирования",
+      "expected": {
+        "root": "6343c8eba8bbdb7cae2f47155bbea2cc65e8a8c63d385fce7d666769cb5732e3"
+      },
+      "id": "leaves-9",
+      "leaf_hashes": [
+        "7f9c9e31ac8256ca2f258583df262dbc7d6f68f2a03043d5c99a4ae5a7396ce9",
+        "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+        "58cc2f44d3a27866874701fbad573da9ad1cfd88fa3145531c822f20a58beea1",
+        "d9cf8add8675a1b25627d7b0ec33bc177cb3930b0b6e995d79c386b980b2f4d6",
+        "82f02cf2ac0074619e6d747c35e08b29431a16943ddf81cfd9065c004ee6364a",
+        "086fb60bd968fe68ecec6a8d826ea5aa7d3d8020e644d7c5d0e07ded456ca3e8",
+        "fe04167824f4e7f0d509a6eff6f5eb2776ebee179c0917ce9507dbd6a78ac81e",
+        "36ca344219d739d971ddbe4046065dcc95c594a160afa4b8e223c6b4fab6fc63",
+        "6b147d6de4e63bbe31ecdd88f064b863dbe86de062a8262fca36ef7993851a05"
+      ],
+      "proofs": [
+        {
+          "leaf_index": 0,
+          "path": [
+            {
+              "sibling": "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "1e25b3f5bc79ec1c001a58846dc6c6468340da1c02d40b14d3c0e3cd98c87664",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "892d02f8da915ecfe23e1e1bd8d2e856c585b12788eae413dd64ed6e64191082",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "6b147d6de4e63bbe31ecdd88f064b863dbe86de062a8262fca36ef7993851a05",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 4,
+          "path": [
+            {
+              "sibling": "086fb60bd968fe68ecec6a8d826ea5aa7d3d8020e644d7c5d0e07ded456ca3e8",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "0fc4280e471b13c71923202bb52e19db91d3937ca54a5a5fc5cbc3fca793222b",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "5614dc04cedb9876bb69c2129121c67df5efb7d7d7169aa6aea33f94670d6633",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "6b147d6de4e63bbe31ecdd88f064b863dbe86de062a8262fca36ef7993851a05",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 8,
+          "path": [
+            {
+              "sibling": "36e6b3d01521d1e5eec7fa2dc58ff7cb8620126a312d561e1fab2edb77371f1a",
+              "side": "LEFT"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "description": "16 листьев; непарные узлы поднимаются без дублирования",
+      "expected": {
+        "root": "7215e7f842fbf879d10ddca21661203ea3af8fbf57e8f07a46fa8a4c400c4d6f"
+      },
+      "id": "leaves-16",
+      "leaf_hashes": [
+        "7f9c9e31ac8256ca2f258583df262dbc7d6f68f2a03043d5c99a4ae5a7396ce9",
+        "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+        "58cc2f44d3a27866874701fbad573da9ad1cfd88fa3145531c822f20a58beea1",
+        "d9cf8add8675a1b25627d7b0ec33bc177cb3930b0b6e995d79c386b980b2f4d6",
+        "82f02cf2ac0074619e6d747c35e08b29431a16943ddf81cfd9065c004ee6364a",
+        "086fb60bd968fe68ecec6a8d826ea5aa7d3d8020e644d7c5d0e07ded456ca3e8",
+        "fe04167824f4e7f0d509a6eff6f5eb2776ebee179c0917ce9507dbd6a78ac81e",
+        "36ca344219d739d971ddbe4046065dcc95c594a160afa4b8e223c6b4fab6fc63",
+        "6b147d6de4e63bbe31ecdd88f064b863dbe86de062a8262fca36ef7993851a05",
+        "dd88ef4e7faeb459c3bcd307e806ee912ac258fcf9156716f0b5174791bbb0fb",
+        "65b0fcf18c209701f7041286a9e28ae22a7a4147e8949e6199098f9e65a638df",
+        "9d549855f98f22ebd291a0a474d50eb4a8881667a1ca5149047258f066c20251",
+        "43a31b512289d7677294798a0b2576e464fb35ff9f1b9d9a4c96c31039d43c65",
+        "472c6d35d1e76b426ae8b6e6c2ea3b68033482746932d08a9781ddf0b84aad69",
+        "b8d77cb62333a7fc551454c2939c7318e335f827f6545dbbf1ad05c497b3fa49",
+        "2db93cf3d5ee7a4302570242ca5deae3b8269037e6bf79bfda3a81f119ab3da9"
+      ],
+      "proofs": [
+        {
+          "leaf_index": 0,
+          "path": [
+            {
+              "sibling": "1fd4247443c9440cb3c48c28851937196bc156032d70a96c98e127ecb347e45f",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "1e25b3f5bc79ec1c001a58846dc6c6468340da1c02d40b14d3c0e3cd98c87664",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "892d02f8da915ecfe23e1e1bd8d2e856c585b12788eae413dd64ed6e64191082",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "7e4c0ae043470fa385e4ebc3f712e55a707fa914ecd8fa6ae4c252f8c4f7c41c",
+              "side": "RIGHT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 8,
+          "path": [
+            {
+              "sibling": "dd88ef4e7faeb459c3bcd307e806ee912ac258fcf9156716f0b5174791bbb0fb",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "7b1604a0fb1992b49a24f6458659781f6f6aafe22219d963cce2120ab6adf571",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "72646f8866a01c02d4e1a5ce4062466b4510e0384a896723de51e9d8b2676bf9",
+              "side": "RIGHT"
+            },
+            {
+              "sibling": "36e6b3d01521d1e5eec7fa2dc58ff7cb8620126a312d561e1fab2edb77371f1a",
+              "side": "LEFT"
+            }
+          ]
+        },
+        {
+          "leaf_index": 15,
+          "path": [
+            {
+              "sibling": "b8d77cb62333a7fc551454c2939c7318e335f827f6545dbbf1ad05c497b3fa49",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "fed5b2c3c172e1eb8793238a0fdda8548424258875fe1a03065165a6b56b61b8",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "c3e0c15da38ec8f1b089b1d2f2fe9afe50f271978d85be9a2bd112221e942dea",
+              "side": "LEFT"
+            },
+            {
+              "sibling": "36e6b3d01521d1e5eec7fa2dc58ff7cb8620126a312d561e1fab2edb77371f1a",
+              "side": "LEFT"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
