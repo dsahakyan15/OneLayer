@@ -36,3 +36,60 @@ The program deploy keeps Solana CLI preflight enabled; each registry/bootstrap/p
 ```
 
 Artifacts are written under ignored `deploy/devnet-demo/artifacts/`. The QR SVG is `certificate-qr.svg`; its payload opens the loopback verification page, which submits the embedded certificate package to the verifier and requires a finalized devnet anchor.
+
+## Visual MVP (§5.4)
+
+The same guarded Compose project serves the two panels; only one UI port is
+added and the loopback-only binding, labels, networks, tmpfs keys and synthetic
+marker are unchanged.
+
+```bash
+./deploy/devnet-demo/demo ui
+# Admin panel:    http://127.0.0.1:8091/admin
+# OneLayer panel: http://127.0.0.1:8091/verify
+# Demo credentials: /dev/shm/onelayer-devnet-demo/admin-credentials.json
+```
+
+`operator` prepares batches, reviews the transaction, requests the wallet
+signature and issues certificates; `auditor` is read-only, and that limit is
+enforced by the Admin API, not by hiding buttons. Credentials, the software
+issuer key and the payer keypair are generated per run into tmpfs.
+
+Two publish paths coexist and do not substitute for each other:
+
+- CLI publish keeps the `ONELAYER_DEVNET_TX_APPROVED` approval digest;
+- browser publish requires a reviewed click, a Wallet Standard prompt and
+  server-side validation that the signed wire transaction matches the stored
+  intent byte for byte.
+
+Program deploy and upgrade stay CLI-only with their own approval digest.
+
+The browser needs a Wallet Standard wallet on `solana:devnet` with the operator
+role. No keypair file, private key or seed phrase is ever accepted by the UI.
+
+## Browser tests
+
+```bash
+# deterministic, runs in default CI, spends no SOL and needs no Docker
+npm --prefix tests/e2e-web test
+
+# guarded live devnet smoke: separate explicit approval, run once before a
+# presentation or release
+APPROVE_ONELAYER_LIVE_DEVNET_SMOKE=yes \
+ONELAYER_DEVNET_DEPLOY_APPROVED=<program-approval-digest> \
+ONELAYER_DEVNET_TX_APPROVED=<chain-approval-digest> \
+./deploy/devnet-demo/scripts/live-smoke
+```
+
+The live smoke verifies a certificate that the guarded CLI publish anchored, so
+no key material enters the browser. Evidence lands in
+`deploy/devnet-demo/artifacts/live-smoke/`.
+
+## QR transport
+
+The normative QR transport is HTTPS. The only exception in this demo is the
+exact loopback origin `http://127.0.0.1:8091`, visibly marked
+`DEVNET SYNTHETIC DEMO`; any other HTTP URL is rejected. A phone cannot open the
+demo host's loopback address, so responsive layout and the camera flow are
+checked in a fresh browser context on the same host. Cross-device scanning needs
+a separately approved HTTPS staging environment and is outside this stack.

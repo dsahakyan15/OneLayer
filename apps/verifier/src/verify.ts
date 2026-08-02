@@ -18,7 +18,13 @@ import {
 } from "../../../packages/merkle-ts/src/index.ts";
 
 export type IncidentIndexStatus = "CHECKED" | "STALE" | "UNAVAILABLE" | "INDEX_INCONSISTENT" | "RPC_DISAGREEMENT";
-export type VerificationStatus = "VERIFIED" | "VERIFIED_NO_INCIDENT_CHECK" | "DISPUTED" | "INVALID";
+export type VerificationStatus =
+  | "VERIFIED"
+  | "VERIFIED_HISTORICAL"
+  | "SUPERSEDED"
+  | "VERIFIED_NO_INCIDENT_CHECK"
+  | "DISPUTED"
+  | "INVALID";
 
 export interface ObservedAnchor {
   programId: Uint8Array;
@@ -57,9 +63,25 @@ export interface IncidentIndex {
   query(registryId: string, batchSequence: bigint): Promise<IncidentIndexResponse | null>;
 }
 
+/**
+ * Lifecycle of the certificate itself and of the record version it discloses.
+ * `VERIFIED_HISTORICAL` and `SUPERSEDED` are computed from this, never inferred
+ * from the incident index (§2.3).
+ */
+export interface RecordLifecycle {
+  registryId: string;
+  currentRecordVersion: bigint;
+  certificateStatus: "ACTIVE" | "SUPERSEDED" | "REVOKED";
+}
+
+export interface LifecycleIndex {
+  query(registryId: string, certificateId: string): Promise<RecordLifecycle | null>;
+}
+
 export interface VerifyOptions {
   maxIndexLagSlots?: bigint;
   maxRpcHeadDifference?: bigint;
+  lifecycle?: LifecycleIndex;
 }
 
 export interface VerificationResult {
@@ -72,7 +94,13 @@ export interface VerificationResult {
   indexedThroughSlot?: string;
   rpcFinalizedHeadSlot?: string;
   indexLagSlots?: string;
+  recordVersion?: string;
+  currentRecordVersion?: string;
+  certificateLifecycle?: RecordLifecycle["certificateStatus"];
   warnings: string[];
+  /** Present only once the disclosure and the proofs have been verified. */
+  disclosureMode?: CertificateBody["disclosureMode"];
+  disclosedFields?: Record<string, string | boolean | null>;
 }
 
 function equal(left: Uint8Array, right: Uint8Array): boolean {
@@ -172,6 +200,90 @@ function verifyObservedAnchor(body: CertificateBody, observed: ObservedAnchor): 
 }
 
 export async function verifyCertificate(
+  signed: SignedCertificate,
+  chain: ChainReader,
+  incidents: IncidentIndex,
+  options: VerifyOptions = {},
+): Promise<VerificationResult> {
+  const result = await verifyAgainstAnchor(signed, chain, incidents, options);
+  if (result.status === "INVALID") return result;
+  const withLifecycle = await applyLifecycle(signed.body, result, options.lifecycle);
+  // The disclosure is reported only here, after signature, field proofs and
+  // batch proof succeeded: a consumer must never render values that were not
+  // proven against the anchored root.
+  return {
+    ...withLifecycle,
+    disclosureMode: signed.body.disclosureMode,
+    disclosedFields: plainFields(signed.body.disclosedFields),
+  };
+}
+
+/** Canonical values in a form a UI can render without decoding CBOR. */
+function plainFields(fields: CertificateBody["disclosedFields"]): Record<string, string | boolean | null> {
+  const plain: Record<string, string | boolean | null> = {};
+  for (const path of Object.keys(fields).sort()) {
+    const value = fields[path];
+    plain[path] =
+      value.type === "text" ? value.value
+      : value.type === "bool" ? value.value
+      : value.type === "int" ? value.value
+      : value.type === "bytes" ? value.hex
+      : null;
+  }
+  return plain;
+}
+
+/**
+ * Downgrades a cryptographically proven certificate by its lifecycle.
+ * `DISPUTED` and `VERIFIED_NO_INCIDENT_CHECK` are never upgraded away: an open
+ * incident or an unproven incident index outranks record freshness.
+ */
+async function applyLifecycle(
+  body: CertificateBody,
+  result: VerificationResult,
+  lifecycle: LifecycleIndex | undefined,
+): Promise<VerificationResult> {
+  const enriched: VerificationResult = { ...result, recordVersion: body.recordVersion.toString() };
+  if (lifecycle === undefined) return enriched;
+  let current: RecordLifecycle | null;
+  try {
+    current = await lifecycle.query(body.registryId, certificateId(body));
+  } catch {
+    current = null;
+  }
+  if (current === null || current.registryId !== body.registryId) {
+    return {
+      ...enriched,
+      code: enriched.code ?? "CURRENT_STATUS_UNAVAILABLE",
+      warnings: [...enriched.warnings, "Current record status is unavailable."],
+    };
+  }
+  const withStatus: VerificationResult = {
+    ...enriched,
+    currentRecordVersion: current.currentRecordVersion.toString(),
+    certificateLifecycle: current.certificateStatus,
+  };
+  if (result.status !== "VERIFIED") return withStatus;
+  if (current.certificateStatus !== "ACTIVE") {
+    return {
+      ...withStatus,
+      status: "SUPERSEDED",
+      code: "RECORD_SUPERSEDED",
+      warnings: [...withStatus.warnings, "This certificate has been replaced."],
+    };
+  }
+  if (current.currentRecordVersion > body.recordVersion) {
+    return {
+      ...withStatus,
+      status: "VERIFIED_HISTORICAL",
+      code: "RECORD_SUPERSEDED",
+      warnings: [...withStatus.warnings, "A newer version of this record exists."],
+    };
+  }
+  return withStatus;
+}
+
+async function verifyAgainstAnchor(
   signed: SignedCertificate,
   chain: ChainReader,
   incidents: IncidentIndex,

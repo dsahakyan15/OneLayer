@@ -16,7 +16,9 @@ import {
   type ChainReader,
   type IncidentIndex,
   type IncidentIndexResponse,
+  type LifecycleIndex,
   type ObservedAnchor,
+  type RecordLifecycle,
 } from "../src/verify.ts";
 
 const signingKey = new Uint8Array(32).fill(7);
@@ -181,4 +183,104 @@ test("tampered disclosed value fails before chain access", async () => {
   assert.equal(result.status, "INVALID");
   assert.equal(result.code, "FIELD_PROOF_INVALID");
   assert.equal(chainCalled, false);
+});
+
+function lifecycle(record: RecordLifecycle | null): LifecycleIndex {
+  return { async query() { return record; } };
+}
+
+const fresh = (signed: SignedCertificate): IncidentIndexResponse => ({
+  registryId: signed.body.registryId,
+  indexedThroughSlot: 1_040n,
+  incidents: [],
+});
+
+test("a newer record version downgrades VERIFIED to VERIFIED_HISTORICAL", async () => {
+  const signed = signedCertificate();
+  const result = await verifyCertificate(signed, chain(signed), index(fresh(signed)), {
+    lifecycle: lifecycle({
+      registryId: signed.body.registryId,
+      currentRecordVersion: 4n,
+      certificateStatus: "ACTIVE",
+    }),
+  });
+  assert.equal(result.status, "VERIFIED_HISTORICAL");
+  assert.equal(result.code, "RECORD_SUPERSEDED");
+  assert.equal(result.recordVersion, "1");
+  assert.equal(result.currentRecordVersion, "4");
+});
+
+test("a replaced certificate produces SUPERSEDED", async () => {
+  const signed = signedCertificate();
+  const result = await verifyCertificate(signed, chain(signed), index(fresh(signed)), {
+    lifecycle: lifecycle({
+      registryId: signed.body.registryId,
+      currentRecordVersion: 1n,
+      certificateStatus: "SUPERSEDED",
+    }),
+  });
+  assert.equal(result.status, "SUPERSEDED");
+  assert.equal(result.certificateLifecycle, "SUPERSEDED");
+});
+
+test("an open incident outranks record lifecycle", async () => {
+  const signed = signedCertificate();
+  const result = await verifyCertificate(
+    signed,
+    chain(signed),
+    index({
+      registryId: signed.body.registryId,
+      indexedThroughSlot: 1_040n,
+      incidents: [{ firstBatchSequence: 1n, lastBatchSequence: 3n, status: "OPEN" }],
+    }),
+    {
+      lifecycle: lifecycle({
+        registryId: signed.body.registryId,
+        currentRecordVersion: 9n,
+        certificateStatus: "SUPERSEDED",
+      }),
+    },
+  );
+  assert.equal(result.status, "DISPUTED");
+  assert.equal(result.currentRecordVersion, "9");
+});
+
+test("unavailable lifecycle keeps the anchored status and reports the gap", async () => {
+  const signed = signedCertificate();
+  const result = await verifyCertificate(signed, chain(signed), index(fresh(signed)), {
+    lifecycle: lifecycle(null),
+  });
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(result.code, "CURRENT_STATUS_UNAVAILABLE");
+  assert.match(result.warnings.join(" "), /Current record status/);
+});
+
+test("a lifecycle answer for another registry is not trusted", async () => {
+  const signed = signedCertificate();
+  const result = await verifyCertificate(signed, chain(signed), index(fresh(signed)), {
+    lifecycle: lifecycle({
+      registryId: "gov.registry.other",
+      currentRecordVersion: 9n,
+      certificateStatus: "SUPERSEDED",
+    }),
+  });
+  assert.equal(result.status, "VERIFIED");
+  assert.equal(result.code, "CURRENT_STATUS_UNAVAILABLE");
+});
+
+test("an invalid certificate is never enriched with lifecycle data", async () => {
+  const signed = signedCertificate();
+  const tampered: SignedCertificate = {
+    ...signed,
+    body: { ...signed.body, recordVersion: 2n },
+  };
+  const result = await verifyCertificate(tampered, chain(signed), index(fresh(signed)), {
+    lifecycle: lifecycle({
+      registryId: signed.body.registryId,
+      currentRecordVersion: 9n,
+      certificateStatus: "ACTIVE",
+    }),
+  });
+  assert.equal(result.status, "INVALID");
+  assert.equal(result.currentRecordVersion, undefined);
 });

@@ -3,11 +3,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node --experimental-strip-types src/main.ts",
-    "test": "node --test --experimental-strip-types tests/*.test.ts",
+    "start": "node --experimental-transform-types src/main.ts",
+    "test": "node --test --experimental-transform-types tests/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@solana/kit": "7.0.0",
+    "@solana/program-client-core": "7.0.0",
     "pg": "8.16.3",
     "qrcode": "1.5.4"
   },

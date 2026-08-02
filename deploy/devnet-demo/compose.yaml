@@ -63,7 +63,11 @@ services:
       ONELAYER_RPC_URL: https://api.devnet.solana.com
       ONELAYER_VERIFIER_URL: http://127.0.0.1:8080
       ONELAYER_PUBLIC_BASE_URL: http://127.0.0.1:8090
-    secrets: [database_url, internal_token]
+      ONELAYER_PUBLIC_WEB_URL: http://127.0.0.1:8091
+      ONELAYER_PROGRAM_ID: 6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo
+      ONELAYER_ISSUER_SECRET_FILE: /run/secrets/issuer_secret
+      ONELAYER_ADMIN_CREDENTIALS_FILE: /run/secrets/admin_credentials
+    secrets: [database_url, internal_token, issuer_secret, admin_credentials]
     ports: ["127.0.0.1:8090:8090"]
     tmpfs: [/tmp]
     networks: [data, devnet]
@@ -87,6 +91,23 @@ services:
     tmpfs: [/tmp]
     networks: [data, devnet]
     depends_on: [demo-api]
+
+  mvp-web:
+    build:
+      context: ../..
+      dockerfile: deploy/devnet-demo/Dockerfile.mvp-web
+    labels: *demo-labels
+    <<: *service-security
+    environment:
+      PORT: "8091"
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      ONELAYER_ADMIN_API_URL: http://demo-api:8090
+      ONELAYER_VERIFIER_URL: http://verifier:8080
+    ports: ["127.0.0.1:8091:8091"]
+    tmpfs: [/tmp]
+    networks: [data]
+    depends_on: [demo-api, verifier]
 
   clean-room-db:
     profiles: [recovery]
@@ -124,3 +145,7 @@ secrets:
     file: /dev/shm/onelayer-devnet-demo/database-url
   internal_token:
     file: /dev/shm/onelayer-devnet-demo/internal-token
+  issuer_secret:
+    file: /dev/shm/onelayer-devnet-demo/issuer-secret
+  admin_credentials:
+    file: /dev/shm/onelayer-devnet-demo/admin-credentials.json

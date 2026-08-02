@@ -1,0 +1,301 @@
+/*
+ * Design tokens for both route groups (§5.4). One scale for colour, type,
+ * spacing, radius and focus. Status is always icon + text; colour never carries
+ * meaning on its own. The default theme is the mandatory high-contrast one.
+ */
+:root {
+  color-scheme: dark;
+
+  --ol-bg: #05070f;
+  --ol-surface: #0d1424;
+  --ol-surface-raised: #141d33;
+  --ol-border: #2b3a5c;
+  --ol-text: #f2f6ff;
+  --ol-text-muted: #b9c5de;
+
+  --ol-accent: #7cc4ff;
+  --ol-ok: #6ff0b6;
+  --ol-warn: #ffd479;
+  --ol-bad: #ff8aa1;
+  --ol-info: #c3b5ff;
+
+  --ol-space-1: 4px;
+  --ol-space-2: 8px;
+  --ol-space-3: 12px;
+  --ol-space-4: 16px;
+  --ol-space-5: 24px;
+  --ol-space-6: 32px;
+  --ol-space-7: 48px;
+
+  --ol-radius-1: 6px;
+  --ol-radius-2: 10px;
+  --ol-radius-3: 16px;
+
+  --ol-font: system-ui, "Segoe UI", Roboto, sans-serif;
+  --ol-mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", monospace;
+  --ol-text-s: 13px;
+  --ol-text-m: 15px;
+  --ol-text-l: 19px;
+  --ol-text-xl: 26px;
+
+  --ol-focus: 0 0 0 3px #ffffff, 0 0 0 6px #1e6fd9;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --ol-bg: #ffffff;
+  --ol-surface: #f2f5fb;
+  --ol-surface-raised: #e6ecf7;
+  --ol-border: #56637d;
+  --ol-text: #0a0f1c;
+  --ol-text-muted: #333f57;
+  --ol-accent: #0b4fa8;
+  --ol-ok: #0a6b45;
+  --ol-warn: #7a4b00;
+  --ol-bad: #a4102f;
+  --ol-info: #3d2fa8;
+  --ol-focus: 0 0 0 3px #ffffff, 0 0 0 6px #0b4fa8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--ol-bg);
+  color: var(--ol-text);
+  font-family: var(--ol-font);
+  font-size: var(--ol-text-m);
+  line-height: 1.55;
+}
+
+a {
+  color: var(--ol-accent);
+}
+
+:focus-visible {
+  outline: none;
+  box-shadow: var(--ol-focus);
+  border-radius: var(--ol-radius-1);
+}
+
+.ol-shell {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: var(--ol-space-5) var(--ol-space-4) var(--ol-space-7);
+}
+
+.ol-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ol-space-2);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--ol-space-2) var(--ol-space-4);
+  background: var(--ol-surface-raised);
+  border-bottom: 2px solid var(--ol-border);
+  font-size: var(--ol-text-s);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.ol-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ol-space-3);
+  margin-bottom: var(--ol-space-5);
+}
+
+.ol-card {
+  background: var(--ol-surface);
+  border: 1px solid var(--ol-border);
+  border-radius: var(--ol-radius-3);
+  padding: var(--ol-space-5);
+  margin-bottom: var(--ol-space-5);
+}
+
+.ol-card h2 {
+  margin-top: 0;
+  font-size: var(--ol-text-l);
+}
+
+.ol-grid {
+  display: grid;
+  gap: var(--ol-space-3);
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.ol-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ol-space-1);
+  min-width: 0;
+}
+
+.ol-field dt,
+.ol-label {
+  font-size: var(--ol-text-s);
+  color: var(--ol-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.ol-field dd {
+  margin: 0;
+  font-family: var(--ol-mono);
+  font-size: var(--ol-text-s);
+  overflow-wrap: anywhere;
+}
+
+.ol-status {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--ol-space-2);
+  padding: var(--ol-space-2) var(--ol-space-3);
+  border-radius: var(--ol-radius-2);
+  border: 2px solid currentColor;
+  font-weight: 600;
+}
+
+.ol-status[data-tone="ok"] { color: var(--ol-ok); }
+.ol-status[data-tone="warn"] { color: var(--ol-warn); }
+.ol-status[data-tone="bad"] { color: var(--ol-bad); }
+.ol-status[data-tone="info"] { color: var(--ol-info); }
+.ol-status[data-tone="neutral"] { color: var(--ol-text-muted); }
+
+.ol-status-icon {
+  font-family: var(--ol-mono);
+  font-size: var(--ol-text-l);
+  line-height: 1;
+}
+
+button,
+.ol-button {
+  font: inherit;
+  font-weight: 600;
+  padding: var(--ol-space-3) var(--ol-space-5);
+  border-radius: var(--ol-radius-2);
+  border: 2px solid var(--ol-accent);
+  background: transparent;
+  color: var(--ol-accent);
+  cursor: pointer;
+  text-decoration: none;
+  display: inline-block;
+}
+
+button[data-variant="primary"] {
+  background: var(--ol-accent);
+  color: var(--ol-bg);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: var(--ol-text);
+  background: var(--ol-bg);
+  border: 2px solid var(--ol-border);
+  border-radius: var(--ol-radius-1);
+  padding: var(--ol-space-2) var(--ol-space-3);
+  width: 100%;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--ol-text-s);
+}
+
+th,
+td {
+  text-align: left;
+  padding: var(--ol-space-2) var(--ol-space-3);
+  border-bottom: 1px solid var(--ol-border);
+  overflow-wrap: anywhere;
+}
+
+pre {
+  background: var(--ol-surface-raised);
+  border: 1px solid var(--ol-border);
+  border-radius: var(--ol-radius-2);
+  padding: var(--ol-space-3);
+  font-family: var(--ol-mono);
+  font-size: var(--ol-text-s);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.ol-error {
+  color: var(--ol-bad);
+  font-weight: 600;
+}
+
+.ol-muted {
+  color: var(--ol-text-muted);
+}
+
+/* Available to screen readers, absent from the visual layout. */
+.ol-visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.ol-checklist {
+  display: grid;
+  gap: var(--ol-space-2);
+  padding: 0;
+  margin: 0 0 var(--ol-space-4);
+  list-style: none;
+}
+
+.ol-checklist li {
+  display: flex;
+  gap: var(--ol-space-2);
+  align-items: baseline;
+}
+
+.ol-steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--ol-space-2);
+  padding: 0;
+  margin: 0 0 var(--ol-space-4);
+  list-style: none;
+  font-size: var(--ol-text-s);
+}
+
+.ol-steps li {
+  border: 1px solid var(--ol-border);
+  border-radius: var(--ol-radius-1);
+  padding: var(--ol-space-1) var(--ol-space-3);
+}
+
+.ol-steps li[aria-current="step"] {
+  border-color: var(--ol-accent);
+  color: var(--ol-accent);
+  font-weight: 700;
+}
+
+@media (max-width: 640px) {
+  .ol-shell {
+    padding: var(--ol-space-4) var(--ol-space-3) var(--ol-space-6);
+  }
+
+  .ol-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -31,7 +31,7 @@ ensure_docker_access() {
 }
 
 case "$command" in
-  happy-path|incident|recovery|reset) ensure_docker_access "$@" ;;
+  happy-path|incident|recovery|reset|ui) ensure_docker_access "$@" ;;
 esac
 
 verify_certificate() {
@@ -69,7 +69,7 @@ case "$command" in
     export ONELAYER_TRANSACTION_SIGNATURE ONELAYER_ANCHOR_SLOT ONELAYER_ANCHOR_HASH ONELAYER_SEGMENT_PDA
     export ONELAYER_VERIFIER_BASE_URL=http://127.0.0.1:8090
     cargo run -q -p onelayer-pilot-pipeline --bin devnet_demo_fixture -- certificate > "$artifacts/certificate.json"
-    docker compose -p onelayer-devnet-demo -f "$compose" up -d --build postgres migrate demo-api verifier
+    docker compose -p onelayer-devnet-demo -f "$compose" up -d --build postgres migrate demo-api verifier mvp-web
     for _ in $(seq 1 60); do
       curl --silent --fail http://127.0.0.1:8090/v1/health >/dev/null 2>&1 && curl --silent --fail http://127.0.0.1:8080/v1/health >/dev/null 2>&1 && break
       sleep 1
@@ -84,6 +84,22 @@ case "$command" in
     node -e 'const fs=require("fs");const v=JSON.parse(fs.readFileSync(process.argv[1]));if(v.status!=="VERIFIED")throw new Error(`expected VERIFIED, got ${v.status}`)' "$artifacts/verification.json"
     curl --fail-with-body --silent --show-error http://127.0.0.1:8090/v1/qr/08080808080808080808080808080808.svg > "$artifacts/certificate-qr.svg"
     echo "VERIFIED certificate=08080808080808080808080808080808 qr=$artifacts/certificate-qr.svg"
+    echo "Admin panel:  http://127.0.0.1:8091/admin"
+    echo "OneLayer panel: http://127.0.0.1:8091/verify"
+    echo "Demo credentials: $runtime/admin-credentials.json"
+    ;;
+  ui)
+    ensure_docker_access "$@"
+    "$scripts/initialize-runtime"
+    "$scripts/preflight"
+    docker compose -p onelayer-devnet-demo -f "$compose" up -d --build postgres migrate demo-api verifier mvp-web
+    for _ in $(seq 1 90); do
+      curl --silent --fail http://127.0.0.1:8091/verify >/dev/null 2>&1 && break
+      sleep 1
+    done
+    echo "Admin panel:  http://127.0.0.1:8091/admin"
+    echo "OneLayer panel: http://127.0.0.1:8091/verify"
+    echo "Demo credentials: $runtime/admin-credentials.json"
     ;;
   verify)
     verify_certificate
@@ -101,7 +117,7 @@ case "$command" in
     RESET_ONELAYER_FIXTURE=yes "$scripts/reset-fixture"
     ;;
   *)
-    echo "usage: deploy/devnet-demo/demo [plan|happy-path|verify|incident|recovery|reset]" >&2
+    echo "usage: deploy/devnet-demo/demo [plan|happy-path|ui|verify|incident|recovery|reset]" >&2
     exit 2
     ;;
 esac

@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod artifacts;
 pub mod demo;
 pub mod publisher;
+pub mod soak;
 pub mod store;
 
 pub const BUILDER_VERSION: &str = "onelayer-pipeline/0.1.0";

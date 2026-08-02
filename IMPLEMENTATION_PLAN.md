@@ -2,7 +2,7 @@
 
 **Базовый документ:** `OneLayer_Solana_Technical_Spec_RU.md` (v0.9, историческая проектная версия)
 **Источник истины протокола:** versioned-документы в `spec/` заморожены для Gate B и имеют приоритет над этим планом и v0.9; любое нормативное изменение требует ADR и новой версии schema/account/package
-**Статус плана:** v2.5, 2026-08-01
+**Статус плана:** v2.6, 2026-08-02
 **Структура:** gate-ы A, B, C, D, E0, E — каждый с явным выходным решением
 **Горизонт:** Gate A–C (pilot + визуальный MVP на devnet) ≈ 6–8 месяцев; Gate D–E (production go-live) ≈ +10–12 месяцев; Phase 3 — отдельный горизонт после go-live
 
@@ -32,7 +32,16 @@
 
 ## 1. История ревизий
 
-Текущая версия — **v2.5**. Изменения относительно v2.4:
+Текущая версия — **v2.6**. Изменения относительно v2.5:
+
+- визуальный MVP доведён до полного пользовательского контура: запись больше не является одним полем `status`, а строится из сертификата, который даёт пользователь (структурированный JSON или CSV по схеме реестра);
+- зафиксирована demo-схема реестра `land-registry-v1` — единственный перечень допустимых путей полей и их типов; поле вне схемы отклоняется как `CANONICALIZATION_FAILED` (§4 `spec/canonical-record-v1.md`), а не игнорируется;
+- метаданные, canonical preview, field tree, сертификат и QR строятся динамически из фактического набора полей записи; хардкод одного поля удалён из всех трёх мест, где он был (batch builder, reconcile, fixture);
+- добавлена выдача в режиме `SELECTIVE_FIELDS` с field proofs: оператор выбирает раскрываемые пути, соли остальных путей в пакет не попадают;
+- добавлены документы `docs/use-cases-ru.md` (сценарии использования) и `docs/presentation-ru.md` (ролевые модели, разбор потока, FAQ) — они описывают систему, но нормативной силы не имеют;
+- публикация хэшей в devnet остаётся guarded wallet-контуром §5.4 без изменений: server-side one-click подписи не вводится.
+
+Сохранённая история v2.5:
 
 - источник истины приведён к фактическому статусу: `spec/*.md` уже frozen для Gate B, E0 и E;
 - исправлен incident-index contract: индекс обрабатывает finalized `IncidentOpened` и `IncidentResolved`, а Gate C проверяет текущий, а не недоказуемый исторический статус;
@@ -470,6 +479,12 @@ synthetic change → canonicalize → batch → manifest → devnet anchor → c
 | `OL-C-33` | Versioned Admin API: idempotency key, immutable intent hash + expiry, server-session role checks и повторная валидация signed wire transaction перед сохранением/отправкой |
 | `OL-C-34` | Один guarded live-devnet browser smoke перед презентацией/release: отдельное явное approval, synthetic fixture/test keys, finalized transaction → certificate → QR → `VERIFIED`; в default CI не запускается |
 | `OL-C-35` | Presentation preflight проверяет Docker daemon/socket access, Compose, toolchain, devnet-only RPC, test-key balance/rent, ports и synthetic marker; отсутствие `rg` использует portable fallback, а недоступный обязательный dependency завершает запуск до создания новых demo artifacts |
+| `OL-C-36` | Demo-схема реестра `land-registry-v1`: закрытый перечень путей полей, типы (text/decimal-строка/timestamp/bool/enum/hex), обязательные пути, ограничения длины; поле вне схемы → `CANONICALIZATION_FAILED`. Схема — единственный источник и для preview, и для issuance, и для reconcile |
+| `OL-C-37` | Импорт сертификата пользователя: JSON-объект (`internalRecordId` + `fields`) или CSV (первая строка — пути полей), построчная валидация по `OL-C-36`, dry-run preview без записи, отчёт об ошибках с указанием строки и пути, идемпотентный upsert новой версии записи |
+| `OL-C-38` | Динамические canonical-метаданные: field tree строится по фактическому набору полей записи; preview показывает per-field `field_commitment`, `fieldRoot`, `recordCommitment` и batch leaf; хардкод единственного поля удалён из batch builder, reconcile и fixture-пути |
+| `OL-C-39` | Выдача в режиме `SELECTIVE_FIELDS`: оператор выбирает раскрываемые пути, пакет содержит field proof и соль **только** этих путей, `fieldRoot` остаётся прежним; `FULL_RECORD` остаётся значением по умолчанию |
+| `OL-C-40` | Динамический QR и публичная карточка сертификата: QR SVG/PNG строится из выданного пакета, публичная страница рендерит только раскрытые поля пакета, показывает cluster/slot/signature и не запрашивает скрытые значения |
+| `OL-C-41` | Полный UI-контур: dashboard с фактическими метриками, детали записи и сертификата, incident-панель, публичная страница «как это работает»; навигация покрывает все сценарии `docs/use-cases-ru.md` |
 
 ### 5.2. Чего в Gate C нет
 
@@ -491,8 +506,9 @@ HSM, durable nonce, два RPC, мультисиг, три хранилища м
 
 ```text
 Admin panel
-  synthetic record / JSON import
-    → canonical preview
+  сертификат пользователя: JSON / CSV по схеме land-registry-v1
+    → schema validation (поле вне схемы отклоняется)
+      → canonical preview
       → batch + Merkle root + manifest hash
         → simulate devnet transaction
           → explicit wallet review/sign
@@ -510,6 +526,40 @@ OneLayer panel
 
 **Граница on-chain.** Admin-панель не записывает отдельный `certificateHash` в Solana и не создаёт второй протокол. Программа якорит batch `merkleRoot` и `manifestHash`; certificate package содержит Merkle proof и связывает сертификат с finalized anchor. UI показывает эти две величины раздельно.
 
+**Сертификат пользователя — вход, а не результат (`OL-C-36`…`OL-C-38`).** До v2.6 запись MVP имела ровно одно поле `status`, и все метаданные были константой. Теперь исходные данные даёт пользователь: JSON-объект или CSV по demo-схеме реестра `land-registry-v1`. Схема — часть Gate C artefacts, а не `spec/`: она описывает **конкретный** реестр, тогда как frozen-документы описывают протокол, одинаковый для любого реестра.
+
+```text
+land-registry-v1 (перечень путей закрыт)
+  status              enum text   обязателен   ACTIVE | ARCHIVED | PENDING | DISPUTED
+  cadastralNumber     text        обязателен   NFC, byte_len <= 64
+  parcelAddress       text                     NFC, byte_len <= 256
+  areaSquareMeters    decimal-строка           фиксированный scale 2: "1250.50"
+  landCategory        enum text                AGRICULTURAL | SETTLEMENT | INDUSTRIAL | FOREST | WATER | RESERVE
+  permittedUse        text                     NFC, byte_len <= 128
+  rightType           enum text                OWNERSHIP | LEASE | EASEMENT | MORTGAGE
+  rightRegisteredAt   timestamp                RFC 3339, UTC, без дробной части
+  encumbered          bool
+  holderCommitment    hex(64)                  обязательство к личности правообладателя, не сама личность
+  documentHash        hex(64)                  SHA-256 исходного документа, если он есть
+```
+
+Правила импорта:
+
+- поле вне схемы — отказ `CANONICALIZATION_FAILED` с указанием пути; молчаливое отбрасывание запрещено (§4 `spec/canonical-record-v1.md`);
+- decimal и timestamp принимаются **строками**: `"0.10" ≠ "0.1"` семантически значимо, а float в канонический CBOR не попадает вообще;
+- ПДн правообладателя в записи не хранятся: схема принимает `holderCommitment`, а не ФИО. Это граница, а не оформление demo;
+- импорт идемпотентен: повторная загрузка того же `internalRecordId` создаёт **новую версию** записи, а не второй объект; старый сертификат этой записи после нового anchor становится `SUPERSEDED`;
+- CSV — первая строка задаёт пути полей, каждая последующая строка — одна запись; ошибка в строке отклоняет **строку**, а не молча импортирует часть файла; отчёт указывает строку и путь;
+- dry-run обязателен: до записи в БД показываются канонические значения и типы каждой строки и полный список отклонений. Commitments в dry-run не показываются: `field_salt` выводится из `record_field_key`, который создаётся вместе с версией записи, — показывать «предварительный» commitment, не равный итоговому, значило бы показывать неверное число. `field_commitment`, `fieldRoot`, `recordCommitment` и batch leaf появляются в canonical preview сразу после сохранения и до подготовки batch.
+
+Одна и та же схема применяется в трёх местах, где раньше был хардкод одного поля: batch builder Admin API, reconcile-проверка прямого вмешательства в БД и fixture-путь CLI. Расхождение любого из трёх дало бы ложный `DISPUTED` — это инвариант, а не деталь реализации.
+
+**Хранение полей в demo-контуре.** `status` остаётся колонкой `synthetic_registry_record` — на неё опираются seeded fixture и Rust CLI happy path, и менять их формат ради UI незачем. Остальные пути хранятся в `synthetic_record_field` (миграция `0004`), по строке на путь текущей версии записи: уникальность пути и его тип проверяются схемой БД, а не только кодом. История значений в demo-БД не хранится — прежние версии доказываются выданными пакетами, которые содержат свои значения и свой `fieldRoot`. Целевая схема (§6.2) хранит поля в canonical payload версии записи; demo-таблица её не заменяет.
+
+**Раскрытие полей при выдаче (`OL-C-39`).** `FULL_RECORD` остаётся значением по умолчанию. Дополнительно оператор может выбрать раскрываемые пути и выдать `SELECTIVE_FIELDS`: пакет содержит значения, соли и field proof **только** выбранных путей, `fieldRoot` при этом не меняется, поэтому batch proof и anchor остаются теми же. Соль нераскрытого пути не выводится из раскрытых (§2.1), но число листьев field-дерева видно из proof — оговорка §2.1 действует и здесь.
+
+**Динамические метаданные и QR (`OL-C-40`).** QR по-прежнему кодирует `URL + certificateId + certificateHash` (`spec/certificate-package-v1.md`) и не содержит данных записи: сами значения приходят из пакета после проверки hash binding. Публичная карточка сертификата рендерит ровно те поля, что раскрыты пакетом, — не список схемы и не запрос в БД. Для нераскрытых путей карточка не показывает ни значения, ни плейсхолдера «скрыто по конкретному пути»: раскрытая структура — то, что доказано, всё остальное отсутствует.
+
 **Архитектура UI.** Одно приложение `apps/mvp-web` на Next.js App Router, один сгенерированный Solana Kit client и общие визуальные primitives. Admin и OneLayer — разные route groups и access policies, но не два frontend-репозитория. Wallet hooks живут только в client leaf-components; публичная верификация не требует wallet. Browser обращается к Admin API и verifier через same-origin `/api/admin/*` и `/api/verify/*` proxy; Compose-сервисы остаются во внутренней сети, новый широкий CORS не открывается.
 
 **Среда исполнения — существующий demo-контур.** MVP разворачивается в guarded Compose-проекте `deploy/devnet-demo` (`OL-C-30`): synthetic marker, tmpfs server keys, labels/networks и loopback-only binding сохраняются; добавляется только UI-port. Program deploy/upgrade остаётся CLI-only и требует deploy approval digest. CLI automated publish сохраняет tx approval digest; browser publish использует отдельную интерактивную границу — reviewed click, Wallet Standard prompt и server-side exact-intent validation. Эти механизмы не подменяют друг друга.
@@ -522,9 +572,11 @@ CLI сохраняет one-command сценарии `demo happy-path`, `demo inc
 
 **Роли Admin.** `operator` — подготовка batch, simulation, запрос подписи, выдача сертификата; `auditor` — read-only список, детали и timeline. Runtime-generated test credentials живут в tmpfs; сервер выдаёт короткую `HttpOnly`/`SameSite` session cookie и требует CSRF token для mutations. Роль берётся из server session, а не из `localStorage`, query/body или скрытия кнопок. Это demo access separation; внешний IdP, production SSO/RBAC и аудит доступа — Gate E.
 
-**Админские экраны:** dashboard; certificate list/detail; create/import wizard; canonical/disclosure preview; batch preparation; transaction review + simulation; publish progress; issued certificate + QR; append-only operation timeline. Admin API — тонкий HTTP-адаптер в `pilot-pipeline`, а не новый сервис.
+**Админские экраны:** dashboard с фактическими метриками (записи, версии, батчи, последний finalized anchor, выданные сертификаты, открытые инциденты); record list и record detail с полями, версиями и commitments; create/import wizard (форма, JSON, CSV) с dry-run отчётом; canonical/disclosure preview; batch preparation; transaction review + simulation; publish progress; выбор раскрываемых полей; issued certificate + QR; certificate list/detail; append-only operation timeline. Admin API — тонкий HTTP-адаптер в `pilot-pipeline`, а не новый сервис.
 
-**Экраны OneLayer:** scan; camera permission/fallback; image upload; manual input; checking progress; result; public certificate detail. Камера — progressive enhancement: отказ permission никогда не блокирует image/manual flow.
+**Экраны OneLayer:** scan; camera permission/fallback; image upload; manual input; checking progress; result; public certificate detail с раскрытыми полями; страница «как это работает» (границы гарантий, что попадает в Solana, что нет). Камера — progressive enhancement: отказ permission никогда не блокирует image/manual flow.
+
+**Полнота контура (`OL-C-41`).** Требование «через UI выполним весь путь» проверяется навигацией: каждый сценарий `docs/use-cases-ru.md` достижим из интерфейса без curl, psql и shell. Исключения названы явно и остаются CLI-only: deploy/upgrade программы, выдача operator role, fixture reset и guarded live smoke — у них отдельные approval digests (§5.4, `OL-C-30`).
 
 **Transaction review — блокирующий шаг.** До wallet prompt UI показывает cluster `devnet`, program ID, instruction, accounts с signer/writable flags, registry, segment PDA, batch sequence, `merkleRoot`, `manifestHash`, `previousAnchorHash`, fee payer, fee/rent и simulation logs. RPC account data считается недоверенным и проверяется по owner, длине и discriminator. Любой endpoint/wallet не на devnet отклоняется до подписи.
 
@@ -535,6 +587,8 @@ Admin API создаёт typed intent, строит message, фиксирует 
 **QR transport.** Нормативный QR использует HTTPS. Единственное исключение MVP — точный loopback origin (`http://127.0.0.1`/`http://localhost`), визуально помеченный `DEVNET SYNTHETIC DEMO`; любой другой HTTP URL отклоняется. Телефон не может открыть loopback хоста Docker, поэтому responsive/mobile и camera flow проверяются в fresh browser context/emulator на том же host. Cross-device phone scan требует отдельно разрешённого HTTPS staging и не входит в локальный DoD.
 
 **Вне scope MVP:** mainnet, production credentials, реальные кадастровые данные, внешний IdP и production SSO/RBAC (демо-роли `OL-C-31` их не заменяют), локализация интерфейса, PWA/офлайн-режим, формальная сертификация доступности, bulk issuance, native mobile app, push/email, внешняя публикация и analytics. Внешний staging и HTTPS-хостинг требуют отдельного разрешения; loopback demo остаётся базовым контуром.
+
+Импорт **не** включает: OCR и парсинг PDF/сканов, автоматическое извлечение полей из произвольного документа, загрузку файлов сертификатов на сервер, справочники и нормализацию адресов. Вход — структурированный JSON/CSV; связь с внешним документом возможна только через `documentHash`, посчитанный вне системы.
 
 **Acceptance criteria визуального MVP:**
 
@@ -551,6 +605,41 @@ Admin API создаёт typed intent, строит message, фиксирует 
 11. Synthetic marker проверяется до data operations. Deploy и CLI publish не проходят без своих approval digests; browser publish не проходит без reviewed intent, wallet prompt и server-side signed-transaction validation.
 12. Default CI проходит IDL→Codama drift check и детерминированный Surfpool/browser E2E без расхода SOL; один `OL-C-34` live-devnet smoke запускается только с отдельным подтверждением перед презентацией/release.
 13. На clean host preflight либо подтверждает все зависимости, либо сообщает точную remediation и выходит до mutation; one-command CLI happy path воспроизводим, а fixture-only reset не затрагивает другие Compose projects, containers, images или volumes.
+14. Импорт JSON и CSV принимает валидный сертификат пользователя и отклоняет: поле вне схемы (`CANONICALIZATION_FAILED`), неверный тип, decimal с чужим scale, timestamp с дробной частью, обязательное поле без значения. Отчёт называет строку и путь; dry-run не меняет БД; ошибка в одной строке CSV не импортирует остальные молча.
+15. `fieldRoot`, `recordCommitment`, batch leaf и `merkleRoot` пересчитываются из фактического набора полей записи; повторный импорт того же `internalRecordId` даёт новую версию, а не второй объект, и после нового anchor прежний сертификат этой записи становится `SUPERSEDED`.
+16. Выдача в режиме `SELECTIVE_FIELDS` даёт `VERIFIED` при раскрытии подмножества путей; пакет не содержит значений и солей нераскрытых путей; `fieldRoot`, batch proof и anchor совпадают с `FULL_RECORD` той же версии записи.
+17. Публичная карточка сертификата показывает ровно раскрытые пакетом поля; ни одно значение не берётся из БД в обход проверенного пакета.
+18. Каждый сценарий `docs/use-cases-ru.md`, кроме явно названных CLI-only операций, выполним из UI; dashboard-метрики совпадают с данными API, а не являются статикой.
+
+### 5.5. Состояние реализации Gate C
+
+| Блок | Состояние |
+|---|---|
+| `OL-C-01`…`OL-C-06` on-chain | реализованы в `onchain/programs/onelayer-registry` |
+| `OL-C-10`…`OL-C-13` pipeline | реализованы в `crates/*` и `apps/pilot-pipeline` |
+| `OL-C-14` verifier | реализован, включая `VERIFIED_HISTORICAL`/`SUPERSEDED` и event-backed incident index с watermark |
+| `OL-C-15` схема БД | `db/migrations/0001`–`0003` |
+| `OL-C-20` smoke | `tests/e2e/synthetic-smoke.test.ts` |
+| `OL-C-21`…`OL-C-28` UI | `apps/mvp-web`: Admin и публичная OneLayer route groups, общие design tokens и status components |
+| `OL-C-29` browser E2E | `tests/e2e-web`, 19 сценариев × desktop/mobile; вместо Surfpool — фикстурный backend (ADR-0003) |
+| `OL-C-30` Compose | `deploy/devnet-demo` расширен одним UI-портом; labels, networks, tmpfs и loopback сохранены |
+| `OL-C-31` роли | server-session, `HttpOnly`/`SameSite` cookie, CSRF, `operator`/`auditor` на уровне API |
+| `OL-C-32` IDL→Codama | `packages/onchain-client` + drift check в CI |
+| `OL-C-33` Admin API | idempotency key, immutable intent hash, expiry, повторная валидация signed wire transaction |
+| `OL-C-34` live smoke | `deploy/devnet-demo/scripts/live-smoke`, отдельное подтверждение, публичный путь без ключей в браузере |
+| `OL-C-35` preflight | Docker/Compose/toolchain, devnet-only RPC, баланс test key, занятость портов, portable fallback вместо `rg` |
+| `OL-C-36` схема реестра | `apps/demo-api/src/record-schema.ts` (`land-registry-v1`), отдаётся UI через `GET /v1/admin/schema` |
+| `OL-C-37` импорт | `POST /v1/admin/records/import` (JSON/CSV, dry-run, построчный отчёт) + wizard в `apps/mvp-web` |
+| `OL-C-38` динамические поля | `db/migrations/0004`, `fieldsOf` в `admin-batch.ts` — общий источник для builder, preview и reconcile |
+| `OL-C-39` selective disclosure | `issueCertificate(..., disclosedPaths)`, field proofs; verifier возвращает раскрытые поля только после успешных проверок |
+| `OL-C-40` QR и карточка | `GET /v1/certificates/:id/metadata`, QR в SVG и PNG, публичная карточка из проверенного пакета |
+| `OL-C-41` полный контур | dashboard на фактических метриках, карточка записи, деталь сертификата, публичная страница `/how-it-works` |
+
+Отклонения от буквы плана и их обоснование зафиксированы в
+`docs/adr/0003-visual-mvp-boundaries.md`. Сценарии использования — в
+`docs/use-cases-ru.md`, разбор потока для презентации — в `docs/presentation-ru.md`.
+Незакрытым остаётся сам выход Gate C: 72-часовой прогон под synthetic-нагрузкой
+не выполнялся.
 
 **Выход Gate C:** сквозной поток работает 72 часа на synthetic-нагрузке без ручного вмешательства; `anchor_sequence_gap_total = 0`; повторная сборка одного диапазона даёт идентичный `manifestHash`; event-backed incident index обрабатывает open/resolve; локальный browser flow `OL-C-29` и отдельный approved smoke `OL-C-34` заканчиваются QR → `VERIFIED`, а tampering — `INVALID`/`DISPUTED` без ложного зелёного статуса.
 
@@ -1075,6 +1164,8 @@ Gate E0 — единственный блок, выполнимый до зав�
 | R11 | Преждевременная декомпозиция замедляет pilot | среднее | §5.3: один процесс до подтверждённой границы развёртывания |
 | R12 | UI показывает «успех» после signature, но до finalization, или повторно публикует batch | высокое | §5.4: явная transaction state machine, simulation-before-signing, idempotency key, account/transaction checks и `ISSUED` только после `finalized` |
 | R13 | Демо-логин `OL-C-31` воспринимается как готовый контроль доступа | среднее | §5.4: роли ограничивают Admin API, но не заменяют SSO/RBAC; MVP работает только на loopback и synthetic-данных, реальный access control — Gate E |
+| R14 | Импорт произвольного JSON/CSV принимается за подтверждённые данные реестра | высокое | Система доказывает неизменность того, что ей дали, а не истинность содержимого. Импорт помечает записи `origin='ADMIN_UI'`, synthetic marker проверяется до операций, схема `land-registry-v1` отклоняет поля вне перечня. В презентации и в UI это названо прямо: якорь фиксирует состояние на момент публикации, источник данных остаётся ответственностью реестра (§2.4) |
+| R15 | Расхождение набора полей между batch builder, reconcile и fixture даёт ложный `DISPUTED` | среднее | Один модуль схемы на все три пути (`OL-C-36`), тест на совпадение `merkleRoot` builder-а и reconcile на записи с несколькими полями |
 
 ---
 

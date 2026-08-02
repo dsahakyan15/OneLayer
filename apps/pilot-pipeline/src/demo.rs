@@ -51,9 +51,68 @@ pub fn build_demo_batch() -> Result<BatchArtifact, String> {
         .map_err(|error| error.to_string())
 }
 
+/// Batch for one soak cycle: the same two synthetic records, with a status that
+/// changes every cycle so successive batches differ, at an explicit batch
+/// sequence and previous anchor hash read from the chain.
+pub fn build_soak_batch(
+    cycle: u64,
+    batch_sequence: u64,
+    registry_version: u64,
+    previous_anchor_hash: [u8; 32],
+) -> Result<BatchArtifact, String> {
+    let mut pipeline = PilotPipeline::new(DEMO_REGISTRY_ID, 1, [9; 32], 0, 0);
+    for (cursor, record_id, field_key) in [(1, "SYNTHETIC-1", [1; 32]), (2, "SYNTHETIC-2", [2; 32])]
+    {
+        pipeline
+            .ingest(
+                SyntheticChange {
+                    registry_id: DEMO_REGISTRY_ID.into(),
+                    source_cursor: cursor,
+                    internal_record_id: record_id.into(),
+                    operation: ChangeOperation::Update,
+                    fields: vec![FieldEntry {
+                        path: "status".into(),
+                        value: Value::Text(format!("ACTIVE-CYCLE-{cycle}")),
+                    }],
+                },
+                &WorkflowEvent {
+                    registry_id: DEMO_REGISTRY_ID.into(),
+                    internal_record_id: record_id.into(),
+                    operation: ChangeOperation::Update,
+                    authorized: true,
+                },
+                RecordFieldKey::from_bytes(field_key),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    pipeline
+        .build_batch(BatchBuildRequest {
+            batch_sequence,
+            registry_version,
+            previous_anchor_hash,
+            created_at: DEMO_CREATED_AT,
+            leaves_object_uri: "synthetic://onelayer-devnet-demo/soak/leaves.cbor",
+            operator_key_id: "synthetic-demo-operator-1",
+            operator_secret_key: &DEMO_OPERATOR_SECRET,
+        })
+        .map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soak_cycles_are_reproducible_and_differ_between_cycles() {
+        let first = build_soak_batch(7, 12, 1, [3; 32]).unwrap();
+        let again = build_soak_batch(7, 12, 1, [3; 32]).unwrap();
+        assert_eq!(
+            first.signed_manifest.manifest_hash,
+            again.signed_manifest.manifest_hash
+        );
+        let next = build_soak_batch(8, 13, 1, first.merkle_root).unwrap();
+        assert_ne!(first.merkle_root, next.merkle_root);
+    }
 
     #[test]
     fn fixture_batch_is_stable_and_contains_only_synthetic_records() {

@@ -45,3 +45,52 @@ jobs:
         working-directory: packages/snapshot-ts
       - run: npm test
         working-directory: packages/snapshot-ts
+      - run: npm ci
+        working-directory: packages/onchain-client
+      - run: npm run check-drift
+        working-directory: packages/onchain-client
+      - run: npm run typecheck
+        working-directory: packages/onchain-client
+      - run: npm test
+        working-directory: packages/onchain-client
+      - run: npm ci
+        working-directory: apps/demo-api
+      - run: npm run typecheck
+        working-directory: apps/demo-api
+      - run: npm test
+        working-directory: apps/demo-api
+
+  browser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+        working-directory: packages/onchain-client
+      - run: npm ci
+        working-directory: apps/mvp-web
+      - run: npm run typecheck
+        working-directory: apps/mvp-web
+      # No devnet endpoint is reachable from the build; the deterministic E2E
+      # stack replaces both Compose services (OL-C-29).
+      - run: npm run build
+        working-directory: apps/mvp-web
+        env:
+          ONELAYER_ADMIN_API_URL: http://127.0.0.1:8199
+          ONELAYER_VERIFIER_URL: http://127.0.0.1:8199
+      - run: npm ci
+        working-directory: tests/e2e-web
+      - run: npx playwright install --with-deps chromium
+        working-directory: tests/e2e-web
+      - run: npm run typecheck
+        working-directory: tests/e2e-web
+      - run: npm test
+        working-directory: tests/e2e-web
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-e2e-report
+          path: tests/e2e-web/playwright-report
+          retention-days: 7

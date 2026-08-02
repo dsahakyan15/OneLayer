@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Guarded live-devnet browser smoke (OL-C-34).
+#
+# Runs once before a presentation or release, never in default CI. It needs its
+# own explicit approval on top of the deploy and publish approval digests, and
+# it verifies a certificate that the guarded CLI publish anchored — no key
+# material is placed in the browser.
+set -euo pipefail
+
+[[ ${APPROVE_ONELAYER_LIVE_DEVNET_SMOKE:-} == yes ]] || {
+  echo "APPROVE_ONELAYER_LIVE_DEVNET_SMOKE=yes is required for a live devnet smoke" >&2
+  exit 70
+}
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+demo_dir=$(cd -- "$script_dir/.." && pwd)
+repo_root=$(cd -- "$demo_dir/../.." && pwd)
+artifacts="$demo_dir/artifacts"
+compose="$demo_dir/compose.yaml"
+
+"$script_dir/initialize-runtime"
+"$script_dir/preflight"
+
+# The happy path is the only thing allowed to spend SOL here.
+"$demo_dir/demo" happy-path
+
+certificate_json="$artifacts/certificate.json"
+[[ -s "$certificate_json" ]] || { echo "certificate artifact is missing" >&2; exit 71; }
+certificate_id=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).certificateId)' "$certificate_json")
+certificate_hash=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).certificateHash)' "$certificate_json")
+[[ "$certificate_id" =~ ^[0-9a-f]{32}$ && "$certificate_hash" =~ ^[0-9a-f]{64}$ ]] || {
+  echo "certificate artifact is malformed" >&2
+  exit 72
+}
+qr_hash=$(node -e 'process.stdout.write(Buffer.from(process.argv[1],"hex").toString("base64url"))' "$certificate_hash")
+
+docker compose -p onelayer-devnet-demo -f "$compose" up -d --build mvp-web
+for _ in $(seq 1 90); do
+  curl --silent --fail http://127.0.0.1:8091/verify >/dev/null 2>&1 && break
+  sleep 1
+done
+curl --silent --fail http://127.0.0.1:8091/verify >/dev/null || {
+  echo "mvp-web did not become reachable on the loopback port" >&2
+  exit 73
+}
+
+mkdir -p "$artifacts/live-smoke"
+cd "$repo_root/tests/e2e-web"
+ONELAYER_LIVE_QR_URL="http://127.0.0.1:8091/c/${certificate_id}?h=${qr_hash}" \
+  npx playwright test --config playwright.live.config.ts
+
+echo "live devnet smoke passed; evidence in $artifacts/live-smoke"

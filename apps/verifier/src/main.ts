@@ -1,4 +1,4 @@
-import { HttpIncidentIndex, HttpPublicLookup } from "./http-adapters.ts";
+import { HttpIncidentIndex, HttpLifecycleIndex, HttpPublicLookup } from "./http-adapters.ts";
 import { createVerifierServer } from "./server.ts";
 import { SolanaRpcChainReader } from "./solana-rpc.ts";
 import { DualRpcChainReader } from "./dual-rpc.ts";
@@ -28,7 +28,11 @@ const server = createVerifierServer({
   incidents: new HttpIncidentIndex(required("ONELAYER_INCIDENT_INDEX_URL")),
   lookup: new HttpPublicLookup(required("ONELAYER_LOOKUP_URL")),
   corsAllowedOrigin: process.env.ONELAYER_CORS_ALLOWED_ORIGIN,
-  verifyOptions: { maxIndexLagSlots, maxRpcHeadDifference },
+  verifyOptions: {
+    maxIndexLagSlots,
+    maxRpcHeadDifference,
+    lifecycle: new HttpLifecycleIndex(required("ONELAYER_LOOKUP_URL")),
+  },
 });
 
 server.listen(port, "0.0.0.0", () => {

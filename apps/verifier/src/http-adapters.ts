@@ -1,4 +1,10 @@
-import type { IncidentIndex, IncidentIndexResponse, IncidentNotice } from "./verify.ts";
+import type {
+  IncidentIndex,
+  IncidentIndexResponse,
+  IncidentNotice,
+  LifecycleIndex,
+  RecordLifecycle,
+} from "./verify.ts";
 import type { PublicLookup } from "./server.ts";
 
 async function json(response: Response): Promise<any> {
@@ -42,6 +48,34 @@ export class HttpIncidentIndex implements IncidentIndex {
       registryId,
       indexedThroughSlot: unsigned(body.indexedThroughSlot, "indexedThroughSlot"),
       incidents,
+    };
+  }
+}
+
+export class HttpLifecycleIndex implements LifecycleIndex {
+  private readonly baseUrl: string;
+
+  constructor(baseUrl: string) {
+    this.baseUrl = baseUrl;
+  }
+
+  async query(registryId: string, certificateId: string): Promise<RecordLifecycle | null> {
+    const url = new URL(`/v1/certificates/${certificateId}/lifecycle`, this.baseUrl);
+    url.searchParams.set("registryId", registryId);
+    const body = await json(await fetch(url, { headers: { accept: "application/json" } }));
+    if (body === null) return null;
+    if (
+      body.certificateStatus !== "ACTIVE" &&
+      body.certificateStatus !== "SUPERSEDED" &&
+      body.certificateStatus !== "REVOKED"
+    ) {
+      throw new TypeError("certificateStatus is invalid");
+    }
+    if (typeof body.registryId !== "string") throw new TypeError("registryId is invalid");
+    return {
+      registryId: body.registryId,
+      currentRecordVersion: unsigned(body.currentRecordVersion, "currentRecordVersion"),
+      certificateStatus: body.certificateStatus,
     };
   }
 }

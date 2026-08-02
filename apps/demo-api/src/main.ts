@@ -3,9 +3,16 @@ import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Pool } from "pg";
 import QRCode from "qrcode";
+import { registryIdHash } from "../../../packages/canonical-ts/src/index.ts";
+import { findRegistryConfigPda } from "../../../packages/onchain-client/src/index.ts";
+import { getAddressEncoder, type Address } from "@solana/kit";
 import { fixtureRoot, type SyntheticFixtureRow } from "./reconcile.ts";
 import { qrHashHex } from "./qr.ts";
-import { safeIndexedThroughSlot } from "./solana-index.ts";
+import { refreshIncidentIndex, type RegistryBinding } from "./incident-index.ts";
+import { PostgresIncidentStore } from "./incident-store.ts";
+import { SolanaPublisherRpc } from "./solana-rpc.ts";
+import { parseCredentials, SessionStore, CSRF_HEADER } from "./admin-session.ts";
+import { routeAdmin, type AdminContext } from "./admin.ts";
 
 const MAX_BODY = 1_048_576;
 const REGISTRY_ID = "gov.registry.land";
@@ -26,8 +33,62 @@ const internalToken = secret("ONELAYER_INTERNAL_TOKEN_FILE");
 const rpcUrl = required("ONELAYER_RPC_URL");
 const verifierUrl = required("ONELAYER_VERIFIER_URL");
 const publicBaseUrl = required("ONELAYER_PUBLIC_BASE_URL");
+const programId = required("ONELAYER_PROGRAM_ID");
+const publicWebBaseUrl = required("ONELAYER_PUBLIC_WEB_URL");
+if (!/^http:\/\/(?:127\.0\.0\.1|localhost):[0-9]{2,5}$/.test(publicWebBaseUrl)) {
+  throw new Error("ONELAYER_PUBLIC_WEB_URL must be the exact loopback demo origin");
+}
+const issuerSecretKey = Uint8Array.from(Buffer.from(secret("ONELAYER_ISSUER_SECRET_FILE"), "hex"));
+if (issuerSecretKey.length !== 32) throw new Error("ONELAYER_ISSUER_SECRET_FILE must hold 32 hex-encoded bytes");
+const adminCredentials = parseCredentials(secret("ONELAYER_ADMIN_CREDENTIALS_FILE"));
 if (rpcUrl !== "https://api.devnet.solana.com") throw new Error("demo API is devnet-only");
 const pool = new Pool({ connectionString: databaseUrl, max: 5 });
+
+const [configAddress] = await findRegistryConfigPda(registryIdHash(REGISTRY_ID), {
+  programAddress: programId as Address,
+});
+const registryBinding: RegistryBinding = {
+  registryId: REGISTRY_ID,
+  configAddress,
+  configBytes: new Uint8Array(getAddressEncoder().encode(configAddress)),
+};
+const incidentRpc = new SolanaPublisherRpc(rpcUrl, programId);
+const incidentStore = new PostgresIncidentStore(pool, configAddress);
+
+const adminContext: AdminContext = {
+  pool,
+  sessions: new SessionStore(adminCredentials),
+  rpc: incidentRpc,
+  registryId: REGISTRY_ID,
+  programId: programId as Address,
+  configPda: configAddress,
+  issuerSecretKey,
+  publicWebBaseUrl,
+  now: () => new Date(),
+};
+
+const INDEX_REFRESH_INTERVAL_MS = 2_000;
+let lastIndexRefresh = 0;
+let indexRefresh: Promise<void> | null = null;
+
+/**
+ * Refreshes the event-backed index at most every {@link INDEX_REFRESH_INTERVAL_MS}.
+ * A failed scan is swallowed: the stale watermark then downgrades the verifier
+ * to `STALE`/`UNAVAILABLE`, which is the honest answer (§2.3).
+ */
+async function refreshIndex(): Promise<void> {
+  const now = Date.now();
+  if (indexRefresh === null && now - lastIndexRefresh >= INDEX_REFRESH_INTERVAL_MS) {
+    lastIndexRefresh = now;
+    indexRefresh = refreshIncidentIndex(registryBinding, incidentRpc, incidentStore)
+      .then(() => undefined)
+      .catch((error: unknown) => {
+        process.stderr.write(`incident index refresh failed: ${error instanceof Error ? error.message : "unknown"}\n`);
+      })
+      .finally(() => { indexRefresh = null; });
+  }
+  await indexRefresh;
+}
 
 function json(response: ServerResponse, status: number, body: unknown): void {
   const encoded = JSON.stringify(body, (_key, value) => typeof value === "bigint" ? value.toString() : value);
@@ -92,6 +153,12 @@ async function registerArtifact(input: Record<string, unknown>): Promise<void> {
   const qrUrl = text(input.qrUrl, "qrUrl", /^http:\/\/127\.0\.0\.1:8090\/c\/[0-9a-f]{32}\?h=[A-Za-z0-9_-]{43}$/);
   if (qrHashHex(new URL(qrUrl).searchParams.get("h")) !== certificateHash) throw new TypeError("QR hash does not match certificate hash");
   const issuedAt = text(input.issuedAt, "issuedAt", /^20[0-9]{2}-[0-9]{2}-[0-9]{2}T/);
+  const internalRecordId = input.internalRecordId === undefined
+    ? null
+    : text(input.internalRecordId, "internalRecordId", /^SYNTHETIC-[1-9][0-9]*$/);
+  const recordVersion = input.recordVersion === undefined
+    ? null
+    : unsigned(input.recordVersion, "recordVersion");
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -122,12 +189,14 @@ async function registerArtifact(input: Record<string, unknown>): Promise<void> {
     );
     await client.query(
       `INSERT INTO demo_certificate (
-        certificate_id, registry_id, batch_sequence, certificate_hash, package_base64url, qr_url, status, issued_at
-      ) VALUES ($1,$2,$3,decode($4,'hex'),$5,$6,'ACTIVE',$7)
+        certificate_id, registry_id, batch_sequence, certificate_hash, package_base64url, qr_url, status, issued_at,
+        internal_record_id, record_version
+      ) VALUES ($1,$2,$3,decode($4,'hex'),$5,$6,'ACTIVE',$7,$8,$9)
       ON CONFLICT (certificate_id) DO UPDATE SET
         certificate_hash=EXCLUDED.certificate_hash, package_base64url=EXCLUDED.package_base64url, qr_url=EXCLUDED.qr_url,
-        status='ACTIVE', issued_at=EXCLUDED.issued_at`,
-      [certificateId, registryId, batchSequence, certificateHash, certificatePackage, qrUrl, issuedAt],
+        status='ACTIVE', issued_at=EXCLUDED.issued_at,
+        internal_record_id=EXCLUDED.internal_record_id, record_version=EXCLUDED.record_version`,
+      [certificateId, registryId, batchSequence, certificateHash, certificatePackage, qrUrl, issuedAt, internalRecordId, recordVersion],
     );
     await client.query("COMMIT");
   } catch (error) {
@@ -142,7 +211,20 @@ async function reconcile(): Promise<{ status: "CLEAN" | "DISPUTED"; expectedRoot
   await ensureFixture();
   const [anchor, records] = await Promise.all([
     pool.query("SELECT encode(merkle_root, 'hex') AS root, batch_sequence FROM demo_anchor WHERE registry_id=$1 ORDER BY batch_sequence DESC LIMIT 1", [REGISTRY_ID]),
-    pool.query("SELECT internal_record_id, record_version::text, status, record_field_key_hex FROM synthetic_registry_record ORDER BY source_cursor"),
+    // The reconcile root must be built from the same field set as the batch:
+    // the imported paths belong to the commitment just like `status` does.
+    pool.query(
+      `SELECT r.internal_record_id, r.record_version::text, r.status, r.record_field_key_hex,
+              COALESCE(
+                json_agg(json_build_object('path', f.path, 'type', f.value_type, 'value', f.value_text)
+                         ORDER BY f.path) FILTER (WHERE f.path IS NOT NULL),
+                '[]'
+              ) AS fields
+         FROM synthetic_registry_record r
+         LEFT JOIN synthetic_record_field f ON f.internal_record_id = r.internal_record_id
+        GROUP BY r.internal_record_id
+        ORDER BY r.source_cursor`,
+    ),
   ]);
   if (anchor.rows.length !== 1) throw new Error("finalized demo anchor missing");
   const rows: SyntheticFixtureRow[] = records.rows.map((row) => ({
@@ -150,6 +232,7 @@ async function reconcile(): Promise<{ status: "CLEAN" | "DISPUTED"; expectedRoot
     recordVersion: row.record_version,
     status: row.status,
     recordFieldKeyHex: row.record_field_key_hex,
+    fields: row.fields,
   }));
   const expectedRoot: string = anchor.rows[0].root;
   const actualRoot = fixtureRoot(rows);
@@ -175,8 +258,43 @@ async function reconcile(): Promise<{ status: "CLEAN" | "DISPUTED"; expectedRoot
   return { status: "DISPUTED", expectedRoot, actualRoot };
 }
 
+async function handleAdmin(
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+): Promise<void> {
+  // Several admin actions are bodyless POSTs (reconciliation, rejection), so an
+  // absent body is normal rather than a parse error.
+  const declaredLength = Number(request.headers["content-length"] ?? "0");
+  const hasBody = Number.isSafeInteger(declaredLength) && declaredLength > 0;
+  const result = await routeAdmin(adminContext, {
+    method: request.method ?? "GET",
+    path: url.pathname,
+    query: url.searchParams,
+    body: hasBody ? await body(request) : null,
+    cookieHeader: request.headers.cookie,
+    csrfHeader: firstHeader(request.headers[CSRF_HEADER]),
+    idempotencyKey: firstHeader(request.headers["idempotency-key"]),
+  });
+  if (result.setCookie !== undefined) response.setHeader("set-cookie", result.setCookie);
+  if (result.status === 204) {
+    response.writeHead(204, { "cache-control": "no-store" });
+    response.end();
+    return;
+  }
+  json(response, result.status, result.body);
+}
+
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
+}
+
 async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = new URL(request.url ?? "/", publicBaseUrl);
+  if (url.pathname.startsWith("/v1/admin/")) {
+    await handleAdmin(request, response, url);
+    return;
+  }
   if (request.method === "GET" && url.pathname === "/v1/health") {
     await ensureFixture();
     json(response, 200, { status: "ok", fixture: MARKER, cluster: "devnet" });
@@ -204,19 +322,64 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   }
   if (request.method === "GET" && url.pathname === "/v1/incidents") {
     if (url.searchParams.get("registryId") !== REGISTRY_ID) throw new TypeError("registryId is invalid");
-    const batchSequence = unsigned(url.searchParams.get("batchSequence"), "batchSequence");
-    const [result, watermark] = await Promise.all([
+    const batchSequence = BigInt(unsigned(url.searchParams.get("batchSequence"), "batchSequence"));
+    await refreshIndex();
+    const [state, onchain, local] = await Promise.all([
+      incidentStore.loadState(REGISTRY_ID),
+      incidentStore.listNotices(REGISTRY_ID, batchSequence),
+      // Local monitor findings (direct-DB tampering) are not on-chain events and
+      // are reported as a separate source; they never set the watermark.
       pool.query(
         "SELECT first_suspect_batch::text, last_suspect_batch::text, status FROM integrity_incident WHERE registry_id=$1 AND first_suspect_batch <= $2 AND last_suspect_batch >= $2",
-        [REGISTRY_ID, batchSequence],
+        [REGISTRY_ID, batchSequence.toString()],
       ),
-      pool.query("SELECT COALESCE(max(anchor_slot), 0)::text AS slot FROM demo_anchor WHERE registry_id=$1", [REGISTRY_ID]),
     ]);
-    const indexedThroughSlot = await safeIndexedThroughSlot(rpcUrl, BigInt(unsigned(watermark.rows[0].slot, "indexedThroughSlot")));
+    const incidents = [
+      ...onchain.map((notice) => ({
+        firstBatchSequence: notice.firstSuspectBatch.toString(),
+        lastBatchSequence: notice.lastSuspectBatch.toString(),
+        status: notice.status,
+        source: "ONCHAIN" as const,
+        openedSlot: notice.openedSlot.toString(),
+        resolvedSlot: notice.resolvedSlot === null ? undefined : notice.resolvedSlot.toString(),
+      })),
+      ...local.rows.map((row) => ({
+        firstBatchSequence: row.first_suspect_batch,
+        lastBatchSequence: row.last_suspect_batch,
+        status: row.status === "OPEN" ? "OPEN" as const : "RESOLVED" as const,
+        source: "LOCAL_MONITOR" as const,
+      })),
+    ];
+    const body: Record<string, unknown> = { registryId: REGISTRY_ID, incidents };
+    // No watermark means "never indexed", which the verifier must read as
+    // UNAVAILABLE rather than as a complete empty answer.
+    if (state.indexedThroughSlot > 0n) body.indexedThroughSlot = state.indexedThroughSlot.toString();
+    json(response, 200, body);
+    return;
+  }
+  const certificateLifecycle = url.pathname.match(/^\/v1\/certificates\/([0-9a-f]{32})\/lifecycle$/);
+  if (request.method === "GET" && certificateLifecycle) {
+    if (url.searchParams.get("registryId") !== REGISTRY_ID) throw new TypeError("registryId is invalid");
+    const result = await pool.query(
+      `SELECT c.status,
+              COALESCE(
+                (SELECT max(r.record_version) FROM synthetic_registry_record r
+                  WHERE r.internal_record_id = c.internal_record_id),
+                c.record_version,
+                1
+              )::text AS current_record_version
+         FROM demo_certificate c
+        WHERE c.certificate_id = $1 AND c.registry_id = $2`,
+      [certificateLifecycle[1], REGISTRY_ID],
+    );
+    if (result.rows.length === 0) { json(response, 404, { code: "CERTIFICATE_NOT_FOUND" }); return; }
+    const status: string = result.rows[0].status;
     json(response, 200, {
       registryId: REGISTRY_ID,
-      indexedThroughSlot,
-      incidents: result.rows.map((row) => ({ firstBatchSequence: row.first_suspect_batch, lastBatchSequence: row.last_suspect_batch, status: row.status })),
+      currentRecordVersion: result.rows[0].current_record_version,
+      // DISPUTED is an incident state, not a lifecycle state: the certificate
+      // itself has not been replaced.
+      certificateStatus: status === "SUPERSEDED" || status === "REVOKED" ? status : "ACTIVE",
     });
     return;
   }
@@ -228,15 +391,76 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   }
   const certificatePackage = url.pathname.match(/^\/v1\/certificates\/([0-9a-f]{32})\/package$/);
   if (request.method === "GET" && certificatePackage) {
-    const result = await pool.query("SELECT package_base64url FROM demo_certificate WHERE certificate_id=$1", [certificatePackage[1]]);
-    json(response, result.rows.length ? 200 : 404, result.rows[0] ?? { code: "CERTIFICATE_NOT_FOUND" });
+    const result = await pool.query(
+      "SELECT package_base64url, encode(certificate_hash,'hex') AS certificate_hash, qr_url FROM demo_certificate WHERE certificate_id=$1",
+      [certificatePackage[1]],
+    );
+    if (!result.rows.length) { json(response, 404, { code: "CERTIFICATE_NOT_FOUND" }); return; }
+    // When the caller arrived from a QR code it must present the hash the code
+    // carried; a swapped package fails here, before any chain lookup.
+    const qrHash = url.searchParams.get("h");
+    if (qrHash !== null && qrHashHex(qrHash) !== result.rows[0].certificate_hash) {
+      json(response, 422, { code: "QR_HASH_MISMATCH" });
+      return;
+    }
+    json(response, 200, {
+      package_base64url: result.rows[0].package_base64url,
+      certificateHash: result.rows[0].certificate_hash,
+      qrUrl: result.rows[0].qr_url,
+    });
     return;
   }
-  const qr = url.pathname.match(/^\/v1\/qr\/([0-9a-f]{32})\.svg$/);
+  // Public metadata about the certificate as an artifact: how much of the
+  // record it discloses and which anchor it points at. The field values are
+  // not served here — they come from the package the verifier checked.
+  const certificateMetadata = url.pathname.match(/^\/v1\/certificates\/([0-9a-f]{32})\/metadata$/);
+  if (request.method === "GET" && certificateMetadata) {
+    const result = await pool.query(
+      `SELECT c.certificate_id, c.batch_sequence::text, c.status, c.issued_at, c.qr_url,
+              c.disclosure_mode, c.disclosed_paths, c.record_version::text,
+              encode(c.certificate_hash,'hex') AS certificate_hash,
+              a.anchor_slot::text, a.transaction_signature, encode(a.merkle_root,'hex') AS merkle_root,
+              encode(a.manifest_hash,'hex') AS manifest_hash
+         FROM demo_certificate c
+         JOIN demo_anchor a ON a.registry_id = c.registry_id AND a.batch_sequence = c.batch_sequence
+        WHERE c.certificate_id = $1 AND c.registry_id = $2`,
+      [certificateMetadata[1], REGISTRY_ID],
+    );
+    if (!result.rows.length) { json(response, 404, { code: "CERTIFICATE_NOT_FOUND" }); return; }
+    const row = result.rows[0];
+    json(response, 200, {
+      certificateId: row.certificate_id,
+      registryId: REGISTRY_ID,
+      cluster: "solana:devnet",
+      status: row.status,
+      issuedAt: row.issued_at,
+      recordVersion: row.record_version,
+      certificateHash: row.certificate_hash,
+      qrUrl: row.qr_url,
+      disclosureMode: row.disclosure_mode,
+      disclosedPaths: row.disclosed_paths,
+      batchSequence: row.batch_sequence,
+      anchorSlot: row.anchor_slot,
+      transactionSignature: row.transaction_signature,
+      merkleRoot: row.merkle_root,
+      manifestHash: row.manifest_hash,
+      explorerUrl: `https://explorer.solana.com/tx/${row.transaction_signature}?cluster=devnet`,
+    });
+    return;
+  }
+  const qr = url.pathname.match(/^\/v1\/qr\/([0-9a-f]{32})\.(svg|png)$/);
   if (request.method === "GET" && qr) {
     const result = await pool.query("SELECT qr_url FROM demo_certificate WHERE certificate_id=$1", [qr[1]]);
     if (!result.rows.length) { json(response, 404, { code: "CERTIFICATE_NOT_FOUND" }); return; }
-    const svg = await QRCode.toString(result.rows[0].qr_url, { type: "svg", errorCorrectionLevel: "M", margin: 2 });
+    const qrUrl: string = result.rows[0].qr_url;
+    if (qr[2] === "png") {
+      // PNG exists for printing and slides; the payload is the same URL.
+      const png = await QRCode.toBuffer(qrUrl, { type: "png", errorCorrectionLevel: "M", margin: 2, width: 512 });
+      response.writeHead(200, { "content-type": "image/png", "cache-control": "no-store", "content-length": png.length });
+      response.end(png);
+      return;
+    }
+    const svg = await QRCode.toString(qrUrl, { type: "svg", errorCorrectionLevel: "M", margin: 2 });
     response.writeHead(200, { "content-type": "image/svg+xml", "cache-control": "no-store", "content-length": Buffer.byteLength(svg) });
     response.end(svg);
     return;

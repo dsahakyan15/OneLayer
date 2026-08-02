@@ -35,11 +35,17 @@ struct CertificateOutput {
     transaction_signature: String,
     anchor_slot: u64,
     certificate_id: String,
+    internal_record_id: &'static str,
+    record_version: u64,
     certificate_hash: String,
     certificate_package: String,
     qr_url: String,
     issued_at: &'static str,
 }
+
+/// The synthetic record the demo certificate discloses; the Admin API stores it
+/// so the verifier can report `VERIFIED_HISTORICAL` once a newer version exists.
+const DEMO_CERTIFICATE_RECORD_ID: &str = "SYNTHETIC-1";
 
 fn required(name: &str) -> Result<String, String> {
     env::var(name).map_err(|_| format!("{name} is required"))
@@ -101,7 +107,7 @@ fn main() -> Result<(), String> {
     let certificate_id = [8; 16];
     let certificate = batch
         .issue_certificate(CertificateRequest {
-            internal_record_id: "SYNTHETIC-1",
+            internal_record_id: DEMO_CERTIFICATE_RECORD_ID,
             disclosed_paths: &["status"],
             disclosure_mode: DisclosureMode::FullRecord,
             certificate_id,
@@ -139,6 +145,8 @@ fn main() -> Result<(), String> {
         transaction_signature: transaction_signature.to_string(),
         anchor_slot,
         certificate_id: certificate_id_hex,
+        internal_record_id: DEMO_CERTIFICATE_RECORD_ID,
+        record_version: 1,
         certificate_hash: hex::encode(certificate.signed.certificate_hash),
         certificate_package: URL_SAFE_NO_PAD.encode(certificate.package_cbor),
         qr_url,
