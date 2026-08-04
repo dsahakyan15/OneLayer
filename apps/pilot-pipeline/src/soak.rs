@@ -30,6 +30,16 @@ pub struct CycleRecord {
     pub manifest_hash: String,
     /// `manifestHash` of an independent rebuild of the same source range.
     pub rebuilt_manifest_hash: String,
+    /// Cursor range used by the original and rebuilt batches. Missing values
+    /// are reported as a non-reproducible range rather than accepted silently.
+    #[serde(default)]
+    pub source_cursor_start: Option<u64>,
+    #[serde(default)]
+    pub source_cursor_end: Option<u64>,
+    #[serde(default)]
+    pub rebuilt_source_cursor_start: Option<u64>,
+    #[serde(default)]
+    pub rebuilt_source_cursor_end: Option<u64>,
     pub merkle_root: String,
     pub anchor_slot: u64,
     /// Watermark reported by the incident index at the end of the cycle.
@@ -40,6 +50,11 @@ pub struct CycleRecord {
     /// Incident sequences the index reported as resolved.
     #[serde(default)]
     pub resolved_incidents: Vec<u64>,
+    /// Result of the incident-index freshness check for this cycle. The field
+    /// remains optional only so malformed/legacy JSONL can be parsed and
+    /// reported as a finding rather than being treated as a clean check.
+    #[serde(default)]
+    pub incident_index_status: Option<String>,
     /// Set by the runner when a cycle needed a human to continue.
     #[serde(default)]
     pub manual_intervention: bool,
@@ -57,6 +72,9 @@ pub enum Finding {
     ManifestNotReproducible {
         batch_sequence: u64,
     },
+    SourceRangeNotReproducible {
+        batch_sequence: u64,
+    },
     IndexBehindAnchor {
         batch_sequence: u64,
         anchor_slot: u64,
@@ -66,6 +84,10 @@ pub enum Finding {
         batch_sequence: u64,
         previous: u64,
         observed: u64,
+    },
+    IncidentIndexNotChecked {
+        batch_sequence: u64,
+        status: String,
     },
     ManualIntervention {
         cycle: u64,
@@ -91,6 +113,11 @@ pub struct SoakReport {
     pub cycles: u64,
     pub observed_seconds: u64,
     pub anchor_sequence_gap_total: u64,
+    pub manifest_rebuild_checks: u64,
+    pub manifest_rebuild_mismatch_total: u64,
+    pub source_range_checks: u64,
+    pub source_range_mismatch_total: u64,
+    pub incident_index_not_checked_total: u64,
     pub incident_open_events: u64,
     pub incident_resolve_events: u64,
     pub findings: Vec<Finding>,
@@ -105,6 +132,9 @@ pub struct SoakLedger {
     highest_watermark: u64,
     cycles: u64,
     gaps: u64,
+    manifest_mismatches: u64,
+    source_range_mismatches: u64,
+    incident_index_failures: u64,
     open_incidents: std::collections::BTreeSet<u64>,
     resolved_incidents: std::collections::BTreeSet<u64>,
     findings: Vec<Finding>,
@@ -148,7 +178,23 @@ impl SoakLedger {
         }
 
         if record.manifest_hash != record.rebuilt_manifest_hash {
+            self.manifest_mismatches += 1;
             self.findings.push(Finding::ManifestNotReproducible {
+                batch_sequence: record.batch_sequence,
+            });
+        }
+        if !matches!(
+            (
+                record.source_cursor_start,
+                record.source_cursor_end,
+                record.rebuilt_source_cursor_start,
+                record.rebuilt_source_cursor_end,
+            ),
+            (Some(start), Some(end), Some(rebuilt_start), Some(rebuilt_end))
+                if start <= end && start == rebuilt_start && end == rebuilt_end
+        ) {
+            self.source_range_mismatches += 1;
+            self.findings.push(Finding::SourceRangeNotReproducible {
                 batch_sequence: record.batch_sequence,
             });
         }
@@ -168,6 +214,17 @@ impl SoakLedger {
             });
         }
         self.highest_watermark = self.highest_watermark.max(record.indexed_through_slot);
+
+        if record.incident_index_status.as_deref() != Some("CHECKED") {
+            self.incident_index_failures += 1;
+            self.findings.push(Finding::IncidentIndexNotChecked {
+                batch_sequence: record.batch_sequence,
+                status: record
+                    .incident_index_status
+                    .clone()
+                    .unwrap_or_else(|| "MISSING".into()),
+            });
+        }
 
         if record.manual_intervention {
             self.findings.push(Finding::ManualIntervention {
@@ -201,6 +258,11 @@ impl SoakLedger {
             cycles: self.cycles,
             observed_seconds,
             anchor_sequence_gap_total: self.gaps,
+            manifest_rebuild_checks: self.cycles,
+            manifest_rebuild_mismatch_total: self.manifest_mismatches,
+            source_range_checks: self.cycles,
+            source_range_mismatch_total: self.source_range_mismatches,
+            incident_index_not_checked_total: self.incident_index_failures,
             incident_open_events: self.open_incidents.len() as u64,
             incident_resolve_events: self.resolved_incidents.len() as u64,
             findings: self.findings.clone(),
@@ -241,11 +303,16 @@ mod tests {
             anchor_hash: format!("{sequence:064}"),
             manifest_hash: format!("m{sequence:063}"),
             rebuilt_manifest_hash: format!("m{sequence:063}"),
+            source_cursor_start: Some(1),
+            source_cursor_end: Some(2),
+            rebuilt_source_cursor_start: Some(1),
+            rebuilt_source_cursor_end: Some(2),
             merkle_root: format!("r{sequence:063}"),
             anchor_slot: 400_000_000 + index * 1_000,
             indexed_through_slot: 400_000_100 + index * 1_000,
             open_incidents: Vec::new(),
             resolved_incidents: Vec::new(),
+            incident_index_status: Some("CHECKED".into()),
             manual_intervention: false,
         }
     }
@@ -266,6 +333,11 @@ mod tests {
         let report = evaluate(&run(73));
         assert_eq!(report.verdict, Verdict::Passed);
         assert_eq!(report.anchor_sequence_gap_total, 0);
+        assert_eq!(report.manifest_rebuild_checks, 73);
+        assert_eq!(report.manifest_rebuild_mismatch_total, 0);
+        assert_eq!(report.source_range_checks, 73);
+        assert_eq!(report.source_range_mismatch_total, 0);
+        assert_eq!(report.incident_index_not_checked_total, 0);
         assert!(report.findings.is_empty());
         assert!(report.observed_seconds >= REQUIRED_RUN_SECONDS);
     }
@@ -315,6 +387,32 @@ mod tests {
             .findings
             .iter()
             .any(|finding| matches!(finding, Finding::ManifestNotReproducible { .. })));
+        assert_eq!(report.manifest_rebuild_mismatch_total, 1);
+        assert_eq!(report.verdict, Verdict::Failed);
+    }
+
+    #[test]
+    fn a_different_source_range_fails_the_run() {
+        let mut records = run(73);
+        records[5].rebuilt_source_cursor_end = Some(3);
+        let report = evaluate(&records);
+        assert!(report.findings.iter().any(|finding| matches!(
+            finding,
+            Finding::SourceRangeNotReproducible { batch_sequence: 6 }
+        )));
+        assert_eq!(report.source_range_mismatch_total, 1);
+        assert_eq!(report.verdict, Verdict::Failed);
+    }
+
+    #[test]
+    fn a_missing_source_range_is_not_a_clean_check() {
+        let mut records = run(73);
+        records[3].source_cursor_start = None;
+        let report = evaluate(&records);
+        assert!(report.findings.iter().any(|finding| matches!(
+            finding,
+            Finding::SourceRangeNotReproducible { batch_sequence: 4 }
+        )));
         assert_eq!(report.verdict, Verdict::Failed);
     }
 
@@ -346,6 +444,30 @@ mod tests {
         let mut records = run(73);
         records[70].manual_intervention = true;
         assert_eq!(evaluate(&records).verdict, Verdict::Failed);
+    }
+
+    #[test]
+    fn an_explicitly_stale_index_fails_the_run() {
+        let mut records = run(73);
+        records[24].incident_index_status = Some("STALE".into());
+        let report = evaluate(&records);
+        assert!(report.findings.iter().any(|finding| matches!(
+            finding,
+            Finding::IncidentIndexNotChecked { batch_sequence: 25, status } if status == "STALE"
+        )));
+        assert_eq!(report.verdict, Verdict::Failed);
+    }
+
+    #[test]
+    fn missing_index_status_is_not_a_clean_check() {
+        let mut records = run(73);
+        records[3].incident_index_status = None;
+        let report = evaluate(&records);
+        assert!(report.findings.iter().any(|finding| matches!(
+            finding,
+            Finding::IncidentIndexNotChecked { batch_sequence: 4, status } if status == "MISSING"
+        )));
+        assert_eq!(report.verdict, Verdict::Failed);
     }
 
     #[test]

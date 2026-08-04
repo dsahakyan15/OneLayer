@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# Collect and render reproducible Gate C exit evidence.
+#
+# `collect` is intentionally fail-closed at preflight: if the host is not ready,
+# the report contains the preflight remediation and no publish/test mutation is
+# attempted. `report` only reads existing artifacts and never spends SOL.
+set -euo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+demo_dir=$(cd -- "$script_dir/.." && pwd)
+repo_root=$(cd -- "$demo_dir/../.." && pwd)
+evidence_dir=${ONELAYER_GATE_C_EVIDENCE_DIR:-$demo_dir/artifacts/gate-c}
+report_tool="$script_dir/release-report.mjs"
+mode=${1:-report}
+
+mkdir -p "$evidence_dir/checks"
+evidence_dir=$(cd -- "$evidence_dir" && pwd)
+
+run_check() {
+  local id=$1
+  local workdir=$2
+  shift 2
+  local log="$evidence_dir/checks/$id.log"
+  local command_text="$*"
+  local exit_code
+
+  set +e
+  (cd "$workdir" && "$@") >"$log" 2>&1
+  exit_code=$?
+  set -e
+  node "$report_tool" record "$evidence_dir" "$id" "$exit_code" "$log" "$command_text"
+  LAST_EXIT_CODE=$exit_code
+}
+
+render_report() {
+  local report_code
+  set +e
+  node "$report_tool" render "$evidence_dir"
+  report_code=$?
+  set -e
+  return "$report_code"
+}
+
+case "$mode" in
+  report)
+    render_report
+    ;;
+  collect)
+    # Runtime initialization is tmpfs-only, but it is recorded so an
+    # unsuccessful setup cannot be mistaken for a clean release report.
+    run_check runtime-init "$repo_root" "$script_dir/initialize-runtime"
+
+    # This is the mutation boundary. Do not build, start Compose, publish, or
+    # run browser tests until the host preflight succeeds.
+    run_check preflight "$repo_root" "$script_dir/preflight"
+    if [[ ${LAST_EXIT_CODE:-1} -ne 0 ]]; then
+      render_report || true
+      exit 2
+    fi
+
+    run_check pilot-pipeline "$repo_root" cargo test -p onelayer-pilot-pipeline
+    run_check snapshot-package "$repo_root/packages/snapshot-ts" npm test
+    run_check incident-index "$repo_root/apps/demo-api" node --test --experimental-transform-types tests/incident-index.test.ts
+    run_check demo-api-tests "$repo_root/apps/demo-api" npm test
+    run_check verifier-tests "$repo_root/apps/verifier" npm test
+    run_check verifier-typecheck "$repo_root/apps/verifier" npm run typecheck
+    run_check onchain-client-drift "$repo_root/packages/onchain-client" npm run check-drift
+    run_check mvp-web-typecheck "$repo_root/apps/mvp-web" npm run typecheck
+    run_check mvp-web-build "$repo_root/apps/mvp-web" env ONELAYER_ADMIN_API_URL=http://127.0.0.1:8199 ONELAYER_VERIFIER_URL=http://127.0.0.1:8199 npm run build
+
+    run_check browser-e2e "$repo_root/tests/e2e-web" env ONELAYER_GATE_C_EVIDENCE=yes ONELAYER_E2E_REPORT_DIR="$evidence_dir/browser-playwright-report" ONELAYER_E2E_OUTPUT_DIR="$evidence_dir/browser-test-results" npm test
+    run_check backup-recovery-e2e "$repo_root/tests/e2e-web" env ONELAYER_GATE_C_EVIDENCE=yes ONELAYER_E2E_REPORT_DIR="$evidence_dir/backup-playwright-report" ONELAYER_E2E_OUTPUT_DIR="$evidence_dir/backup-test-results" npx playwright test specs/admin-backups.spec.ts
+
+    if [[ ${RUN_ONELAYER_LIVE_SMOKE:-no} == yes ]]; then
+      run_check live-smoke "$repo_root" "$script_dir/live-smoke"
+    fi
+
+    render_report
+    ;;
+  *)
+    echo "usage: deploy/devnet-demo/scripts/release-report [collect|report]" >&2
+    exit 2
+    ;;
+esac

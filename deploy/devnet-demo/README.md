@@ -85,6 +85,53 @@ The live smoke verifies a certificate that the guarded CLI publish anchored, so
 no key material enters the browser. Evidence lands in
 `deploy/devnet-demo/artifacts/live-smoke/`.
 
+## Gate C exit evidence
+
+The release evidence runner stores machine-readable JSON, command logs, and the
+human-readable report under `deploy/devnet-demo/artifacts/gate-c/`. It stops at
+the preflight boundary when the host is not ready and records remediation
+instead of starting a partial pilot:
+
+```bash
+./deploy/devnet-demo/scripts/release-report collect
+```
+
+After the guarded bootstrap has been approved and the demo services are up, a
+72-hour synthetic run can be started. The additional soak approval is separate
+from the deploy and transaction approvals:
+
+```bash
+APPROVE_ONELAYER_SOAK=yes \
+  ./deploy/devnet-demo/scripts/soak start
+```
+
+For a local diagnostic run, `ONELAYER_SOAK_CYCLES` may limit the number of
+cycles; that report remains `INCOMPLETE` until its finalized timestamps cover
+the required 72 hours. Gate C accepts the default hourly run only when its
+`soak.jsonl` contains at least 73 finalized cycles. Starting over from an existing JSONL marks the first
+new cycle as manual intervention, so it cannot produce a clean no-manual Gate C
+verdict. A completed run records `anchor_sequence_gap_total`,
+the rebuilt `manifestHash`, incident-index watermark/status, and open/resolved
+incident observations in `soak.jsonl`. Re-rendering an existing report is
+read-only:
+
+```bash
+./deploy/devnet-demo/scripts/soak report
+./deploy/devnet-demo/scripts/release-report report
+```
+
+The release report is explicitly classified as `BOUNDED_SYNTHETIC_MVP`. It
+does not claim geographically independent Backup Centers, a production restore drill,
+production recovery readiness, or closure of release gate 7. Live-devnet
+evidence is accepted only after the separately approved `live-smoke` produces
+`artifacts/live-smoke/evidence.json` with `finalized_anchor=true` and
+`key_material_in_browser=false`. Browser traces/screenshots are retained in
+the report's separate `browser-*` and `backup-*` artifact directories.
+
+To collect that step as part of the report, set
+`RUN_ONELAYER_LIVE_SMOKE=yes`; `live-smoke` still requires its own
+`APPROVE_ONELAYER_LIVE_DEVNET_SMOKE=yes` and the two existing approval digests.
+
 ## QR transport
 
 The normative QR transport is HTTPS. The only exception in this demo is the

@@ -1,0 +1,215 @@
+#!/usr/bin/env bash
+# Guarded, resumable Gate C synthetic soak runner.
+#
+# The runner owns durable JSONL evidence and incident-index enrichment. One
+# `devnet_demo_soak` invocation owns one finalized publish cycle, so a failed
+# cycle never gets represented as a successful evidence line.
+set -euo pipefail
+
+command=${1:-start}
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+demo_dir=$(cd -- "$script_dir/.." && pwd)
+repo_root=$(cd -- "$demo_dir/../.." && pwd)
+evidence_dir=${ONELAYER_GATE_C_EVIDENCE_DIR:-$demo_dir/artifacts/gate-c}
+evidence_file=${ONELAYER_SOAK_EVIDENCE_FILE:-$evidence_dir/soak.jsonl}
+report_file=${ONELAYER_SOAK_REPORT_FILE:-$evidence_dir/soak-report.json}
+index_url=${ONELAYER_SOAK_INDEX_URL:-http://127.0.0.1:8090}
+runtime=/dev/shm/onelayer-devnet-demo
+
+mkdir -p "$evidence_dir"
+evidence_dir=$(cd -- "$evidence_dir" && pwd)
+
+report_existing() {
+  local code
+  [[ -s "$evidence_file" ]] || {
+    echo "soak evidence file is missing: $evidence_file" >&2
+    return 1
+  }
+  set +e
+  (cd "$repo_root" && cargo run -q -p onelayer-pilot-pipeline --bin soak_report -- "$evidence_file") >"$report_file"
+  code=$?
+  set -e
+  cat "$report_file"
+  return "$code"
+}
+
+last_record() {
+  if [[ ! -s "$evidence_file" ]]; then
+    printf '{}\n'
+    return
+  fi
+  node -e 'const fs=require("fs");const lines=fs.readFileSync(process.argv[1],"utf8").trim().split(/\n+/);const line=lines.at(-1);if(!line)process.stdout.write("{}\n");else process.stdout.write(line+"\n")' "$evidence_file"
+}
+
+append_cycle() {
+  local chain_file=$1
+  local index_file=$2
+  local output_file=$3
+  local manual_intervention=$4
+  node -e '
+    const fs = require("fs");
+    const chain = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+    const index = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+    const watermark = index.indexedThroughSlot === undefined ? null : Number(index.indexedThroughSlot);
+    const status = watermark === null || !Number.isSafeInteger(watermark)
+      ? "UNAVAILABLE"
+      : watermark < Number(chain.anchor_slot) ? "STALE" : "CHECKED";
+    const incidents = Array.isArray(index.incidents) ? index.incidents : [];
+    const incidentNumber = (incident) => Number(incident.incidentSequence ?? incident.incident_sequence ?? incident.firstBatchSequence ?? incident.first_suspect_batch ?? 0);
+    const open = incidents.filter((incident) => incident.status === "OPEN").map(incidentNumber).filter(Number.isSafeInteger);
+    const resolved = incidents.filter((incident) => incident.status === "RESOLVED").map(incidentNumber).filter(Number.isSafeInteger);
+    const record = {
+      ...chain,
+      indexed_through_slot: watermark ?? 0,
+      incident_index_status: status,
+      open_incidents: [...new Set(open)].sort((a, b) => a - b),
+      resolved_incidents: [...new Set(resolved)].sort((a, b) => a - b),
+      manual_intervention: process.argv[4] === "yes",
+    };
+    fs.appendFileSync(process.argv[3], `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });
+  ' "$chain_file" "$index_file" "$output_file" "$manual_intervention"
+}
+
+wait_until() {
+  local target=$1
+  local now remaining delay
+  while :; do
+    now=$(date +%s)
+    remaining=$((target - now))
+    (( remaining <= 0 )) && return
+    delay=$remaining
+    (( delay > 60 )) && delay=60
+    sleep "$delay"
+  done
+}
+
+run_start() {
+  [[ ${APPROVE_ONELAYER_SOAK:-} == yes ]] || {
+    echo "APPROVE_ONELAYER_SOAK=yes is required for a synthetic soak" >&2
+    return 70
+  }
+
+  export ONELAYER_RPC_URL=https://api.devnet.solana.com
+  export ONELAYER_WEBSOCKET_URL=wss://api.devnet.solana.com
+  export ONELAYER_TEST_KEYPAIR_PATH="$runtime/test-payer.json"
+  export ONELAYER_PROGRAM_ID=6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo
+  export ONELAYER_SOAK_INDEX_URL="$index_url"
+  [[ "$index_url" == http://127.0.0.1:8090 ]] || {
+    echo "ONELAYER_SOAK_INDEX_URL must be the loopback synthetic demo API" >&2
+    return 76
+  }
+
+  "$script_dir/initialize-runtime"
+  "$script_dir/preflight"
+
+  # Bootstrap/publish is intentionally separate from this runner. A release
+  # owner may opt into starting the read-only Compose verifier surface, but the
+  # initial devnet publish still goes through demo's two approval digests.
+  if [[ ${ONELAYER_SOAK_START_STACK:-yes} == yes ]]; then
+    if ! curl --silent --fail "$index_url/v1/health" >/dev/null 2>&1; then
+      "$demo_dir/demo" ui
+    fi
+  fi
+  curl --silent --fail "$index_url/v1/health" >/dev/null || {
+    echo "incident-index service is unavailable; start demo ui or set ONELAYER_SOAK_START_STACK=yes" >&2
+    return 71
+  }
+
+  local duration interval target_cycles
+  duration=${ONELAYER_SOAK_DURATION_SECONDS:-259200}
+  interval=${ONELAYER_SOAK_INTERVAL_SECONDS:-3600}
+  [[ "$duration" =~ ^[0-9]+$ && "$interval" =~ ^[1-9][0-9]*$ ]] || {
+    echo "ONELAYER_SOAK_DURATION_SECONDS and ONELAYER_SOAK_INTERVAL_SECONDS are invalid" >&2
+    return 72
+  }
+  if [[ -n ${ONELAYER_SOAK_CYCLES:-} ]]; then
+    [[ "$ONELAYER_SOAK_CYCLES" =~ ^[1-9][0-9]*$ ]] || { echo "ONELAYER_SOAK_CYCLES is invalid" >&2; return 73; }
+    target_cycles=$ONELAYER_SOAK_CYCLES
+  else
+    # Include both endpoints: an hourly run needs 73 finalized cycles to
+    # produce a 72-hour observation window.
+    target_cycles=$(( (duration + interval - 1) / interval + 1 ))
+    (( target_cycles < 2 )) && target_cycles=2
+  fi
+
+  local lock_dir="$evidence_dir/.soak.lock"
+  local restart_detected=0
+  if ! mkdir "$lock_dir" 2>/dev/null; then
+    local owner
+    owner=$(cat "$lock_dir/pid" 2>/dev/null || true)
+    if [[ "$owner" =~ ^[1-9][0-9]*$ ]] && kill -0 "$owner" 2>/dev/null; then
+      echo "another soak runner (pid $owner) owns $evidence_dir" >&2
+      return 74
+    fi
+    # A process killed between cycles leaves only its lock directory. It is
+    # safe to reclaim this exact, scoped lock and resume from the last JSONL
+    # line; no product or Docker resource is touched.
+    rm -f "$lock_dir/pid"
+    rmdir "$lock_dir" 2>/dev/null || { echo "stale soak lock could not be reclaimed" >&2; return 74; }
+    mkdir "$lock_dir"
+    restart_detected=1
+  fi
+  printf '%s\n' "$$" >"$lock_dir/pid"
+  trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+
+  local previous cycle_count next_cycle first_finalized scheduled_at resumed manual_intervention
+  previous=$(last_record)
+  resumed=$restart_detected
+  [[ -s "$evidence_file" ]] && resumed=1
+  cycle_count=$(node -e 'const r=JSON.parse(process.argv[1]);process.stdout.write(r.cycle===undefined?"0":String(Number(r.cycle)+1))' "$previous")
+  next_cycle=$cycle_count
+  first_finalized=$(node -e 'const r=JSON.parse(process.argv[1]);process.stdout.write(r.finalized_at===undefined?"0":String(Number(r.finalized_at)))' "$previous")
+  if (( cycle_count >= target_cycles )); then
+    report_existing
+    return $?
+  fi
+
+  while (( cycle_count < target_cycles )); do
+    if (( first_finalized > 0 )); then
+      scheduled_at=$((first_finalized + (cycle_count - 1) * interval))
+      wait_until "$scheduled_at"
+    fi
+
+    local cycle_output="" cycle_log index_output="" chain_line batch_sequence
+    cycle_output=$(mktemp "$evidence_dir/cycle-${next_cycle}.XXXXXX.json")
+    cycle_log="$evidence_dir/cycle-${next_cycle}.log"
+    index_output=$(mktemp "$evidence_dir/index-${next_cycle}.XXXXXX.json")
+    trap 'rm -f "${cycle_output:-}" "${index_output:-}"; rmdir "$lock_dir" 2>/dev/null || true' EXIT
+    if ! (cd "$repo_root" && ONELAYER_SOAK_CYCLE="$next_cycle" cargo run -q -p onelayer-pilot-pipeline --bin devnet_demo_soak -- cycle) >"$cycle_output" 2>"$cycle_log"; then
+      echo "soak cycle $next_cycle failed; see $cycle_log" >&2
+      return 75
+    fi
+    chain_line=$(tail -n 1 "$cycle_output")
+    node -e 'JSON.parse(process.argv[1]);' "$chain_line"
+    batch_sequence=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).batch_sequence))' "$chain_line")
+
+    # A missing/stale index is recorded as evidence and makes the final report
+    # fail closed; it does not get silently converted into VERIFIED.
+    if ! curl --silent --show-error --fail-with-body \
+      "$index_url/v1/incidents?registryId=gov.registry.land&batchSequence=$batch_sequence" >"$index_output" 2>"$evidence_dir/index-${next_cycle}.log"; then
+      printf '{"registryId":"gov.registry.land","incidents":[]}' >"$index_output"
+    fi
+    manual_intervention=no
+    (( resumed == 1 )) && manual_intervention=yes
+    append_cycle "$cycle_output" "$index_output" "$evidence_file" "$manual_intervention"
+    rm -f "$cycle_output" "$index_output"
+    resumed=0
+
+    if (( first_finalized == 0 )); then
+      previous=$(last_record)
+      first_finalized=$(node -e 'process.stdout.write(String(JSON.parse(process.argv[1]).finalized_at))' "$previous")
+    fi
+    cycle_count=$((cycle_count + 1))
+    next_cycle=$((next_cycle + 1))
+  done
+
+  trap - EXIT
+  rmdir "$lock_dir" 2>/dev/null || true
+  report_existing
+}
+
+case "$command" in
+  start) run_start ;;
+  report) report_existing ;;
+  *) echo "usage: deploy/devnet-demo/scripts/soak [start|report]" >&2; exit 2 ;;
+esac

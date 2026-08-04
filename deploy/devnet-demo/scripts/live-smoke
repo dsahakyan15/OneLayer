@@ -27,12 +27,12 @@ compose="$demo_dir/compose.yaml"
 certificate_json="$artifacts/certificate.json"
 [[ -s "$certificate_json" ]] || { echo "certificate artifact is missing" >&2; exit 71; }
 certificate_id=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).certificateId)' "$certificate_json")
-certificate_hash=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).certificateHash)' "$certificate_json")
-[[ "$certificate_id" =~ ^[0-9a-f]{32}$ && "$certificate_hash" =~ ^[0-9a-f]{64}$ ]] || {
+certificate_package_hash=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).certificateHash)' "$certificate_json")
+[[ "$certificate_id" =~ ^[0-9a-f]{32}$ && "$certificate_package_hash" =~ ^[0-9a-f]{64}$ ]] || {
   echo "certificate artifact is malformed" >&2
   exit 72
 }
-qr_hash=$(node -e 'process.stdout.write(Buffer.from(process.argv[1],"hex").toString("base64url"))' "$certificate_hash")
+qr_hash=$(node -e 'process.stdout.write(Buffer.from(process.argv[1],"hex").toString("base64url"))' "$certificate_package_hash")
 
 docker compose -p onelayer-devnet-demo -f "$compose" up -d --build mvp-web
 for _ in $(seq 1 90); do
@@ -48,5 +48,37 @@ mkdir -p "$artifacts/live-smoke"
 cd "$repo_root/tests/e2e-web"
 ONELAYER_LIVE_QR_URL="http://127.0.0.1:8091/c/${certificate_id}?h=${qr_hash}" \
   npx playwright test --config playwright.live.config.ts
+
+node -e '
+  const fs = require("fs");
+  const certificate = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+  const anchor = fs.readFileSync(process.argv[2], "utf8");
+  const value = (name) => new RegExp(`^${name}=(.*)$`, "m").exec(anchor)?.[1] ?? null;
+  const evidence = {
+    schema: "onelayer.gate-c.live-smoke.v1",
+    status: "PASS",
+    classification: "BOUNDED_SYNTHETIC_MVP",
+    finalized_anchor: true,
+    key_material_in_browser: false,
+    separate_approval: true,
+    certificate_id: certificate.certificateId,
+    certificate_package_hash: certificate.certificateHash,
+    qr_hash: process.argv[3].split("?h=")[1] ?? null,
+    transaction_signature: value("ONELAYER_TRANSACTION_SIGNATURE"),
+    anchor_slot: Number(value("ONELAYER_ANCHOR_SLOT")),
+    qr_url: process.argv[3],
+    artifacts: ["verified.png", "trace.zip"],
+    exclusions: [
+      "No production credentials or recovery claim.",
+      "No geographic independence or release gate 7 claim.",
+    ],
+  };
+  if (!/^[0-9a-f]{32}$/.test(evidence.certificate_id) || !/^[0-9a-f]{64}$/.test(evidence.certificate_package_hash)
+      || !/^[1-9][0-9]*$/.test(String(evidence.anchor_slot))
+      || evidence.transaction_signature === null) {
+    throw new Error("live smoke evidence inputs are malformed");
+  }
+  fs.writeFileSync(process.argv[4], `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
+' "$certificate_json" "$artifacts/finalized-anchor.env" "http://127.0.0.1:8091/c/${certificate_id}?h=${qr_hash}" "$artifacts/live-smoke/evidence.json"
 
 echo "live devnet smoke passed; evidence in $artifacts/live-smoke"
