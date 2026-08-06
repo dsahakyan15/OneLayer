@@ -13,7 +13,7 @@ import { admin, ApiError } from "../lib/api";
 
 export interface AdminSessionState {
   username: string;
-  role: "operator" | "auditor";
+  role: "operator" | "auditor" | "chief_admin";
   csrfToken: string;
 }
 
@@ -69,6 +69,7 @@ export function AdminShell({ children }: { children: ReactNode }): ReactNode {
           <Link href="/admin/records">Records</Link>
           <Link href="/admin/publish">Prepare &amp; publish</Link>
           <Link href="/admin/certificates">Certificates</Link>
+          <Link href="/admin/backups">Backup Centers</Link>
           <Link href="/admin/timeline">Timeline</Link>
           <Link href="/verify">Public panel</Link>
         </div>
@@ -119,6 +120,7 @@ function LoginForm({ onSuccess }: { onSuccess: () => Promise<void> }): ReactNode
             <select value={username} onChange={(event) => setUsername(event.target.value)} data-testid="login-username">
               <option value="operator">operator</option>
               <option value="auditor">auditor</option>
+              <option value="chief_admin">chief_admin</option>
             </select>
           </label>
           <label className="ol-field">

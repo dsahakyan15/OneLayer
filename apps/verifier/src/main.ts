@@ -1,7 +1,6 @@
 import { HttpIncidentIndex, HttpLifecycleIndex, HttpPublicLookup } from "./http-adapters.ts";
 import { createVerifierServer } from "./server.ts";
 import { SolanaRpcChainReader } from "./solana-rpc.ts";
-import { DualRpcChainReader } from "./dual-rpc.ts";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -13,15 +12,7 @@ const port = Number(process.env.PORT ?? "8080");
 if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error("PORT is invalid");
 const maxIndexLagSlots = BigInt(process.env.ONELAYER_MAX_INDEX_LAG_SLOTS ?? "300");
 if (maxIndexLagSlots < 0n) throw new Error("ONELAYER_MAX_INDEX_LAG_SLOTS is invalid");
-const primaryChain = new SolanaRpcChainReader(required("ONELAYER_RPC_URL"));
-const secondaryRpcUrl = process.env.ONELAYER_RPC_URL_SECONDARY;
-const maxRpcHeadDifference = secondaryRpcUrl === undefined
-  ? undefined
-  : BigInt(required("ONELAYER_MAX_RPC_HEAD_DIFFERENCE"));
-if (maxRpcHeadDifference !== undefined && maxRpcHeadDifference < 0n) throw new Error("ONELAYER_MAX_RPC_HEAD_DIFFERENCE is invalid");
-const chain = secondaryRpcUrl === undefined
-  ? primaryChain
-  : new DualRpcChainReader(primaryChain, new SolanaRpcChainReader(secondaryRpcUrl));
+const chain = new SolanaRpcChainReader(required("ONELAYER_RPC_URL"));
 
 const server = createVerifierServer({
   chain,
@@ -30,7 +21,6 @@ const server = createVerifierServer({
   corsAllowedOrigin: process.env.ONELAYER_CORS_ALLOWED_ORIGIN,
   verifyOptions: {
     maxIndexLagSlots,
-    maxRpcHeadDifference,
     lifecycle: new HttpLifecycleIndex(required("ONELAYER_LOOKUP_URL")),
   },
 });

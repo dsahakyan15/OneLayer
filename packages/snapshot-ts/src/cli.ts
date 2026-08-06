@@ -47,7 +47,7 @@ if (command === "create") {
 } else if (command === "split-kek") {
   const kek = secret(required(3, "KEK path"));
   const outputPrefix = required(4, "share output prefix");
-  if (!outputPrefix.startsWith("/run/onelayer-recovery/") && !outputPrefix.startsWith("/dev/shm/onelayer-recovery-lab-secrets/recovery-share-")) {
+  if (!outputPrefix.startsWith("/run/onelayer-recovery/") && !outputPrefix.startsWith("/dev/shm/onelayer-recovery/shares/recovery-share-")) {
     throw new Error("shares must be written to an approved tmpfs path");
   }
   try {

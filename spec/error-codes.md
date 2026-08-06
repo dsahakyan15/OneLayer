@@ -90,6 +90,8 @@
 | `ANCHOR_NOT_FINALIZED` | commitment ниже finalized |
 | `ANCHOR_ACCOUNT_INVALID` | owner, discriminator, PDA, layout или program ID неверны |
 | `ANCHOR_DISPUTED` | независимые RPC вернули разные finalized данные |
+| `REGISTRY_PAUSED` | QR-путь закрыт: on-chain `RegistryConfig.paused = true` |
+| `REGISTRY_STATUS_UNAVAILABLE` | verifier не смог получить рабочее состояние registry |
 | `SCHEMA_UNSUPPORTED` | schema version не поддерживается |
 | `RECORD_SUPERSEDED` | существует более новая record version |
 | `CURRENT_STATUS_UNAVAILABLE` | актуальное состояние реестра недоступно |

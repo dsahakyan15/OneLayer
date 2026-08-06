@@ -139,3 +139,9 @@ https://<verifier-host>/c/<lowercase-uuid>?h=<base64url(certificate_hash)>
 
 Base64url без padding. PII, disclosed fields и package в QR не помещаются.
 Animated/offline QR не входит в pilot.
+
+Operational policy: the QR path is available only while the referenced on-chain
+registry has an existing `RegistryConfig` with `paused = false`. This guard is
+outside the frozen QR wire format: issuance, public QR endpoints and the
+independent verifier must all fail closed with `REGISTRY_PAUSED` when the
+registry is paused.

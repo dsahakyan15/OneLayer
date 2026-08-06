@@ -4,7 +4,7 @@
 // and does not replace production SSO/RBAC (Gate E).
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
-export type AdminRole = "operator" | "auditor";
+export type AdminRole = "operator" | "auditor" | "chief_admin";
 
 export const SESSION_COOKIE = "onelayer_admin_session";
 export const CSRF_HEADER = "x-onelayer-csrf";
@@ -31,7 +31,7 @@ export function parseCredentials(raw: string): Credential[] {
   }
   const credentials: Credential[] = [];
   for (const [username, password] of Object.entries(parsed as Record<string, unknown>)) {
-    if (username !== "operator" && username !== "auditor") {
+    if (username !== "operator" && username !== "auditor" && username !== "chief_admin") {
       throw new TypeError(`unknown admin role ${username}`);
     }
     if (typeof password !== "string" || password.length < 16) {
@@ -39,7 +39,10 @@ export function parseCredentials(raw: string): Credential[] {
     }
     credentials.push({ username, password, role: username });
   }
-  if (credentials.length !== 2) throw new TypeError("both operator and auditor credentials are required");
+  const roles = new Set(credentials.map((credential) => credential.role));
+  if (!roles.has("operator") || !roles.has("auditor")) {
+    throw new TypeError("both operator and auditor credentials are required");
+  }
   return credentials;
 }
 
@@ -158,5 +161,10 @@ export function authorize(store: SessionStore, request: AuthorizedRequest): Admi
 
 export function requireOperator(session: AdminSession): AdminSession {
   if (session.role !== "operator") throw new AuthorizationError(403, "ROLE_FORBIDDEN");
+  return session;
+}
+
+export function requireChiefAdmin(session: AdminSession): AdminSession {
+  if (session.role !== "chief_admin") throw new AuthorizationError(403, "ROLE_FORBIDDEN");
   return session;
 }

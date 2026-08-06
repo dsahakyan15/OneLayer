@@ -12,14 +12,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "alloc-spike"
-version = "0.1.0"
-dependencies = [
- "anchor-lang",
- "bytemuck",
-]
-
-[[package]]
 name = "anchor-attribute-access-control"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

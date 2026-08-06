@@ -6,7 +6,7 @@ import { expect, test } from "@playwright/test";
 const qrUrl = process.env.ONELAYER_LIVE_QR_URL;
 
 test("a live devnet certificate verifies in the browser", async ({ page }) => {
-  expect(qrUrl, "ONELAYER_LIVE_QR_URL must be set by the live-smoke script").toBeTruthy();
+  expect(qrUrl, "ONELAYER_LIVE_QR_URL must be set by the smoke-test caller").toBeTruthy();
   await page.goto(qrUrl as string);
   await expect(page.getByTestId("verification-status")).toContainText("VERIFIED", { timeout: 120_000 });
   await expect(page.getByTestId("incident-index-status")).not.toBeEmpty();

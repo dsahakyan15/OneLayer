@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { registryIdHash } from "../../../packages/canonical-ts/src/index.ts";
 import { decodeCertificatePackage } from "../src/certificate-codec.ts";
 import { createVerifierServer } from "../src/server.ts";
 
@@ -18,6 +19,9 @@ test("public REST verifies canonical package and exposes scoped lookups", async 
   const body = signed.body;
   const server = createVerifierServer({
     chain: {
+      async getRegistryConfig() {
+        return { registryIdHash: registryIdHash(body.registryId), paused: false };
+      },
       async getAnchor() {
         return {
           programId: body.anchor.solanaProgramId,

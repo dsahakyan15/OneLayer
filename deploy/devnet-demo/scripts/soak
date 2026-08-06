@@ -100,18 +100,16 @@ run_start() {
   }
 
   "$script_dir/initialize-runtime"
-  "$script_dir/preflight"
-
   # Bootstrap/publish is intentionally separate from this runner. A release
-  # owner may opt into starting the read-only Compose verifier surface, but the
-  # initial devnet publish still goes through demo's two approval digests.
+  # owner may opt into starting the native verifier surface, but the initial
+  # devnet publish still goes through the two approval digests.
   if [[ ${ONELAYER_SOAK_START_STACK:-yes} == yes ]]; then
     if ! curl --silent --fail "$index_url/v1/health" >/dev/null 2>&1; then
-      "$demo_dir/demo" ui
+      "$demo_dir/native" start
     fi
   fi
   curl --silent --fail "$index_url/v1/health" >/dev/null || {
-    echo "incident-index service is unavailable; start demo ui or set ONELAYER_SOAK_START_STACK=yes" >&2
+    echo "incident-index service is unavailable; start the native MVP or set ONELAYER_SOAK_START_STACK=yes" >&2
     return 71
   }
 
@@ -143,7 +141,7 @@ run_start() {
     fi
     # A process killed between cycles leaves only its lock directory. It is
     # safe to reclaim this exact, scoped lock and resume from the last JSONL
-    # line; no product or Docker resource is touched.
+    # line; no product resource is touched.
     rm -f "$lock_dir/pid"
     rmdir "$lock_dir" 2>/dev/null || { echo "stale soak lock could not be reclaimed" >&2; return 74; }
     mkdir "$lock_dir"

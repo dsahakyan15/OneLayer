@@ -1,142 +1,93 @@
-# OneLayer presentation devnet demo
+# OneLayer synthetic devnet demo
 
-This stack is fixed to Compose project `onelayer-devnet-demo`, PostgreSQL database `onelayer_demo`, Solana devnet, loopback-only host ports, synthetic records, and tmpfs test keys. It never targets mainnet, reads production credentials, publishes external artifacts, prunes Docker, or deletes resources outside its labeled project.
+Native demo для локальной проверки MVP: PostgreSQL 17, Node-сервисы, Solana
+devnet и loopback-порты. Все данные синтетические, ключи создаются в tmpfs,
+production credentials не используются.
 
-## Approval boundary
+## Запуск
 
-`./deploy/devnet-demo/demo plan` builds locally and prints two stable digests:
-
-- `program-plan.txt`: program deployment summary and `approval_digest`;
-- `chain-plan.txt`: registry/bootstrap/publish summary and `approval_digest`.
-
-No Solana transaction is sent by `plan`. After those exact summaries are explicitly approved, run the full path with the two digest values:
+Установите PostgreSQL 17 и зависимости приложений:
 
 ```bash
-ONELAYER_DEVNET_DEPLOY_APPROVED=<program-approval-digest> \
-ONELAYER_DEVNET_TX_APPROVED=<chain-approval-digest> \
-./deploy/devnet-demo/demo happy-path
+brew install postgresql@17
+npm --prefix apps/demo-api ci
+npm --prefix apps/verifier ci
+npm --prefix apps/mvp-web ci
+npm --prefix packages/onchain-client ci
 ```
 
-The program deploy keeps Solana CLI preflight enabled; each registry/bootstrap/publish transaction is explicitly simulated before send and confirmed at `finalized` commitment. The payer and program test keypair live under `/dev/shm/onelayer-devnet-demo`, never in Git.
-
-## Presentation flow
+Запустите MVP:
 
 ```bash
-# finalized transaction -> certificate -> QR -> VERIFIED
-./deploy/devnet-demo/demo happy-path
-
-# direct synthetic PostgreSQL mutation -> incident -> DISPUTED
-./deploy/devnet-demo/demo incident
-
-# optional clean-room restore -> recomputed root equals finalized anchor
-./deploy/devnet-demo/demo recovery
-
-# data-only reset; does not delete containers, volumes, images, or chain state
-./deploy/devnet-demo/demo reset
+./deploy/devnet-demo/native start
 ```
 
-Artifacts are written under ignored `deploy/devnet-demo/artifacts/`. The QR SVG is `certificate-qr.svg`; its payload opens the loopback verification page, which submits the embedded certificate package to the verifier and requires a finalized devnet anchor.
+Панели доступны по адресам:
 
-## Visual MVP (§5.4)
+- Admin: <http://127.0.0.1:8091/admin>
+- OneLayer: <http://127.0.0.1:8091/verify>
+- demo-api health: <http://127.0.0.1:8090/v1/health>
+- verifier health: <http://127.0.0.1:8080/v1/health>
 
-The same guarded Compose project serves the two panels; only one UI port is
-added and the loopback-only binding, labels, networks, tmpfs keys and synthetic
-marker are unchanged.
+Демо-учётные данные находятся в
+`/dev/shm/onelayer-devnet-demo/admin-credentials.json`.
+
+## Управление native runtime
 
 ```bash
-./deploy/devnet-demo/demo ui
-# Admin panel:    http://127.0.0.1:8091/admin
-# OneLayer panel: http://127.0.0.1:8091/verify
-# Demo credentials: /dev/shm/onelayer-devnet-demo/admin-credentials.json
+./deploy/devnet-demo/native status
+./deploy/devnet-demo/native logs
+./deploy/devnet-demo/native restart
+./deploy/devnet-demo/native stop
 ```
 
-`operator` prepares batches, reviews the transaction, requests the wallet
-signature and issues certificates; `auditor` is read-only, and that limit is
-enforced by the Admin API, not by hiding buttons. Credentials, the software
-issuer key and the payer keypair are generated per run into tmpfs.
+Локальная база и логи находятся в игнорируемом каталоге
+`deploy/devnet-demo/.runtime/native/`. База слушает только `127.0.0.1:55432`,
+а веб и API — только loopback-порты `8091`, `8090` и `8080`.
 
-Two publish paths coexist and do not substitute for each other:
+## Граница публикации в devnet
 
-- CLI publish keeps the `ONELAYER_DEVNET_TX_APPROVED` approval digest;
-- browser publish requires a reviewed click, a Wallet Standard prompt and
-  server-side validation that the signed wire transaction matches the stored
-  intent byte for byte.
-
-Program deploy and upgrade stay CLI-only with their own approval digest.
-
-The browser needs a Wallet Standard wallet on `solana:devnet` with the operator
-role. No keypair file, private key or seed phrase is ever accepted by the UI.
-
-## Browser tests
+Подготовка программы и её approval digest выполняются отдельно:
 
 ```bash
-# deterministic, runs in default CI, spends no SOL and needs no Docker
+cd onchain && NO_DNA=1 anchor build && cd ..
+./deploy/devnet-demo/scripts/initialize-runtime
+./deploy/devnet-demo/scripts/program-deploy plan
+```
+
+Команда `plan` ничего не публикует. Применение требует явно переданного
+`ONELAYER_DEVNET_DEPLOY_APPROVED`, а публикация реестра — отдельного
+`ONELAYER_DEVNET_TX_APPROVED`. Для обычной проверки UI запуск в devnet не
+нужен: native MVP использует синтетическую базу и заранее подготовленные
+данные.
+
+## Браузерные проверки
+
+Детерминированный E2E запускается отдельно и не требует сети или SOL:
+
+```bash
 npm --prefix tests/e2e-web test
-
-# guarded live devnet smoke: separate explicit approval, run once before a
-# presentation or release
-APPROVE_ONELAYER_LIVE_DEVNET_SMOKE=yes \
-ONELAYER_DEVNET_DEPLOY_APPROVED=<program-approval-digest> \
-ONELAYER_DEVNET_TX_APPROVED=<chain-approval-digest> \
-./deploy/devnet-demo/scripts/live-smoke
 ```
 
-The live smoke verifies a certificate that the guarded CLI publish anchored, so
-no key material enters the browser. Evidence lands in
-`deploy/devnet-demo/artifacts/live-smoke/`.
-
-## Gate C exit evidence
-
-The release evidence runner stores machine-readable JSON, command logs, and the
-human-readable report under `deploy/devnet-demo/artifacts/gate-c/`. It stops at
-the preflight boundary when the host is not ready and records remediation
-instead of starting a partial pilot:
+Для проверки уже подготовленного native devnet URL можно запустить guarded
+live smoke вручную:
 
 ```bash
-./deploy/devnet-demo/scripts/release-report collect
+ONELAYER_LIVE_WEB_URL=http://127.0.0.1:8091 \
+ONELAYER_LIVE_QR_URL='http://127.0.0.1:8091/verify?...' \
+npx --prefix tests/e2e-web playwright test \
+  --config=playwright.live.config.ts
 ```
 
-After the guarded bootstrap has been approved and the demo services are up, a
-72-hour synthetic run can be started. The additional soak approval is separate
-from the deploy and transaction approvals:
+## Backup-панель MVP
 
-```bash
-APPROVE_ONELAYER_SOAK=yes \
-  ./deploy/devnet-demo/scripts/soak start
-```
+Оператор открывает `/admin/backups`, видит стартовые локальные
+`BackupCenter`-ы и может создать snapshot, проверить статусы репликации и
+запустить bounded recovery flow. Эти центры являются локальным MVP-хранилищем;
+географическая независимость и production restore drill относятся к Gate E.
 
-For a local diagnostic run, `ONELAYER_SOAK_CYCLES` may limit the number of
-cycles; that report remains `INCOMPLETE` until its finalized timestamps cover
-the required 72 hours. Gate C accepts the default hourly run only when its
-`soak.jsonl` contains at least 73 finalized cycles. Starting over from an existing JSONL marks the first
-new cycle as manual intervention, so it cannot produce a clean no-manual Gate C
-verdict. A completed run records `anchor_sequence_gap_total`,
-the rebuilt `manifestHash`, incident-index watermark/status, and open/resolved
-incident observations in `soak.jsonl`. Re-rendering an existing report is
-read-only:
+## Ограничения
 
-```bash
-./deploy/devnet-demo/scripts/soak report
-./deploy/devnet-demo/scripts/release-report report
-```
-
-The release report is explicitly classified as `BOUNDED_SYNTHETIC_MVP`. It
-does not claim geographically independent Backup Centers, a production restore drill,
-production recovery readiness, or closure of release gate 7. Live-devnet
-evidence is accepted only after the separately approved `live-smoke` produces
-`artifacts/live-smoke/evidence.json` with `finalized_anchor=true` and
-`key_material_in_browser=false`. Browser traces/screenshots are retained in
-the report's separate `browser-*` and `backup-*` artifact directories.
-
-To collect that step as part of the report, set
-`RUN_ONELAYER_LIVE_SMOKE=yes`; `live-smoke` still requires its own
-`APPROVE_ONELAYER_LIVE_DEVNET_SMOKE=yes` and the two existing approval digests.
-
-## QR transport
-
-The normative QR transport is HTTPS. The only exception in this demo is the
-exact loopback origin `http://127.0.0.1:8091`, visibly marked
-`DEVNET SYNTHETIC DEMO`; any other HTTP URL is rejected. A phone cannot open the
-demo host's loopback address, so responsive layout and the camera flow are
-checked in a fresh browser context on the same host. Cross-device scanning needs
-a separately approved HTTPS staging environment and is outside this stack.
+Контур предназначен для synthetic devnet demo. Он не доказывает законность
+исходных данных, production security, независимость recovery-центров или
+готовность к работе с реальными персональными данными.

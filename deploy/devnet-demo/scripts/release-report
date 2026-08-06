@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Collect and render reproducible Gate C exit evidence.
 #
-# `collect` is intentionally fail-closed at preflight: if the host is not ready,
+# `collect` is intentionally fail-closed at the native health check: if the
+# local MVP is not ready,
 # the report contains the preflight remediation and no publish/test mutation is
 # attempted. `report` only reads existing artifacts and never spends SOL.
 set -euo pipefail
@@ -50,9 +51,9 @@ case "$mode" in
     # unsuccessful setup cannot be mistaken for a clean release report.
     run_check runtime-init "$repo_root" "$script_dir/initialize-runtime"
 
-    # This is the mutation boundary. Do not build, start Compose, publish, or
-    # run browser tests until the host preflight succeeds.
-    run_check preflight "$repo_root" "$script_dir/preflight"
+    # This is the mutation boundary. Do not publish or run browser tests until
+    # all native services are healthy.
+    run_check native-health "$repo_root" bash -c 'for url in http://127.0.0.1:8090/v1/health http://127.0.0.1:8080/v1/health http://127.0.0.1:8091/verify; do curl --silent --fail --max-time 5 "$url" >/dev/null || exit 1; done'
     if [[ ${LAST_EXIT_CODE:-1} -ne 0 ]]; then
       render_report || true
       exit 2
@@ -70,10 +71,6 @@ case "$mode" in
 
     run_check browser-e2e "$repo_root/tests/e2e-web" env ONELAYER_GATE_C_EVIDENCE=yes ONELAYER_E2E_REPORT_DIR="$evidence_dir/browser-playwright-report" ONELAYER_E2E_OUTPUT_DIR="$evidence_dir/browser-test-results" npm test
     run_check backup-recovery-e2e "$repo_root/tests/e2e-web" env ONELAYER_GATE_C_EVIDENCE=yes ONELAYER_E2E_REPORT_DIR="$evidence_dir/backup-playwright-report" ONELAYER_E2E_OUTPUT_DIR="$evidence_dir/backup-test-results" npx playwright test specs/admin-backups.spec.ts
-
-    if [[ ${RUN_ONELAYER_LIVE_SMOKE:-no} == yes ]]; then
-      run_check live-smoke "$repo_root" "$script_dir/live-smoke"
-    fi
 
     render_report
     ;;

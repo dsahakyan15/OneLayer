@@ -2,7 +2,7 @@
 //
 // It reproduces the Admin API contract — sessions, roles, CSRF, idempotency,
 // the transaction state machine and QR hash binding — with scripted chain
-// responses, so the browser flow runs without Docker, a validator or SOL. The
+// responses, so the browser flow runs without a validator or SOL. The
 // cryptographic behaviour it stands in for is covered by the unit tests in
 // apps/demo-api, apps/verifier and packages/*.
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
@@ -10,18 +10,29 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 export const OPERATOR_PASSWORD = "operator-password-0123456789";
 export const AUDITOR_PASSWORD = "auditor-password-0123456789";
+export const CHIEF_ADMIN_PASSWORD = "chief-admin-password-0123456789";
 export const WALLET_ADDRESS = "9zjRUZLLE4nRvXtDkYPJDGnnLrLrGCUbHVLbdaFmMbJq";
 
 export interface Scenario {
   /** Verifier answer for the freshly issued certificate. */
   verification?: Record<string, unknown>;
+  /** Simulates the on-chain RegistryConfig.pause flag. */
+  registryPaused?: boolean;
   simulationFails?: boolean;
   blockhashExpired?: boolean;
+  unavailableCenterIds?: string[];
+  snapshotFinalized?: boolean;
+  corruptCiphertext?: boolean;
+  plaintextHashMismatch?: boolean;
+  rootMismatch?: boolean;
+  decryptionFails?: boolean;
+  anchorUnavailable?: boolean;
+  openIncident?: boolean;
 }
 
 interface Session {
   username: string;
-  role: "operator" | "auditor";
+  role: "operator" | "auditor" | "chief_admin";
   csrfToken: string;
 }
 
@@ -41,6 +52,64 @@ interface Intent {
   simulationLogs: string[];
 }
 
+interface FixtureCenter {
+  centerId: string;
+  name: string;
+  volumeName: string;
+  credentialReference: string;
+  credentialVersion: string;
+  folders: FixtureFolder[];
+}
+
+interface FixtureFolder {
+  snapshotId: string;
+  snapshotVersion: string;
+  objectKey: string;
+  status: "COPIED" | "PENDING_RETRY" | "FAILED";
+  snapshotStatus: "FINALIZED" | "NON_FINALIZED";
+  plaintextHash: string;
+  ciphertextHash: string;
+  merkleRoot: string;
+  lastError: string | null;
+  createdAt: string;
+  verifiedAt: string | null;
+}
+
+interface FixtureSnapshot {
+  snapshotId: string;
+  snapshotVersion: string;
+  snapshotStatus: "FINALIZED" | "NON_FINALIZED";
+  plaintextHash: string;
+  ciphertextHash: string;
+  merkleRoot: string;
+  createdAt: string;
+  operationId: string;
+}
+
+interface FixtureRecoveryOperation {
+  operationId: string;
+  centerId: string;
+  snapshotId: string;
+  snapshotVersion: string;
+  snapshotStatus: "FINALIZED" | "NON_FINALIZED";
+  target: string;
+  merkleRoot: string;
+  plaintextHash: string;
+  ciphertextHash: string;
+  anchor: {
+    batchSequence: string;
+    anchorSlot: string;
+    transactionSignature: string;
+    merkleRoot: string;
+    finalizedAt: string;
+  };
+  state: "AWAITING_APPROVAL" | "APPROVED" | "RESTORED" | "FAILED";
+  failureCode: string | null;
+  approvedBy: string | null;
+  approval: Record<string, unknown> | null;
+  restoredTarget: Record<string, unknown> | null;
+}
+
 const MERKLE_ROOT = "aa".repeat(32);
 const MANIFEST_HASH = "bb".repeat(32);
 const PREVIOUS_ANCHOR = "cc".repeat(32);
@@ -49,6 +118,16 @@ const SEGMENT_PDA = "5vJRnEr1x8ChoVvVaSBLQ3PXfBEcbLmqLgN4uWvyfHKJ";
 const SIGNATURE = "5".repeat(88);
 const CERTIFICATE_PACKAGE = "Q0VSVElGSUNBVEUtUEFDS0FHRS1GSVhUVVJF";
 const SCHEMA_ID = "land-registry-v1";
+
+// These are test-only out-of-band custody artifacts. The fixture accepts them
+// to stand in for three valid shares; it never returns or records their text.
+export const RECOVERY_SHARES = [
+  `ONELAYER_RECOVERY_SHARE_V1:1:${"11".repeat(32)}`,
+  `ONELAYER_RECOVERY_SHARE_V1:2:${"22".repeat(32)}`,
+  `ONELAYER_RECOVERY_SHARE_V1:3:${"33".repeat(32)}`,
+  `ONELAYER_RECOVERY_SHARE_V1:4:${"44".repeat(32)}`,
+  `ONELAYER_RECOVERY_SHARE_V1:5:${"55".repeat(32)}`,
+] as const;
 
 /**
  * Same shape as `describeSchema()` in apps/demo-api, trimmed to the paths the
@@ -147,7 +226,177 @@ export function createFixtureBackend(
     disclosedPaths: string[];
   }> = [];
   const timeline: Array<Record<string, unknown>> = [];
+  const centers: FixtureCenter[] = Array.from({ length: 5 }, (_unused, index) => {
+    const ordinal = String(index + 1).padStart(2, "0");
+    return {
+      centerId: `BACKUPCENTER-${index + 1}`,
+      name: `Local BackupCenter ${ordinal}`,
+      volumeName: `onelayer-backup-volume-${ordinal}`,
+      credentialReference: `onelayer-backup-credential-${ordinal}`,
+      credentialVersion: "credential-v1",
+      folders: [],
+    };
+  });
+  const snapshots: FixtureSnapshot[] = [];
+  const backupIdempotency = new Map<string, string>();
+  const recoveryOperations: FixtureRecoveryOperation[] = [];
   let sequence = 0;
+
+  function fixtureNow(): string {
+    return new Date(1_800_000_000_000 + sequence * 1000).toISOString();
+  }
+
+  function centerAvailable(centerId: string): boolean {
+    return !(scenario.unavailableCenterIds ?? []).includes(centerId);
+  }
+
+  function registryIsWorking(): boolean {
+    return scenario.registryPaused !== true;
+  }
+
+  function folderIsFinalized(folder: FixtureFolder): boolean {
+    return folder.snapshotStatus === "FINALIZED";
+  }
+
+  function applyRetention(center: FixtureCenter): void {
+    while (center.folders.length > 12) {
+      const sorted = [...center.folders].sort((left, right) =>
+        left.createdAt.localeCompare(right.createdAt) || left.snapshotId.localeCompare(right.snapshotId),
+      );
+      const finalized = sorted.filter(folderIsFinalized);
+      const victim = sorted.find((folder) => !folderIsFinalized(folder)) ??
+        (finalized.length > 1 ? finalized[0] : undefined);
+      if (victim === undefined) throw new Error("retention would remove the only finalized snapshot");
+      center.folders.splice(center.folders.indexOf(victim), 1);
+    }
+  }
+
+  function backupCenterBody(center: FixtureCenter): Record<string, unknown> {
+    const unavailable = !centerAvailable(center.centerId);
+    const folders = [...center.folders].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    return {
+      centerId: center.centerId,
+      id: center.centerId,
+      name: center.name,
+      scope: "LOCAL",
+      type: "LOCAL",
+      endpoint: `local://backup-center-${center.centerId.replace("BACKUPCENTER-", "")}`,
+      localEndpoint: `local://backup-center-${center.centerId.replace("BACKUPCENTER-", "")}`,
+      volume: { name: center.volumeName, reference: center.volumeName },
+      volumeName: center.volumeName,
+      credentials: { reference: center.credentialReference, version: center.credentialVersion },
+      credentialReference: center.credentialReference,
+      credentialVersion: center.credentialVersion,
+      active: true,
+      health: { status: unavailable ? "UNAVAILABLE" : "HEALTHY", available: !unavailable, checkedAt: fixtureNow() },
+      healthStatus: unavailable ? "UNAVAILABLE" : "HEALTHY",
+      replicaStatus: {
+        copied: folders.filter((folder) => folder.status === "COPIED").length,
+        pendingRetry: folders.filter((folder) => folder.status === "PENDING_RETRY").length,
+        failed: folders.filter((folder) => folder.status === "FAILED").length,
+        total: folders.length,
+      },
+      lastReplicaStatus: folders[0]?.status ?? "EMPTY",
+      retiredFolderCount: Math.max(0, snapshots.length - folders.length),
+      retentionWindow: 12,
+      folders,
+    };
+  }
+
+  function backupOverview(): Record<string, unknown> {
+    return {
+      registryId: "gov.registry.land",
+      packageFormat: "SnapshotPackageV1",
+      retentionWindow: 12,
+      centers: centers.map(backupCenterBody),
+      backupCenters: centers.map(backupCenterBody),
+      snapshots: snapshots
+        .slice()
+        .sort((left, right) => Number(right.snapshotVersion) - Number(left.snapshotVersion))
+        .map((snapshot) => ({
+          ...snapshot,
+          formatVersion: 1,
+          packageFormat: "SnapshotPackageV1",
+          plaintextLength: 128,
+          keyEncryptionVersion: "mvp-memory-kek-v1",
+          createdBy: "operator",
+          replicas: centers.flatMap((center) => center.folders
+            .filter((folder) => folder.snapshotId === snapshot.snapshotId)
+            .map((folder) => ({
+              centerId: center.centerId,
+              objectKey: folder.objectKey,
+              status: folder.status,
+              copyStatus: folder.status,
+              lastError: folder.lastError,
+              createdAt: folder.createdAt,
+              verifiedAt: folder.verifiedAt,
+            }))),
+        })),
+    };
+  }
+
+  function backupOperationBody(snapshot: FixtureSnapshot, replayed = false): Record<string, unknown> {
+    const overview = backupOverview();
+    const snapshotSummary = (overview.snapshots as Array<Record<string, any>>)
+      .find((candidate) => candidate.snapshotId === snapshot.snapshotId);
+    return {
+      operationId: snapshot.operationId,
+      snapshotId: snapshot.snapshotId,
+      snapshotVersion: snapshot.snapshotVersion,
+      formatVersion: 1,
+      packageFormat: "SnapshotPackageV1",
+      snapshotStatus: snapshot.snapshotStatus,
+      merkleRoot: snapshot.merkleRoot,
+      plaintextHash: snapshot.plaintextHash,
+      ciphertextHash: snapshot.ciphertextHash,
+      plaintextLength: 128,
+      keyEncryptionVersion: "mvp-memory-kek-v1",
+      createdAt: snapshot.createdAt,
+      operationStatus: (snapshotSummary?.replicas ?? []).every((replica: any) => replica.copyStatus === "COPIED")
+        ? "COMPLETED" : "PARTIAL",
+      replayed,
+      replicas: snapshotSummary?.replicas ?? [],
+      centers: centers.map((center) => ({
+        centerId: center.centerId,
+        name: center.name,
+        health: backupCenterBody(center).health,
+        status: center.folders.find((folder) => folder.snapshotId === snapshot.snapshotId)?.status ?? "PENDING_RETRY",
+        folder: center.folders.find((folder) => folder.snapshotId === snapshot.snapshotId) ?? null,
+      })),
+    };
+  }
+
+  function recoveryOperationBody(operation: FixtureRecoveryOperation, replayed = false): Record<string, unknown> {
+    return {
+      recoveryOperationId: operation.operationId,
+      operationId: operation.operationId,
+      registryId: "gov.registry.land",
+      centerId: operation.centerId,
+      snapshotId: operation.snapshotId,
+      snapshotVersion: operation.snapshotVersion,
+      snapshotStatus: operation.snapshotStatus,
+      target: operation.target,
+      state: operation.state,
+      status: operation.state,
+      anchor: operation.anchor,
+      selectedAnchor: operation.anchor,
+      merkleRoot: operation.merkleRoot,
+      plaintextHash: operation.plaintextHash,
+      ciphertextHash: operation.ciphertextHash,
+      shareThreshold: 3,
+      validation: operation.state === "FAILED" ? null : {
+        threshold: "3-of-5",
+        ciphertextHash: "MATCH",
+        plaintextHash: "MATCH",
+        merkleRoot: "MATCH",
+      },
+      failureCode: operation.failureCode,
+      approvedBy: operation.approvedBy,
+      approval: operation.approval,
+      restoredTarget: operation.restoredTarget,
+      replayed,
+    };
+  }
 
   function record(eventType: string, session: Session | null, payload: Record<string, unknown>): void {
     sequence += 1;
@@ -353,15 +602,25 @@ export function createFixtureBackend(
 
     // Test-only control plane: selects the scripted chain answers.
     if (url.pathname === "/__fixture/scenario" && method === "POST") {
-      scenario = (await readBody(request)) ?? {};
+      const nextScenario = (await readBody(request)) ?? {};
+      if (nextScenario.resetBackups === true) {
+        snapshots.splice(0, snapshots.length);
+        recoveryOperations.splice(0, recoveryOperations.length);
+        backupIdempotency.clear();
+        centers.forEach((center) => { center.folders.splice(0, center.folders.length); });
+        centers.splice(5);
+      }
+      scenario = nextScenario;
       json(response, 200, { scenario });
       return;
     }
 
     if (url.pathname === "/v1/admin/session" && method === "POST") {
       const body = await readBody(request);
-      const expected = body?.username === "operator" ? OPERATOR_PASSWORD : AUDITOR_PASSWORD;
-      if ((body?.username !== "operator" && body?.username !== "auditor") || body?.password !== expected) {
+      const expected = body?.username === "operator"
+        ? OPERATOR_PASSWORD
+        : body?.username === "chief_admin" ? CHIEF_ADMIN_PASSWORD : AUDITOR_PASSWORD;
+      if ((body?.username !== "operator" && body?.username !== "auditor" && body?.username !== "chief_admin") || body?.password !== expected) {
         json(response, 401, { code: "INVALID_CREDENTIALS" });
         return;
       }
@@ -390,6 +649,7 @@ export function createFixtureBackend(
 
     const packagePath = /^\/v1\/certificates\/([0-9a-f]{32})\/package$/.exec(url.pathname);
     if (packagePath !== null && method === "GET") {
+      if (!registryIsWorking()) { json(response, 409, { code: "REGISTRY_PAUSED" }); return; }
       const certificateId = packagePath[1];
       if (!certificates.some((certificate) => certificate.certificateId === certificateId)) {
         json(response, 404, { code: "CERTIFICATE_NOT_FOUND" });
@@ -409,6 +669,7 @@ export function createFixtureBackend(
 
     const metadataPath = /^\/v1\/certificates\/([0-9a-f]{32})\/metadata$/.exec(url.pathname);
     if (metadataPath !== null && method === "GET") {
+      if (!registryIsWorking()) { json(response, 409, { code: "REGISTRY_PAUSED" }); return; }
       const certificate = certificates.find((candidate) => candidate.certificateId === metadataPath[1]);
       if (certificate === undefined) { json(response, 404, { code: "CERTIFICATE_NOT_FOUND" }); return; }
       json(response, 200, {
@@ -433,6 +694,7 @@ export function createFixtureBackend(
     }
 
     if (/^\/v1\/qr\/[0-9a-f]{32}\.svg$/.test(url.pathname) && method === "GET") {
+      if (!registryIsWorking()) { json(response, 409, { code: "REGISTRY_PAUSED" }); return; }
       const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>';
       response.writeHead(200, { "content-type": "image/svg+xml", "cache-control": "no-store" });
       response.end(svg);
@@ -440,6 +702,7 @@ export function createFixtureBackend(
     }
 
     if (/^\/v1\/qr\/[0-9a-f]{32}\.png$/.test(url.pathname) && method === "GET") {
+      if (!registryIsWorking()) { json(response, 409, { code: "REGISTRY_PAUSED" }); return; }
       // One-pixel PNG: the browser scenarios only assert that the artifact is
       // served, the encoder itself is covered in apps/demo-api.
       const png = Buffer.from(
@@ -458,6 +721,16 @@ export function createFixtureBackend(
           status: "INVALID",
           code: "CERT_SIGNATURE_INVALID",
           certificateId: "unknown",
+          batchSequence: "1",
+          warnings: [],
+        });
+        return;
+      }
+      if (!registryIsWorking()) {
+        json(response, 422, {
+          status: "INVALID",
+          code: "REGISTRY_PAUSED",
+          certificateId: certificates[0]?.certificateId ?? "unknown",
           batchSequence: "1",
           warnings: [],
         });
@@ -495,6 +768,8 @@ export function createFixtureBackend(
       return;
     }
     if (url.pathname === "/v1/admin/session" && method === "DELETE") {
+      const cookie = /onelayer_admin_session=([^;]+)/.exec(request.headers.cookie ?? "");
+      if (cookie !== null) sessions.delete(cookie[1]);
       json(response, 204, null);
       return;
     }
@@ -527,6 +802,326 @@ export function createFixtureBackend(
         openIncidents: "0",
         intents: {},
       });
+      return;
+    }
+    if ((url.pathname === "/v1/admin/recovery" || url.pathname === "/v1/admin/recovery/operations") && method === "GET") {
+      json(response, 200, {
+        operations: recoveryOperations
+          .slice()
+          .reverse()
+          .map((operation) => recoveryOperationBody(operation)),
+      });
+      return;
+    }
+    if ((url.pathname === "/v1/admin/recovery/prepare" || url.pathname === "/v1/admin/recovery/operations") && method === "POST") {
+      if (session.role !== "operator") { json(response, 403, { code: "ROLE_FORBIDDEN" }); return; }
+      const body = await readBody(request);
+      const shares = body?.recoveryShares ?? body?.shares;
+      if (!Array.isArray(shares) || shares.length < 3) {
+        json(response, 422, { code: "RECOVERY_SHARES_INSUFFICIENT" });
+        return;
+      }
+      if (shares.length !== 3) {
+        json(response, 422, { code: "RECOVERY_SHARE_COUNT" });
+        return;
+      }
+      if (!shares.every((share: unknown) => typeof share === "string") ||
+          new Set(shares).size !== shares.length ||
+          !shares.every((share: string) => (RECOVERY_SHARES as readonly string[]).includes(share))) {
+        json(response, 422, { code: "DECRYPTION_FAILED" });
+        return;
+      }
+      const centerId = String(body?.centerId ?? body?.backupCenterId ?? "");
+      const snapshotId = String(body?.snapshotId ?? "");
+      const target = body?.target === undefined ? "local-demo-target" : String(body.target);
+      const center = centers.find((candidate) => candidate.centerId === centerId);
+      const snapshot = snapshots.find((candidate) => candidate.snapshotId === snapshotId);
+      const folder = center?.folders.find((candidate) => candidate.snapshotId === snapshotId);
+      if (center === undefined || snapshot === undefined || folder === undefined) {
+        json(response, 404, { code: "RECOVERY_FOLDER_NOT_FOUND" });
+        return;
+      }
+      if (folder.status !== "COPIED") {
+        json(response, 409, { code: "RECOVERY_FOLDER_NOT_COPIED" });
+        return;
+      }
+      if (!/^local-demo-[A-Za-z0-9._-]{1,80}$/.test(target)) {
+        json(response, 400, { code: "TARGET_INVALID" });
+        return;
+      }
+      if (snapshot.snapshotStatus !== "FINALIZED") {
+        json(response, 409, { code: "SNAPSHOT_NOT_FINALIZED" });
+        return;
+      }
+      if (scenario.anchorUnavailable === true) {
+        json(response, 409, { code: "RECOVERY_ANCHOR_UNAVAILABLE" });
+        return;
+      }
+      if (scenario.openIncident === true) {
+        json(response, 409, { code: "RECOVERY_ANCHOR_UNAVAILABLE" });
+        return;
+      }
+      if (scenario.corruptCiphertext === true) {
+        json(response, 422, { code: "CIPHERTEXT_HASH_MISMATCH" });
+        return;
+      }
+      if (scenario.plaintextHashMismatch === true) {
+        json(response, 422, { code: "PLAINTEXT_HASH_MISMATCH" });
+        return;
+      }
+      if (scenario.rootMismatch === true) {
+        json(response, 422, { code: "MERKLE_ROOT_MISMATCH" });
+        return;
+      }
+      if (scenario.decryptionFails === true) {
+        json(response, 422, { code: "DECRYPTION_FAILED" });
+        return;
+      }
+      const operation: FixtureRecoveryOperation = {
+        operationId: randomUUID(),
+        centerId,
+        snapshotId,
+        snapshotVersion: snapshot.snapshotVersion,
+        snapshotStatus: snapshot.snapshotStatus,
+        target,
+        merkleRoot: snapshot.merkleRoot,
+        plaintextHash: snapshot.plaintextHash,
+        ciphertextHash: snapshot.ciphertextHash,
+        anchor: {
+          batchSequence: "1",
+          anchorSlot: "412346000",
+          transactionSignature: SIGNATURE,
+          merkleRoot: snapshot.merkleRoot,
+          finalizedAt: new Date(1_800_000_100_000).toISOString(),
+        },
+        state: "AWAITING_APPROVAL",
+        failureCode: null,
+        approvedBy: null,
+        approval: null,
+        restoredTarget: null,
+      };
+      recoveryOperations.push(operation);
+      record("RECOVERY_CHECKS_PASSED", session, {
+        recoveryOperationId: operation.operationId,
+        centerId,
+        snapshotId,
+        target,
+        merkleRoot: operation.merkleRoot,
+        ciphertextHash: operation.ciphertextHash,
+        plaintextHash: operation.plaintextHash,
+        shareThreshold: "3-of-5",
+      });
+      json(response, 201, recoveryOperationBody(operation));
+      return;
+    }
+    const recoveryRoute = /^\/v1\/admin\/recovery\/(?:operations\/)?([0-9a-f-]{36})(?:\/(approve|approval|restore))?$/.exec(url.pathname);
+    if (recoveryRoute !== null) {
+      const operation = recoveryOperations.find((candidate) => candidate.operationId === recoveryRoute[1]);
+      if (operation === undefined) { json(response, 404, { code: "RECOVERY_OPERATION_NOT_FOUND" }); return; }
+      const action = recoveryRoute[2];
+      if (method === "GET" && action === undefined) {
+        json(response, 200, recoveryOperationBody(operation));
+        return;
+      }
+      if (method === "POST" && (action === "approve" || action === "approval")) {
+        if (session.role !== "chief_admin") { json(response, 403, { code: "ROLE_FORBIDDEN" }); return; }
+        if (operation.state === "APPROVED" || operation.state === "RESTORED") {
+          json(response, 200, recoveryOperationBody(operation, true));
+          return;
+        }
+        if (operation.state !== "AWAITING_APPROVAL") {
+          json(response, 409, { code: "RESTORE_APPROVAL_INVALID_STATE" });
+          return;
+        }
+        const body = await readBody(request);
+        if (
+          (body?.snapshotId !== undefined && body.snapshotId !== operation.snapshotId) ||
+          (body?.merkleRoot !== undefined && body.merkleRoot !== operation.merkleRoot) ||
+          (body?.target !== undefined && body.target !== operation.target)
+        ) {
+          operation.state = "FAILED";
+          operation.failureCode = "RESTORE_BINDING_MISMATCH";
+          record("RECOVERY_FAILED", session, { recoveryOperationId: operation.operationId, code: operation.failureCode });
+          json(response, 409, { code: operation.failureCode });
+          return;
+        }
+        const approvalId = randomUUID();
+        const approvalDigest = createHash("sha256")
+          .update([operation.operationId, operation.snapshotId, operation.merkleRoot, operation.target].join("\0"))
+          .digest("hex");
+        operation.state = "APPROVED";
+        operation.approvedBy = session.username;
+        operation.approval = {
+          approvalId,
+          snapshotId: operation.snapshotId,
+          merkleRoot: operation.merkleRoot,
+          target: operation.target,
+          approvalDigest,
+          approvalSignature: createHash("sha256").update(`signature:${approvalDigest}`).digest("base64url"),
+          signedBy: session.username,
+          signedAt: new Date(1_800_000_200_000).toISOString(),
+        };
+        record("RESTORE_APPROVED", session, {
+          recoveryOperationId: operation.operationId,
+          approvalId,
+          snapshotId: operation.snapshotId,
+          merkleRoot: operation.merkleRoot,
+          target: operation.target,
+          approvalDigest,
+        });
+        json(response, 201, recoveryOperationBody(operation));
+        return;
+      }
+      if (method === "POST" && action === "restore") {
+        if (session.role !== "operator") { json(response, 403, { code: "ROLE_FORBIDDEN" }); return; }
+        if (operation.state === "RESTORED") {
+          json(response, 200, recoveryOperationBody(operation, true));
+          return;
+        }
+        if (operation.state !== "APPROVED") {
+          json(response, 409, { code: "RESTORE_APPROVAL_REQUIRED" });
+          return;
+        }
+        if (scenario.rootMismatch === true) {
+          operation.state = "FAILED";
+          operation.failureCode = "RECOVERY_ANCHOR_CHANGED";
+          record("RECOVERY_FAILED", session, { recoveryOperationId: operation.operationId, code: operation.failureCode });
+          json(response, 409, { code: operation.failureCode });
+          return;
+        }
+        operation.state = "RESTORED";
+        operation.restoredTarget = {
+          targetId: operation.target,
+          stateSummary: {
+            records: 2,
+            recordVersions: 2,
+            certificatePackages: 0,
+            qrMetadata: 0,
+            proofs: 0,
+            roots: 1,
+            manifests: 1,
+            anchorReferences: 1,
+            operationHistory: timeline.length,
+          },
+          restoredAt: fixtureNow(),
+          plaintextCleared: true,
+        };
+        record("RESTORE_COMPLETED", session, {
+          recoveryOperationId: operation.operationId,
+          snapshotId: operation.snapshotId,
+          merkleRoot: operation.merkleRoot,
+          target: operation.target,
+          plaintextCleared: true,
+        });
+        json(response, 201, recoveryOperationBody(operation));
+        return;
+      }
+    }
+    if ((url.pathname === "/v1/admin/backup-centers" || url.pathname === "/v1/admin/snapshots") && method === "GET") {
+      json(response, 200, backupOverview());
+      return;
+    }
+    if (url.pathname === "/v1/admin/backup-centers" && method === "POST") {
+      if (session.role !== "operator") { json(response, 403, { code: "ROLE_FORBIDDEN" }); return; }
+      const body = await readBody(request);
+      if (body?.scope !== undefined && body.scope !== "LOCAL") {
+        json(response, 400, { code: "EXTERNAL_BACKUP_CENTER_UNSUPPORTED" });
+        return;
+      }
+      const ordinal = centers.length + 1;
+      const suffix = randomUUID().replaceAll("-", "");
+      const center: FixtureCenter = {
+        centerId: `BACKUPCENTER-${ordinal}`,
+        name: typeof body?.name === "string" && body.name.length > 0 ? body.name : `Local BackupCenter ${String(ordinal).padStart(2, "0")}`,
+        volumeName: `onelayer-backup-volume-${suffix}`,
+        credentialReference: `onelayer-backup-credential-${suffix}`,
+        credentialVersion: "credential-v1",
+        folders: [],
+      };
+      centers.push(center);
+      record("BACKUP_CENTER_CREATED", session, { centerId: center.centerId, scope: "LOCAL" });
+      json(response, 201, backupCenterBody(center));
+      return;
+    }
+    if (
+      (url.pathname === "/v1/admin/snapshots" || url.pathname === "/v1/admin/snapshots/refresh" ||
+        url.pathname === "/v1/admin/backup-centers/refresh") && method === "POST"
+    ) {
+      if (session.role !== "operator") { json(response, 403, { code: "ROLE_FORBIDDEN" }); return; }
+      const idempotencyKey = request.headers["idempotency-key"];
+      if (typeof idempotencyKey !== "string") { json(response, 400, { code: "IDEMPOTENCYKEY_INVALID" }); return; }
+      const existingId = backupIdempotency.get(idempotencyKey);
+      if (existingId !== undefined) {
+        const existing = snapshots.find((candidate) => candidate.operationId === existingId);
+        if (existing !== undefined) { json(response, 200, backupOperationBody(existing, true)); return; }
+      }
+      const snapshotId = randomUUID();
+      const snapshotKey = snapshotId.replaceAll("-", "");
+      const snapshot: FixtureSnapshot = {
+        snapshotId,
+        snapshotVersion: String(snapshots.length + 1),
+        snapshotStatus: scenario.snapshotFinalized === false ? "NON_FINALIZED" : "FINALIZED",
+        plaintextHash: createHash("sha256").update(`plaintext:${snapshotId}`).digest("hex"),
+        ciphertextHash: createHash("sha256").update(`ciphertext:${snapshotId}`).digest("hex"),
+        merkleRoot: MERKLE_ROOT,
+        createdAt: fixtureNow(),
+        operationId: randomUUID(),
+      };
+      for (const center of centers) {
+        const copied = centerAvailable(center.centerId);
+        center.folders.push({
+          snapshotId: snapshot.snapshotId,
+          snapshotVersion: snapshot.snapshotVersion,
+          objectKey: `snapshots/${snapshotKey}/snapshot-package-v1.cbor`,
+          status: copied ? "COPIED" : "PENDING_RETRY",
+          snapshotStatus: snapshot.snapshotStatus,
+          plaintextHash: snapshot.plaintextHash,
+          ciphertextHash: snapshot.ciphertextHash,
+          merkleRoot: snapshot.merkleRoot,
+          lastError: copied ? null : "CENTER_UNAVAILABLE",
+          createdAt: snapshot.createdAt,
+          verifiedAt: copied ? snapshot.createdAt : null,
+        });
+        applyRetention(center);
+      }
+      snapshots.push(snapshot);
+      backupIdempotency.set(idempotencyKey, snapshot.operationId);
+      record("SNAPSHOT_CREATED", session, {
+        operationId: snapshot.operationId,
+        snapshotId: snapshot.snapshotId,
+        snapshotVersion: snapshot.snapshotVersion,
+        packageFormat: "SnapshotPackageV1",
+        ciphertextHash: snapshot.ciphertextHash,
+      });
+      json(response, 201, backupOperationBody(snapshot));
+      return;
+    }
+    const retryPath = /^\/v1\/admin\/snapshots\/([0-9a-f-]{36})\/retry$/.exec(url.pathname);
+    if (retryPath !== null && method === "POST") {
+      if (session.role !== "operator") { json(response, 403, { code: "ROLE_FORBIDDEN" }); return; }
+      const snapshot = snapshots.find((candidate) => candidate.snapshotId === retryPath[1]);
+      if (snapshot === undefined) { json(response, 404, { code: "SNAPSHOT_NOT_FOUND" }); return; }
+      for (const center of centers) {
+        const folder = center.folders.find((candidate) => candidate.snapshotId === snapshot.snapshotId);
+        if (folder === undefined || folder.status === "COPIED") continue;
+        if (centerAvailable(center.centerId)) {
+          folder.status = "COPIED";
+          folder.lastError = null;
+          folder.verifiedAt = fixtureNow();
+        } else {
+          folder.status = "PENDING_RETRY";
+          folder.lastError = "CENTER_UNAVAILABLE";
+        }
+      }
+      record("SNAPSHOT_REPLICA_RETRIED", session, { snapshotId: snapshot.snapshotId });
+      json(response, 200, backupOperationBody(snapshot));
+      return;
+    }
+    if (
+      method === "DELETE" &&
+      (/^\/v1\/admin\/(?:snapshots|backup-centers)(?:\/|$)/.test(url.pathname))
+    ) {
+      json(response, 403, { code: "BACKUP_DELETE_FORBIDDEN" });
       return;
     }
     if (url.pathname === "/v1/admin/records" && method === "GET") {
@@ -722,6 +1317,7 @@ export function createFixtureBackend(
           json(response, 409, { code: "ANCHOR_NOT_FINALIZED" });
           return;
         }
+        if (!registryIsWorking()) { json(response, 409, { code: "REGISTRY_PAUSED" }); return; }
         const body = await readBody(request);
         const certificateId = "0".repeat(31) + "1";
         const internalRecordId = String(body?.internalRecordId ?? "SYNTHETIC-1");

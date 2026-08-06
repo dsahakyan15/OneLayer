@@ -18,6 +18,7 @@ import {
   type IncidentIndexResponse,
   type LifecycleIndex,
   type ObservedAnchor,
+  type ObservedRegistry,
   type RecordLifecycle,
 } from "../src/verify.ts";
 
@@ -83,8 +84,15 @@ function observed(signed: SignedCertificate): ObservedAnchor {
   };
 }
 
+function registry(signed: SignedCertificate, paused = false): ObservedRegistry {
+  return { registryIdHash: registryIdHash(signed.body.registryId), paused };
+}
+
 function chain(signed: SignedCertificate, overrides: Partial<ObservedAnchor> = {}, head = 1_050n): ChainReader {
   return {
+    async getRegistryConfig() {
+      return registry(signed);
+    },
     async getAnchor() {
       return { ...observed(signed), ...overrides };
     },
@@ -108,6 +116,19 @@ test("returns VERIFIED only after finalized anchor and fresh scoped incident ind
   assert.equal(result.status, "VERIFIED");
   assert.equal(result.incidentIndexStatus, "CHECKED");
   assert.equal(result.indexLagSlots, "10");
+});
+
+test("a paused registry refuses QR verification", async () => {
+  const signed = signedCertificate();
+  const reader = chain(signed);
+  reader.getRegistryConfig = async () => registry(signed, true);
+  const result = await verifyCertificate(
+    signed,
+    reader,
+    index({ registryId: signed.body.registryId, indexedThroughSlot: 1_040n, incidents: [] }),
+  );
+  assert.equal(result.status, "INVALID");
+  assert.equal(result.code, "REGISTRY_PAUSED");
 });
 
 test("stale watermark cannot produce VERIFIED", async () => {
@@ -135,21 +156,6 @@ test("open incident covering the batch produces DISPUTED", async () => {
   assert.equal(result.status, "DISPUTED");
 });
 
-test("divergent finalized RPC heads downgrade incident checking", async () => {
-  const signed = signedCertificate();
-  const reader = chain(signed);
-  reader.getFinalizedHeadSlots = async () => [1_050n, 1_200n];
-  const result = await verifyCertificate(
-    signed,
-    reader,
-    index({ registryId: signed.body.registryId, indexedThroughSlot: 1_040n, incidents: [] }),
-    { maxRpcHeadDifference: 50n },
-  );
-  assert.equal(result.status, "VERIFIED_NO_INCIDENT_CHECK");
-  assert.equal(result.incidentIndexStatus, "RPC_DISAGREEMENT");
-  assert.equal(result.rpcFinalizedHeadSlot, "1200");
-});
-
 test("derived segment PDA mismatch invalidates the certificate", async () => {
   const signed = signedCertificate();
   const result = await verifyCertificate(
@@ -167,6 +173,9 @@ test("tampered disclosed value fails before chain access", async () => {
   const resigned = signCertificate(signed.body, signingKey);
   let chainCalled = false;
   const reader: ChainReader = {
+    async getRegistryConfig() {
+      return registry(resigned);
+    },
     async getAnchor() {
       chainCalled = true;
       return observed(resigned);

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
+import { registryIdHash } from "../../packages/canonical-ts/src/index.ts";
 import { decodeCertificatePackageBase64url } from "../../apps/verifier/src/certificate-codec.ts";
 import { verifyCertificate, type ChainReader, type IncidentIndex } from "../../apps/verifier/src/verify.ts";
 
@@ -12,6 +13,9 @@ test("Rust synthetic pipeline certificate reaches VERIFIED in the TypeScript ver
   ).trim();
   const signed = decodeCertificatePackageBase64url(encoded);
   const chain: ChainReader = {
+    async getRegistryConfig(body) {
+      return { registryIdHash: registryIdHash(body.registryId), paused: false };
+    },
     async getAnchor(body) {
       return {
         programId: body.anchor.solanaProgramId,

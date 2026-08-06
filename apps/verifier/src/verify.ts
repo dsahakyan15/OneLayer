@@ -17,7 +17,7 @@ import {
   type ProofStep,
 } from "../../../packages/merkle-ts/src/index.ts";
 
-export type IncidentIndexStatus = "CHECKED" | "STALE" | "UNAVAILABLE" | "INDEX_INCONSISTENT" | "RPC_DISAGREEMENT";
+export type IncidentIndexStatus = "CHECKED" | "STALE" | "UNAVAILABLE" | "INDEX_INCONSISTENT";
 export type VerificationStatus =
   | "VERIFIED"
   | "VERIFIED_HISTORICAL"
@@ -39,10 +39,15 @@ export interface ObservedAnchor {
   commitment: "finalized" | "confirmed" | "processed";
 }
 
+export interface ObservedRegistry {
+  registryIdHash: Hash;
+  paused: boolean;
+}
+
 export interface ChainReader {
   getAnchor(body: CertificateBody): Promise<ObservedAnchor>;
+  getRegistryConfig(body: CertificateBody): Promise<ObservedRegistry>;
   getFinalizedHeadSlot(): Promise<bigint>;
-  getFinalizedHeadSlots?(): Promise<readonly bigint[]>;
 }
 
 export class AnchorDisputedError extends Error {}
@@ -80,7 +85,6 @@ export interface LifecycleIndex {
 
 export interface VerifyOptions {
   maxIndexLagSlots?: bigint;
-  maxRpcHeadDifference?: bigint;
   lifecycle?: LifecycleIndex;
 }
 
@@ -199,6 +203,12 @@ function verifyObservedAnchor(body: CertificateBody, observed: ObservedAnchor): 
   return null;
 }
 
+function verifyWorkingRegistry(body: CertificateBody, observed: ObservedRegistry): string | null {
+  if (!equal(observed.registryIdHash, registryIdHash(body.registryId))) return "REGISTRY_ID_MISMATCH";
+  if (observed.paused) return "REGISTRY_PAUSED";
+  return null;
+}
+
 export async function verifyCertificate(
   signed: SignedCertificate,
   chain: ChainReader,
@@ -299,6 +309,15 @@ async function verifyAgainstAnchor(
     return invalid(body, "CERTIFICATE_FORMAT_INVALID");
   }
 
+  let registry: ObservedRegistry;
+  try {
+    registry = await chain.getRegistryConfig(body);
+  } catch {
+    return invalid(body, "REGISTRY_STATUS_UNAVAILABLE");
+  }
+  const registryError = verifyWorkingRegistry(body, registry);
+  if (registryError !== null) return invalid(body, registryError);
+
   let observed: ObservedAnchor;
   try {
     observed = await chain.getAnchor(body);
@@ -315,11 +334,11 @@ async function verifyAgainstAnchor(
     warnings: [] as string[],
   };
   let response: IncidentIndexResponse | null;
-  let heads: readonly bigint[];
+  let head: bigint;
   try {
-    [response, heads] = await Promise.all([
+    [response, head] = await Promise.all([
       incidents.query(body.registryId, body.anchor.batchSequence),
-      chain.getFinalizedHeadSlots?.() ?? chain.getFinalizedHeadSlot().then((head) => [head]),
+      chain.getFinalizedHeadSlot(),
     ]);
   } catch {
     return {
@@ -328,21 +347,6 @@ async function verifyAgainstAnchor(
       incidentIndexStatus: "UNAVAILABLE",
       warnings: ["Incident index unavailable."],
     };
-  }
-  if (heads.length === 0 || heads.length > 2) return invalid(body, "RPC_CONFIGURATION_INVALID");
-  const head = heads.reduce((highest, candidate) => candidate > highest ? candidate : highest);
-  if (heads.length === 2) {
-    const difference = heads[0] > heads[1] ? heads[0] - heads[1] : heads[1] - heads[0];
-    const maximum = options.maxRpcHeadDifference;
-    if (maximum === undefined || difference > maximum) {
-      return {
-        ...base,
-        status: "VERIFIED_NO_INCIDENT_CHECK",
-        incidentIndexStatus: "RPC_DISAGREEMENT",
-        rpcFinalizedHeadSlot: head.toString(),
-        warnings: ["Finalized RPC heads disagree."],
-      };
-    }
   }
   if (response === null || response.registryId !== body.registryId) {
     return {

@@ -1,5 +1,5 @@
 // Same-origin server-side proxy (§5.4 transport). The browser never talks to
-// the Compose services directly, so no new CORS surface is opened, and the
+// upstream services directly, so no new CORS surface is opened, and the
 // upstream session cookie is passed through unchanged.
 import { NextResponse } from "next/server";
 

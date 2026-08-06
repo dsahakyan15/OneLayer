@@ -56,6 +56,10 @@ export default function HowItWorksPage(): ReactNode {
           The QR encodes a URL, the certificate ID and the certificate hash — nothing else. The hash binds
           the code to one exact package: swapping the package for another one fails before any chain lookup.
         </p>
+        <p className="ol-muted">
+          QR works only while the on-chain registry is operational. A paused registry closes QR issuance,
+          public QR routes and verification until it is resumed.
+        </p>
       </section>
 
       <section className="ol-card">

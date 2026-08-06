@@ -2,7 +2,7 @@
 
 **Базовый документ:** `OneLayer_Solana_Technical_Spec_RU.md` (v0.9, историческая проектная версия)
 **Источник истины протокола:** versioned-документы в `spec/` заморожены для Gate B и имеют приоритет над этим планом и v0.9; любое нормативное изменение требует ADR и новой версии schema/account/package
-**Статус плана:** v2.6, 2026-08-02
+**Статус плана:** v2.7, 2026-08-04
 **Структура:** gate-ы A, B, C, D, E0, E — каждый с явным выходным решением
 **Горизонт:** Gate A–C (pilot + визуальный MVP на devnet) ≈ 6–8 месяцев; Gate D–E (production go-live) ≈ +10–12 месяцев; Phase 3 — отдельный горизонт после go-live
 
@@ -24,7 +24,7 @@
 
 Эти правила не отменяют проверки, обязательные по контрактам репозитория и release gates, применимым к изменённому поведению.
 
-**Явно вне scope до Gate E:** Kubernetes/Helm/Terraform/OPA, SIEM, мультисиг и timelock, threshold-церемонии, три независимых storage, два RPC-провайдера, banking SDK, algorithm transition, массовая выдача сертификатов.
+**Явно вне scope до Gate E:** Kubernetes/Helm/Terraform/OPA, SIEM, мультисиг и timelock, production HSM и threshold-церемония, географически независимые custodian environments, регистрация внешних backup-систем, два RPC-провайдера, banking SDK, algorithm transition, массовая выдача сертификатов.
 
 **HSM.** До Gate E не выполняется продуктовая HSM-интеграция: в основном коде нет HSM-абстракции, pipeline подписывает software-ключом. В Gate A разрешён изолированный feasibility spike (`OL-A-03`) — вне основного кода, без production credentials, результат spike-а в продукт не переносится.
 
@@ -32,7 +32,7 @@
 
 ## 1. История ревизий
 
-Текущая версия — **v2.6**. Изменения относительно v2.5:
+Текущая версия — **v2.7**. Изменения относительно v2.6:
 
 - визуальный MVP доведён до полного пользовательского контура: запись больше не является одним полем `status`, а строится из сертификата, который даёт пользователь (структурированный JSON или CSV по схеме реестра);
 - зафиксирована demo-схема реестра `land-registry-v1` — единственный перечень допустимых путей полей и их типов; поле вне схемы отклоняется как `CANONICALIZATION_FAILED` (§4 `spec/canonical-record-v1.md`), а не игнорируется;
@@ -40,6 +40,9 @@
 - добавлена выдача в режиме `SELECTIVE_FIELDS` с field proofs: оператор выбирает раскрываемые пути, соли остальных путей в пакет не попадают;
 - добавлены документы `docs/use-cases-ru.md` (сценарии использования) и `docs/presentation-ru.md` (ролевые модели, разбор потока, FAQ) — они описывают систему, но нормативной силы не имеют;
 - публикация хэшей в devnet остаётся guarded wallet-контуром §5.4 без изменений: server-side one-click подписи не вводится.
+- зафиксирована граница сертификата: полный JSON возвращается из подписанного `CertificatePackageV1`, а локальный Solana anchor хранит `merkleRoot` и `manifestHash`; `/verify` подтверждает package через `MerkleProof` перед выдачей данных;
+- в Gate C добавлен ограниченный backup control plane: пять стартовых автоматически создаваемых локальных `BackupCenter`-ов с возможностью добавлять новые, полный `SnapshotPackageV1`, новая immutable-копия при каждом обновлении, retention максимум 12 копий на центр и сохранение хотя бы одной `FINALIZED` версии;
+- зафиксировано восстановление `3-of-5`: оператор выбирает центр и папку и вводит три masked-доли, `chief_admin` отдельно подписывает `Approve restore`, а root сверяется с самым новым `FINALIZED` anchor без открытого инцидента. Production-внешние центры, аппаратные ключи и настоящий restore drill остаются Gate E.
 
 Сохранённая история v2.5:
 
@@ -460,7 +463,7 @@ synthetic change → canonicalize → batch → manifest → devnet anchor → c
 | `OL-C-10` | `crates/canonical` + `crates/merkle`: реализация по Gate B |
 | `OL-C-11` | `apps/pilot-pipeline`: чтение synthetic-источника, сопоставление с workflow-событием, canonical version, batch, манифест |
 | `OL-C-12` | `apps/pilot-pipeline`: единый builder/publisher для devnet, отслеживание `finalized` и durable queue в PostgreSQL; 72-часовой pilot подписывает tmpfs software test key, визуальный MVP — Wallet Standard test operator |
-| `OL-C-13` | `apps/pilot-pipeline`: выдача сертификата, оба режима раскрытия, `recordIdCommitment`, `segmentIndex` и segment PDA, QR (основной формат: URL + id + hash) |
+| `OL-C-13` | `apps/pilot-pipeline`: выдача сертификата, оба режима раскрытия, `recordIdCommitment`, `segmentIndex` и segment PDA, QR (основной формат: URL + id + hash) только для рабочего registry |
 | `OL-C-14` | `apps/verifier`: алгоритм §8.3 спецификации, один RPC, проверка segment PDA, lifecycle-статусы `VERIFIED_HISTORICAL` / `SUPERSEDED`, event-backed incident index scoped по `registryId` с watermark (§2.3), REST по §9.1 |
 | `OL-C-15` | Схема БД (§6.2): durable queue + неизменяемые подписанные данные `publish_attempt` с однократным разрешением outcome, append-only audit journal без hash-chain (§2.6) |
 | `OL-C-20` | Детерминированный integration smoke: synthetic change → `VERIFIED` в verifier на локальной Solana-среде |
@@ -469,28 +472,36 @@ synthetic change → canonicalize → batch → manifest → devnet anchor → c
 | `OL-C-23` | Admin: review подготовленной транзакции показывает program ID, instruction, все accounts с signer/writable flags, registry, segment PDA, batch, roots, fee payer, fee/rent и simulation logs; RPC accounts проверяются по owner, длине и discriminator |
 | `OL-C-24` | Wallet Standard через `@solana/kit-plugin-wallet` + `@solana/react`; только browser test operator в `solana:devnet`, без keypair/seed в UI; browser подписывает точное prepared message, backend повторно проверяет intent/signature и передаёт signed wire transaction единственному durable publisher |
 | `OL-C-25` | Transaction state machine: `DRAFT → PREPARED → SIMULATED → SIGNED → SUBMITTED → FINALIZED → ISSUED` с ветками `SIMULATION_FAILED`, `SIGNING_REJECTED`, `EXPIRED`, `UNKNOWN`, `FAILED`; `UNKNOWN` только reconciles известную signature, `ISSUED` запрещён до finalized checks |
-| `OL-C-26` | Admin: выдача certificate package после `FINALIZED`, QR SVG/PNG, copy/download URL, transaction signature и Solana Explorer devnet link; timeline операции без секретов в logs |
+| `OL-C-26` | Admin: выдача certificate package после `FINALIZED`, QR SVG/PNG только при `RegistryConfig.paused = false`, copy/download URL, transaction signature и Solana Explorer devnet link; timeline операции без секретов в logs |
 | `OL-C-27` | OneLayer: QR из камеры, image upload и manual URL/package input; проверка QR hash binding, issuer signature, field/batch proof, program/account ownership, finalized transaction и incident index |
 | `OL-C-28` | OneLayer: отдельные result views `VERIFIED`, `VERIFIED_HISTORICAL`, `SUPERSEDED`, `INVALID`, `DISPUTED`, `VERIFIED_NO_INCIDENT_CHECK`; причина, cluster, slot, signature, index lag и раскрытые поля без скрытых данных |
 | `OL-C-29` | Детерминированный browser E2E на локальном Surfpool с mock Wallet Standard: happy path до QR → `VERIFIED`, package/QR tampering → `INVALID`, direct synthetic DB tampering → `DISPUTED`; live devnet не является обычным CI-тестом |
-| `OL-C-30` | `apps/mvp-web` расширяет существующий Compose-проект `deploy/devnet-demo`: сохраняет labels/networks, synthetic marker, tmpfs server keys и loopback-only binding, добавляя один UI-port. Program deploy остаётся CLI-only с deploy approval digest; CLI publish сохраняет tx digest, а UI publish требует reviewed click + wallet prompt и exact-intent validation |
+| `OL-C-30` | `apps/mvp-web` работает в native-контуре `deploy/devnet-demo`: сохраняет synthetic marker, tmpfs server keys и loopback-only binding, добавляя один UI-port. Program deploy остаётся CLI-only с deploy approval digest; CLI publish сохраняет tx digest, а UI publish требует reviewed click + wallet prompt и exact-intent validation |
 | `OL-C-31` | Admin: runtime-generated test credentials в tmpfs, короткая server-side session с `HttpOnly`/`SameSite` cookie и CSRF-защитой mutation; `operator` может публиковать, `auditor` только читать; роль берётся только из server session, не из client state |
 | `OL-C-32` | Anchor IDL → Codama → checked-in Kit-native TypeScript client; CI регенерирует его и ломается при drift. Ручная Borsh-сериализация, PDA seeds и account layout во frontend запрещены |
 | `OL-C-33` | Versioned Admin API: idempotency key, immutable intent hash + expiry, server-session role checks и повторная валидация signed wire transaction перед сохранением/отправкой |
 | `OL-C-34` | Один guarded live-devnet browser smoke перед презентацией/release: отдельное явное approval, synthetic fixture/test keys, finalized transaction → certificate → QR → `VERIFIED`; в default CI не запускается |
-| `OL-C-35` | Presentation preflight проверяет Docker daemon/socket access, Compose, toolchain, devnet-only RPC, test-key balance/rent, ports и synthetic marker; отсутствие `rg` использует portable fallback, а недоступный обязательный dependency завершает запуск до создания новых demo artifacts |
+| `OL-C-35` | Presentation preflight проверяет native PostgreSQL/Node toolchain, devnet-only RPC, test-key balance/rent, ports и synthetic marker; отсутствие `rg` использует portable fallback, а недоступный обязательный dependency завершает запуск до создания новых demo artifacts |
 | `OL-C-36` | Demo-схема реестра `land-registry-v1`: закрытый перечень путей полей, типы (text/decimal-строка/timestamp/bool/enum/hex), обязательные пути, ограничения длины; поле вне схемы → `CANONICALIZATION_FAILED`. Схема — единственный источник и для preview, и для issuance, и для reconcile |
 | `OL-C-37` | Импорт сертификата пользователя: JSON-объект (`internalRecordId` + `fields`) или CSV (первая строка — пути полей), построчная валидация по `OL-C-36`, dry-run preview без записи, отчёт об ошибках с указанием строки и пути, идемпотентный upsert новой версии записи |
 | `OL-C-38` | Динамические canonical-метаданные: field tree строится по фактическому набору полей записи; preview показывает per-field `field_commitment`, `fieldRoot`, `recordCommitment` и batch leaf; хардкод единственного поля удалён из batch builder, reconcile и fixture-пути |
 | `OL-C-39` | Выдача в режиме `SELECTIVE_FIELDS`: оператор выбирает раскрываемые пути, пакет содержит field proof и соль **только** этих путей, `fieldRoot` остаётся прежним; `FULL_RECORD` остаётся значением по умолчанию |
 | `OL-C-40` | Динамический QR и публичная карточка сертификата: QR SVG/PNG строится из выданного пакета, публичная страница рендерит только раскрытые поля пакета, показывает cluster/slot/signature и не запрашивает скрытые значения |
 | `OL-C-41` | Полный UI-контур: dashboard с фактическими метриками, детали записи и сертификата, incident-панель, публичная страница «как это работает»; навигация покрывает все сценарии `docs/use-cases-ru.md` |
+| `OL-C-42` | Backup Admin: каталог пяти стартовых локальных `BackupCenter`-ов; у каждого отдельные volume и credentials, список папок, health/replica status и кнопка создания дополнительных центров; регистрация внешней системы откладывается до production |
+| `OL-C-43` | Backup lifecycle: создание полного `SnapshotPackageV1` из всего рабочего state OneLayer и `Обновить копии`, которое создаёт новую immutable-папку и отправляет один и тот же snapshot во все активные центры; старые папки не перезаписываются, по каждому центру видны `COPIED` / `PENDING_RETRY` / ошибка |
+| `OL-C-44` | Retention: максимум 12 backup-папок в каждом центре; после успешной 13-й копии удаляется старейшая не-`FINALIZED` версия, а единственная `FINALIZED` версия никогда не удаляется; ручное удаление запрещено |
+| `OL-C-45` | Recovery UI: выбор центра и папки, три masked-доли из пяти без persistence, проверка `ciphertextHash`/`plaintextHash`, выбор последнего `FINALIZED` anchor без открытого incident и сверка `MerkleRoot`; любая ошибка завершает операцию fail-closed |
+| `OL-C-46` | Разделение полномочий backup: `operator` создаёт центры и копии, `auditor` только читает, `chief_admin` отдельно подписывает `Approve restore`; approval привязан к `snapshotId`, `merkleRoot` и target, секреты не попадают в логи |
+| `OL-C-47` | Backup/recovery E2E: пять стартовых центров, создание шестого центра, новая копия во всех активных центрах, offline center с retry, retention на 13-й копии, повреждённый ciphertext, `2-of-5` отказ, `3-of-5` успех, отсутствие root match и успешный chief approval |
 
 ### 5.2. Чего в Gate C нет
 
-HSM, durable nonce, два RPC, мультисиг, три хранилища манифестов (одно + локальная копия), Monitor, snapshots, recovery, algorithm transition, SIEM, Kubernetes, banking SDK.
+В Gate C входит только bounded local backup control plane `OL-C-42`…`OL-C-47`: пять стартовых локальных demo-центров, тестовые credentials, создание дополнительных локальных центров, локальная retention и восстановление synthetic state. Это не production disaster recovery и не доказательство независимости площадок.
 
-Существующие `clean-fixture.dump` и `deploy/recovery-lab` — demo/prototype artifacts. Fixture-only reset/recovery в Gate C не является нормативным `SnapshotPackageV1`, threshold recovery или доказательством выхода Gate E0.
+В Gate C по-прежнему нет HSM, durable nonce, двух RPC, мультисиг, трёх хранилищ манифестов (одно + локальная копия), Monitor, production custodian environments, регистрации внешних backup-систем, реальной threshold-церемонии, algorithm transition, SIEM, Kubernetes и banking SDK.
+
+Существующие `clean-fixture.dump` и fixture-данные — demo/prototype artifacts. Fixture-only reset/recovery в Gate C не является нормативным `SnapshotPackageV1`, threshold recovery или доказательством выхода Gate E0.
 
 В Gate C используется свежий blockhash, полученный непосредственно перед simulation/signing, вместе с `lastValidBlockHeight`. Интерактивный review может пережить окно валидности; в таком случае flow завершается `EXPIRED` и возвращается в `PREPARED` с новой simulation — старую транзакцию не отправляет. Durable nonce остаётся Gate E для offline/HSM-signing и длинных очередей.
 
@@ -502,7 +513,7 @@ HSM, durable nonce, два RPC, мультисиг, три хранилища м
 
 ### 5.4. Визуальный MVP
 
-**Цель:** превратить технический Gate C flow в два понятных пользовательских контура, не меняя замороженный криптографический протокол. После однократного guarded deploy программы и выдачи test operator role полный путь от synthetic-записи до публичной проверки сертификата выполняется через UI. Monitor (Gate D) и recovery-консоль (Gate E0) в MVP не входят.
+**Цель:** превратить технический Gate C flow в понятные пользовательские контуры, не меняя замороженный криптографический протокол. После однократного guarded deploy программы и выдачи test operator role полный путь от synthetic-записи до публичной проверки сертификата, а также ограниченный backup/recovery flow выполняется через UI. Monitor (Gate D), production recovery plane и настоящий restore drill в MVP не входят.
 
 ```text
 Admin panel
@@ -522,9 +533,26 @@ OneLayer panel
         → finalized Solana anchor + incident index
           → VERIFIED / VERIFIED_HISTORICAL / SUPERSEDED
             / INVALID / DISPUTED / VERIFIED_NO_INCIDENT_CHECK
+
+Backup Admin panel
+  пять стартовых BackupCenter-ов
+    → папки зашифрованных SnapshotPackageV1
+      → выбрать центр и backup
+        → вставить Share 1 + Share 2 + Share 3
+          → latest FINALIZED anchor без открытого incident
+            → chief_admin: Approve restore
+              → восстановить полный state в локальный clean-room target
 ```
 
 **Граница on-chain.** Admin-панель не записывает отдельный `certificateHash` в Solana и не создаёт второй протокол. Программа якорит batch `merkleRoot` и `manifestHash`; certificate package содержит Merkle proof и связывает сертификат с finalized anchor. UI показывает эти две величины раздельно.
+
+**Граница данных сертификата.** Полный JSON объекта не записывается в Solana. Он входит в подписанный `CertificatePackageV1` и возвращается `/verify` только после проверки QR hash binding, issuer signature и `MerkleProof` против finalized anchor. Для `FULL_RECORD` пакет содержит все разрешённые поля; `SELECTIVE_FIELDS` сохраняет существующую selective-disclosure границу.
+
+**Backup control plane (`OL-C-42`…`OL-C-47`).** MVP показывает пять стартовых независимых в UI `BackupCenter`-ов и позволяет добавить дополнительные. Каждый центр создаётся автоматически как локальный MinIO-backed storage с отдельным volume и credential. Центры хранят ciphertext, но не recovery shares. `Обновить копии` создаёт новый полный snapshot state (records, versions, certificate packages, QR metadata, proofs, roots, manifests, anchor references и operation history) и реплицирует его во все активные центры. Старые копии immutable; новый центр получает данные со следующего обновления.
+
+**Backup retention.** В каждом центре максимум 12 папок. После появления 13-й валидной копии сначала удаляется старейшая копия без статуса `FINALIZED`; единственная `FINALIZED` копия защищена от удаления. Если все 12 копий `FINALIZED`, удаляется самая старая. На странице виден per-center результат, поэтому недоступный центр не маскируется общим зелёным статусом.
+
+**Recovery control.** Оператор выбирает центр и папку и вводит три masked shares из пяти. Shares живут только в памяти операции и не пишутся в browser storage, БД или logs. Сайт автоматически выбирает самый новый `FINALIZED` anchor без открытого incident, проверяет `ciphertextHash`, расшифровывает и пересчитывает `MerkleRoot`; `chief_admin` отдельно подписывает approval, связанный с `snapshotId`, root и target. Ошибка любого шага останавливает recovery fail-closed.
 
 **Сертификат пользователя — вход, а не результат (`OL-C-36`…`OL-C-38`).** До v2.6 запись MVP имела ровно одно поле `status`, и все метаданные были константой. Теперь исходные данные даёт пользователь: JSON-объект или CSV по demo-схеме реестра `land-registry-v1`. Схема — часть Gate C artefacts, а не `spec/`: она описывает **конкретный** реестр, тогда как frozen-документы описывают протокол, одинаковый для любого реестра.
 
@@ -558,25 +586,25 @@ land-registry-v1 (перечень путей закрыт)
 
 **Раскрытие полей при выдаче (`OL-C-39`).** `FULL_RECORD` остаётся значением по умолчанию. Дополнительно оператор может выбрать раскрываемые пути и выдать `SELECTIVE_FIELDS`: пакет содержит значения, соли и field proof **только** выбранных путей, `fieldRoot` при этом не меняется, поэтому batch proof и anchor остаются теми же. Соль нераскрытого пути не выводится из раскрытых (§2.1), но число листьев field-дерева видно из proof — оговорка §2.1 действует и здесь.
 
-**Динамические метаданные и QR (`OL-C-40`).** QR по-прежнему кодирует `URL + certificateId + certificateHash` (`spec/certificate-package-v1.md`) и не содержит данных записи: сами значения приходят из пакета после проверки hash binding. Публичная карточка сертификата рендерит ровно те поля, что раскрыты пакетом, — не список схемы и не запрос в БД. Для нераскрытых путей карточка не показывает ни значения, ни плейсхолдера «скрыто по конкретному пути»: раскрытая структура — то, что доказано, всё остальное отсутствует.
+**Динамические метаданные и QR (`OL-C-40`).** QR по-прежнему кодирует `URL + certificateId + certificateHash` (`spec/certificate-package-v1.md`) и не содержит данных записи: сами значения приходят из пакета после проверки hash binding. QR считается рабочим только для registry, чей on-chain `RegistryConfig` существует и имеет `paused = false`. Выдача, public QR routes и независимый verifier проверяют этот флаг и fail closed с `REGISTRY_PAUSED`; при недоступном config QR также не обслуживается. Публичная карточка сертификата рендерит ровно те поля, что раскрыты пакетом, — не список схемы и не запрос в БД. Для нераскрытых путей карточка не показывает ни значения, ни плейсхолдера «скрыто по конкретному пути»: раскрытая структура — то, что доказано, всё остальное отсутствует.
 
-**Архитектура UI.** Одно приложение `apps/mvp-web` на Next.js App Router, один сгенерированный Solana Kit client и общие визуальные primitives. Admin и OneLayer — разные route groups и access policies, но не два frontend-репозитория. Wallet hooks живут только в client leaf-components; публичная верификация не требует wallet. Browser обращается к Admin API и verifier через same-origin `/api/admin/*` и `/api/verify/*` proxy; Compose-сервисы остаются во внутренней сети, новый широкий CORS не открывается.
+**Архитектура UI.** Одно приложение `apps/mvp-web` на Next.js App Router, один сгенерированный Solana Kit client и общие визуальные primitives. Admin и OneLayer — разные route groups и access policies, но не два frontend-репозитория. Wallet hooks живут только в client leaf-components; публичная верификация не требует wallet. Browser обращается к Admin API и verifier через same-origin `/api/admin/*` и `/api/verify/*` proxy; backend-сервисы остаются на loopback, новый широкий CORS не открывается.
 
-**Среда исполнения — существующий demo-контур.** MVP разворачивается в guarded Compose-проекте `deploy/devnet-demo` (`OL-C-30`): synthetic marker, tmpfs server keys, labels/networks и loopback-only binding сохраняются; добавляется только UI-port. Program deploy/upgrade остаётся CLI-only и требует deploy approval digest. CLI automated publish сохраняет tx approval digest; browser publish использует отдельную интерактивную границу — reviewed click, Wallet Standard prompt и server-side exact-intent validation. Эти механизмы не подменяют друг друга.
+**Среда исполнения — native demo-контур.** MVP запускается скриптом `deploy/devnet-demo/native` (`OL-C-30`): synthetic marker, tmpfs server keys и loopback-only binding сохраняются; добавляется только UI-port. Program deploy/upgrade остаётся CLI-only и требует deploy approval digest. CLI automated publish сохраняет tx approval digest; browser publish использует отдельную интерактивную границу — reviewed click, Wallet Standard prompt и server-side exact-intent validation. Эти механизмы не подменяют друг друга.
 
-Текущий fixture incident endpoint годится только для demo-сценария и не закрывает `OL-C-14`: выход Gate C требует индекса, построенного из finalized `IncidentOpened` / `IncidentResolved` с watermark. CLI-runner `deploy/devnet-demo/demo` остаётся воспроизводимым параллельным happy path, но browser E2E работает через UI/API, а не запускает shell-команды из браузера.
+Текущий fixture incident endpoint годится только для demo-сценария и не закрывает `OL-C-14`: выход Gate C требует индекса, построенного из finalized `IncidentOpened` / `IncidentResolved` с watermark. Native launcher и browser E2E остаются разными контурами: браузер работает через UI/API, а не запускает shell-команды из браузера.
 
-CLI сохраняет one-command сценарии `demo happy-path`, `demo incident` и опциональный `demo recovery`. `demo reset` удаляет/пересоздаёт только явно названные fixture resources после label + synthetic-marker checks; broad Docker cleanup запрещён. Preflight обязан fail closed при недоступном Docker socket, а не оставлять certificate/QR от старого запуска как результат нового.
+CLI сохраняет отдельные команды подготовки и проверки: `native start|status|stop`, `program-deploy plan|apply` и browser E2E. Native startup и preflight обязаны fail closed при недоступной зависимости, а не оставлять certificate/QR от старого запуска как результат нового.
 
 **Design system.** Один документированный набор design tokens (цвет, типографика, spacing, radius, focus) и общие status components. Статус выражается парой «иконка + текст», никогда одним цветом. Для MVP обязательна одна доступная high-contrast тема; вторая тема опциональна только без дублирования state/layout logic.
 
-**Роли Admin.** `operator` — подготовка batch, simulation, запрос подписи, выдача сертификата; `auditor` — read-only список, детали и timeline. Runtime-generated test credentials живут в tmpfs; сервер выдаёт короткую `HttpOnly`/`SameSite` session cookie и требует CSRF token для mutations. Роль берётся из server session, а не из `localStorage`, query/body или скрытия кнопок. Это demo access separation; внешний IdP, production SSO/RBAC и аудит доступа — Gate E.
+**Роли Admin.** `operator` — подготовка batch, simulation, запрос подписи, выдача сертификата, создание backup center и обновление копий; `auditor` — read-only список, детали, backup folders и timeline; `chief_admin` — отдельное `Approve restore` с асимметричной подписью разрешения. Runtime-generated test credentials живут в tmpfs; сервер выдаёт короткую `HttpOnly`/`SameSite` session cookie и требует CSRF token для mutations. Роль берётся из server session, а не из `localStorage`, query/body или скрытия кнопок. Это demo access separation; внешний IdP, production SSO/RBAC, hardware key custody и аудит доступа — Gate E.
 
-**Админские экраны:** dashboard с фактическими метриками (записи, версии, батчи, последний finalized anchor, выданные сертификаты, открытые инциденты); record list и record detail с полями, версиями и commitments; create/import wizard (форма, JSON, CSV) с dry-run отчётом; canonical/disclosure preview; batch preparation; transaction review + simulation; publish progress; выбор раскрываемых полей; issued certificate + QR; certificate list/detail; append-only operation timeline. Admin API — тонкий HTTP-адаптер в `pilot-pipeline`, а не новый сервис.
+**Админские экраны:** dashboard с фактическими метриками (записи, версии, батчи, последний finalized anchor, выданные сертификаты, открытые инциденты); record list и record detail с полями, версиями и commitments; create/import wizard (форма, JSON, CSV) с dry-run отчётом; canonical/disclosure preview; batch preparation; transaction review + simulation; publish progress; выбор раскрываемых полей; issued certificate + QR; certificate list/detail; Backup Centers с папками, retention и per-center status; recovery form с тремя shares и отдельным `Approve restore`; append-only operation timeline. Admin API — тонкий HTTP-адаптер в `pilot-pipeline`, а не новый сервис.
 
 **Экраны OneLayer:** scan; camera permission/fallback; image upload; manual input; checking progress; result; public certificate detail с раскрытыми полями; страница «как это работает» (границы гарантий, что попадает в Solana, что нет). Камера — progressive enhancement: отказ permission никогда не блокирует image/manual flow.
 
-**Полнота контура (`OL-C-41`).** Требование «через UI выполним весь путь» проверяется навигацией: каждый сценарий `docs/use-cases-ru.md` достижим из интерфейса без curl, psql и shell. Исключения названы явно и остаются CLI-only: deploy/upgrade программы, выдача operator role, fixture reset и guarded live smoke — у них отдельные approval digests (§5.4, `OL-C-30`).
+**Полнота контура (`OL-C-41`).** Требование «через UI выполним весь путь» проверяется навигацией: каждый сценарий `docs/use-cases-ru.md` достижим из интерфейса без curl, psql и shell. Исключения названы явно и остаются CLI-only: deploy/upgrade программы, выдача operator role и native runtime management; devnet smoke имеет отдельное approval boundary (§5.4, `OL-C-30`).
 
 **Transaction review — блокирующий шаг.** До wallet prompt UI показывает cluster `devnet`, program ID, instruction, accounts с signer/writable flags, registry, segment PDA, batch sequence, `merkleRoot`, `manifestHash`, `previousAnchorHash`, fee payer, fee/rent и simulation logs. RPC account data считается недоверенным и проверяется по owner, длине и discriminator. Любой endpoint/wallet не на devnet отклоняется до подписи.
 
@@ -584,9 +612,9 @@ Admin API создаёт typed intent, строит message, фиксирует 
 
 **Test identity.** Browser test wallet имеет только operator role и отделён от governance/upgrade authority. Issuer software test key остаётся server-side в tmpfs и никогда не попадает в browser. Operator role выдаётся однократной guarded devnet-операцией с отдельным явным подтверждением. Browser не принимает keypair files, private keys и seed phrases.
 
-**QR transport.** Нормативный QR использует HTTPS. Единственное исключение MVP — точный loopback origin (`http://127.0.0.1`/`http://localhost`), визуально помеченный `DEVNET SYNTHETIC DEMO`; любой другой HTTP URL отклоняется. Телефон не может открыть loopback хоста Docker, поэтому responsive/mobile и camera flow проверяются в fresh browser context/emulator на том же host. Cross-device phone scan требует отдельно разрешённого HTTPS staging и не входит в локальный DoD.
+**QR transport.** Нормативный QR использует HTTPS. Единственное исключение MVP — точный loopback origin (`http://127.0.0.1`/`http://localhost`), визуально помеченный `DEVNET SYNTHETIC DEMO`; любой другой HTTP URL отклоняется. Телефон не может открыть loopback адрес другого устройства, поэтому responsive/mobile и camera flow проверяются в fresh browser context/emulator на том же host. Cross-device phone scan требует отдельно разрешённого HTTPS staging и не входит в локальный DoD.
 
-**Вне scope MVP:** mainnet, production credentials, реальные кадастровые данные, внешний IdP и production SSO/RBAC (демо-роли `OL-C-31` их не заменяют), локализация интерфейса, PWA/офлайн-режим, формальная сертификация доступности, bulk issuance, native mobile app, push/email, внешняя публикация и analytics. Внешний staging и HTTPS-хостинг требуют отдельного разрешения; loopback demo остаётся базовым контуром.
+**Вне scope MVP:** mainnet, production credentials, реальные кадастровые данные, внешний IdP и production SSO/RBAC (демо-роли `OL-C-31` их не заменяют), production HSM/hardware custody, внешняя регистрация backup-систем, географическая независимость пяти локальных центров, локализация интерфейса, PWA/офлайн-режим, формальная сертификация доступности, bulk issuance, native mobile app, push/email, внешняя публикация и analytics. Внешний staging и HTTPS-хостинг требуют отдельного разрешения; loopback demo остаётся базовым контуром.
 
 Импорт **не** включает: OCR и парсинг PDF/сканов, автоматическое извлечение полей из произвольного документа, загрузку файлов сертификатов на сервер, справочники и нормализацию адресов. Вход — структурированный JSON/CSV; связь с внешним документом возможна только через `documentHash`, посчитанный вне системы.
 
@@ -604,12 +632,19 @@ Admin API создаёт typed intent, строит message, фиксирует 
 10. Пользователь с ролью `auditor` видит данные, но не может подготовить batch, запросить подпись или выдать сертификат; ограничение проверяется на Admin API, а не только скрытием элементов UI.
 11. Synthetic marker проверяется до data operations. Deploy и CLI publish не проходят без своих approval digests; browser publish не проходит без reviewed intent, wallet prompt и server-side signed-transaction validation.
 12. Default CI проходит IDL→Codama drift check и детерминированный Surfpool/browser E2E без расхода SOL; один `OL-C-34` live-devnet smoke запускается только с отдельным подтверждением перед презентацией/release.
-13. На clean host preflight либо подтверждает все зависимости, либо сообщает точную remediation и выходит до mutation; one-command CLI happy path воспроизводим, а fixture-only reset не затрагивает другие Compose projects, containers, images или volumes.
+13. На clean host native preflight либо подтверждает все зависимости, либо сообщает точную remediation и выходит до mutation; запуск MVP воспроизводим, а fixture-only операции не затрагивают чужие процессы или данные.
 14. Импорт JSON и CSV принимает валидный сертификат пользователя и отклоняет: поле вне схемы (`CANONICALIZATION_FAILED`), неверный тип, decimal с чужим scale, timestamp с дробной частью, обязательное поле без значения. Отчёт называет строку и путь; dry-run не меняет БД; ошибка в одной строке CSV не импортирует остальные молча.
 15. `fieldRoot`, `recordCommitment`, batch leaf и `merkleRoot` пересчитываются из фактического набора полей записи; повторный импорт того же `internalRecordId` даёт новую версию, а не второй объект, и после нового anchor прежний сертификат этой записи становится `SUPERSEDED`.
 16. Выдача в режиме `SELECTIVE_FIELDS` даёт `VERIFIED` при раскрытии подмножества путей; пакет не содержит значений и солей нераскрытых путей; `fieldRoot`, batch proof и anchor совпадают с `FULL_RECORD` той же версии записи.
 17. Публичная карточка сертификата показывает ровно раскрытые пакетом поля; ни одно значение не берётся из БД в обход проверенного пакета.
 18. Каждый сценарий `docs/use-cases-ru.md`, кроме явно названных CLI-only операций, выполним из UI; dashboard-метрики совпадают с данными API, а не являются статикой.
+19. Backup Admin показывает пять стартовых центров, их папки, health и per-center replica status; `Создать backup center` добавляет шестой или следующий пустой локальный центр с отдельными volume и credentials.
+20. `Обновить копии` создаёт одну новую immutable-копию полного state и отправляет её во все активные центры; старые папки не перезаписываются, недоступный центр получает `PENDING_RETRY`, а общий результат показывает частичный успех явно.
+21. Ни один центр не хранит больше 12 backup-папок; при 13-й валидной копии удаляется старейшая не-`FINALIZED`, а если таких нет — старейшая из 12 при условии, что после удаления остаётся `FINALIZED` версия.
+22. Backup включает records, record versions, `CertificatePackageV1`, QR metadata, proofs, roots, manifests, anchor references и operation history; plaintext не покидает encrypted package во время репликации.
+23. Recovery выбирает последний `FINALIZED` anchor без открытого incident автоматически, принимает три masked shares, отклоняет `2-of-5`, не сохраняет shares и останавливается при несовпадении ciphertext/plaintext/Merkle root.
+24. Только `chief_admin` может подписать `Approve restore`; `operator` создаёт и обновляет копии, `auditor` читает, ни одна роль не может вручную удалить backup.
+25. Локальный E2E покрывает пять стартовых центров, создание дополнительного центра, активные реплики, retry, retention, повреждение пакета, `2-of-5`/`3-of-5`, root mismatch и успешный restore; это evidence bounded MVP, не release gate 7.
 
 ### 5.5. Состояние реализации Gate C
 
@@ -622,26 +657,27 @@ Admin API создаёт typed intent, строит message, фиксирует 
 | `OL-C-20` smoke | `tests/e2e/synthetic-smoke.test.ts` |
 | `OL-C-21`…`OL-C-28` UI | `apps/mvp-web`: Admin и публичная OneLayer route groups, общие design tokens и status components |
 | `OL-C-29` browser E2E | `tests/e2e-web`, 19 сценариев × desktop/mobile; вместо Surfpool — фикстурный backend (ADR-0003) |
-| `OL-C-30` Compose | `deploy/devnet-demo` расширен одним UI-портом; labels, networks, tmpfs и loopback сохранены |
+| `OL-C-30` native | `deploy/devnet-demo` запускается одним native launcher; tmpfs и loopback сохранены |
 | `OL-C-31` роли | server-session, `HttpOnly`/`SameSite` cookie, CSRF, `operator`/`auditor` на уровне API |
 | `OL-C-32` IDL→Codama | `packages/onchain-client` + drift check в CI |
 | `OL-C-33` Admin API | idempotency key, immutable intent hash, expiry, повторная валидация signed wire transaction |
-| `OL-C-34` live smoke | `deploy/devnet-demo/scripts/live-smoke`, отдельное подтверждение, публичный путь без ключей в браузере |
-| `OL-C-35` preflight | Docker/Compose/toolchain, devnet-only RPC, баланс test key, занятость портов, portable fallback вместо `rg` |
+| `OL-C-34` live smoke | native Playwright live config, отдельное подтверждение, публичный путь без ключей в браузере |
+| `OL-C-35` preflight | native toolchain, devnet-only RPC, баланс test key, занятость портов, portable fallback вместо `rg` |
 | `OL-C-36` схема реестра | `apps/demo-api/src/record-schema.ts` (`land-registry-v1`), отдаётся UI через `GET /v1/admin/schema` |
 | `OL-C-37` импорт | `POST /v1/admin/records/import` (JSON/CSV, dry-run, построчный отчёт) + wizard в `apps/mvp-web` |
 | `OL-C-38` динамические поля | `db/migrations/0004`, `fieldsOf` в `admin-batch.ts` — общий источник для builder, preview и reconcile |
 | `OL-C-39` selective disclosure | `issueCertificate(..., disclosedPaths)`, field proofs; verifier возвращает раскрытые поля только после успешных проверок |
 | `OL-C-40` QR и карточка | `GET /v1/certificates/:id/metadata`, QR в SVG и PNG, публичная карточка из проверенного пакета |
 | `OL-C-41` полный контур | dashboard на фактических метриках, карточка записи, деталь сертификата, публичная страница `/how-it-works` |
+| `OL-C-42`…`OL-C-47` backup/recovery UI | **добавить**: пять auto-created centers, full-state snapshots, per-center replication, retention 12, masked 3-of-5 recovery, chief approval и локальный E2E |
 
 Отклонения от буквы плана и их обоснование зафиксированы в
 `docs/adr/0003-visual-mvp-boundaries.md`. Сценарии использования — в
 `docs/use-cases-ru.md`, разбор потока для презентации — в `docs/presentation-ru.md`.
 Незакрытым остаётся сам выход Gate C: 72-часовой прогон под synthetic-нагрузкой
-не выполнялся.
+не выполнялся; backup control plane `OL-C-42`…`OL-C-47` также требует bounded E2E до выхода Gate C.
 
-**Выход Gate C:** сквозной поток работает 72 часа на synthetic-нагрузке без ручного вмешательства; `anchor_sequence_gap_total = 0`; повторная сборка одного диапазона даёт идентичный `manifestHash`; event-backed incident index обрабатывает open/resolve; локальный browser flow `OL-C-29` и отдельный approved smoke `OL-C-34` заканчиваются QR → `VERIFIED`, а tampering — `INVALID`/`DISPUTED` без ложного зелёного статуса.
+**Выход Gate C:** сквозной поток работает 72 часа на synthetic-нагрузке без ручного вмешательства; `anchor_sequence_gap_total = 0`; повторная сборка одного диапазона даёт идентичный `manifestHash`; event-backed incident index обрабатывает open/resolve; локальный browser flow `OL-C-29` и отдельный approved smoke `OL-C-34` заканчиваются QR → `VERIFIED`, а tampering — `INVALID`/`DISPUTED` без ложного зелёного статуса; backup flow создаёт новую копию во всех активных центрах, удерживает retention 12 и восстанавливает state только после root match и chief approval.
 
 ---
 
@@ -670,7 +706,7 @@ onelayer/
 │   └── verifier/            # TS, REST
 ├── tests/e2e/
 ├── db/migrations/
-├── deploy/devnet-demo/       # guarded Compose-контур Gate C: фикстура, approval digests, CLI-runner
+├── deploy/devnet-demo/       # native-контур Gate C: фикстура, approval digests, CLI-runner
 └── docs/adr/
 ```
 
@@ -719,6 +755,20 @@ CREATE TABLE batch_leaf (
 );
 
 -- аналогично: certificate, snapshot, integrity_incident ссылаются на (registry_id, batch_sequence)
+
+-- backup control plane Gate C: отдельные storage locations не являются key holders
+-- backup_center: id, name, local endpoint, isolated volume, credential_version, status
+-- snapshot: snapshot_id, registry_id, snapshot_version, plaintext_hash,
+--           ciphertext_hash, merkle_root, finalized_anchor_sequence, status
+-- snapshot_replica: snapshot_id, center_id, object_key, copy_status,
+--                   verified_at, last_error; UNIQUE(snapshot_id, center_id)
+-- restore_attempt: snapshot_id, selected_anchor, requested_by, approved_by,
+--                  approval_signature, outcome, created_at, resolved_at
+
+Инварианты backup-схемы: один snapshot получает не более одной replica на центр;
+`copy_status=VERIFIED` разрешён только после повторной проверки `ciphertext_hash`;
+`FINALIZED` требует совпадения с выбранным finalized anchor без открытого incident;
+recovery shares и plaintext не сохраняются в этих таблицах.
 
 -- durable queue публикации (не WORM): текущее состояние, одна строка на batch
 CREATE TABLE publish_queue (
@@ -782,7 +832,7 @@ CREATE TABLE source_cursor_state (
 | Внутри pipeline | вызовы функций в одном процессе; состояние — транзакции PostgreSQL |
 | Pipeline → Publisher | `publish_queue` с claim/lease |
 | Browser → `mvp-web` | same-origin HTTPS; exact loopback HTTP разрешён только для devnet demo |
-| `mvp-web` → Admin API / verifier | server-side same-origin proxy; внутренний HTTP в Compose network, без публичного CORS |
+| `mvp-web` → Admin API / verifier | server-side same-origin proxy; loopback HTTP, без публичного CORS |
 | Publisher → Solana | JSON-RPC только к allowlisted devnet endpoint в Gate C |
 | Публичный verifier | REST |
 | Monitor → источники | прямое чтение (реплика, Solana RPC, хранилище манифестов) |
@@ -914,14 +964,16 @@ capacity: 46 entries
 
 ---
 
-## 10. Gate E0 — Recovery Lab (Docker)
+## 10. Gate E0 — Recovery Lab (deferred)
 
 Подэтап между Gate D и Gate E. Цель — проверить **программную корректность** recovery-протокола до того, как разворачиваются реальные custodian environments, ведутся переговоры с организациями-хранителями и проводится настоящая threshold-церемония. Ошибка в схеме шифрования или в процедуре восстановления должна обнаружиться здесь, а не на первом реальном restore drill.
+
+Пять локальных `BackupCenter`-ов из Gate C и topology ниже — разные контуры. Gate C проверяет UI/control plane и bounded synthetic recovery с пятью стартовыми центрами; E0 сохраняет отдельную лабораторию с custodian replicas для проверки нормативной процедуры. Ни один из этих локальных контуров не доказывает географическую или административную независимость production-хранилищ.
 
 ### 10.1. Топология
 
 ```text
-docker compose (recovery-lab)
+future recovery lab (deferred)
 ├── source-db              PostgreSQL, synthetic-данные
 ├── snapshot-coordinator   создаёт и шифрует snapshot
 ├── custodian-a │
@@ -999,11 +1051,11 @@ KEK   — шифрует DEK (wrapped_dek)
 
 Shamir-разделение применяется **только к KEK**. Отдельно делить каждый DEK не нужно: это множит церемонии пропорционально числу снимков и усложняет lifecycle без выигрыша — компрометация KEK и так раскрывает все DEK, а разделение DEK не защищает от неё.
 
-**Lifecycle в Gate E0:** test KEK генерируется один раз при инициализации lab, разделяется на пять shares и передаётся coordinator-у отдельным Compose secret только на фазу создания snapshot. Coordinator не получает ни одного share. После записи и перепроверки трёх replicas coordinator и его secret удаляются; recovery начинается только после этого. `clean-room-restore` получает выбранные shares через одноразовые файлы в `tmpfs`, восстанавливает KEK при 3-of-5, unwrap-ит DEK и уничтожается после drill. В Gate E место live KEK занимает подтверждённый `OL-A-07` KMS/HSM; threshold shares остаются recovery-копией этого KEK, а не механизмом на каждый штатный snapshot.
+**Lifecycle в Gate E0:** test KEK генерируется один раз при инициализации lab, разделяется на пять shares и передаётся coordinator-у через отдельный временный secret-файл только на фазу создания snapshot. Coordinator не получает ни одного share. После записи и перепроверки трёх replicas coordinator и его secret удаляются; recovery начинается только после этого. `clean-room-restore` получает выбранные shares через одноразовые файлы в `tmpfs`, восстанавливает KEK при 3-of-5, unwrap-ит DEK и уничтожается после drill. В Gate E место live KEK занимает подтверждённый `OL-A-07` KMS/HSM; threshold shares остаются recovery-копией этого KEK, а не механизмом на каждый штатный snapshot.
 
 ### 10.2. Изоляция внутри lab
 
-- отдельные Docker networks для storage, key holders и restore;
+- отдельные изолированные сети для storage, key holders и restore;
 - отдельный volume и отдельный credential у каждого custodian; общего bucket-credential нет;
 - custodian не имеет доступа к KEK и shares;
 - key holder не имеет доступа к backup storage;
@@ -1012,9 +1064,9 @@ Shamir-разделение применяется **только к KEK**. От
 - clean-room получает shares только после удаления coordinator и потери primary fixture;
 - production credentials отсутствуют полностью; только synthetic-данные и test keys.
 
-**Ключевой материал не передаётся через environment.** `environment:` и `.env` видны в `docker inspect` и регулярно попадают в диагностические выгрузки. Для shares, KEK и DEK используются: Compose secrets или одноразовые read-only файлы в `tmpfs`, доступные только на время реконструкции; после drill контейнер и ephemeral volume уничтожаются.
+**Ключевой материал не передаётся через environment.** `environment:` и `.env` регулярно попадают в диагностические выгрузки. Для shares, KEK и DEK используются одноразовые read-only файлы в `tmpfs`, доступные только на время реконструкции; после drill временные данные уничтожаются.
 
-Формулировка о стирании ключей — честная: **key material не записывается в persistent volume; временные secret-файлы лежат в tmpfs; процесс best-effort зануляет доступные буферы; после drill контейнер и ephemeral volume уничтожаются.** Обещать надёжный secure erase поверх Docker overlayfs и SSD с wear leveling нельзя, и план этого не утверждает.
+Формулировка о стирании ключей — честная: **key material не записывается в persistent storage; временные secret-файлы лежат в tmpfs; процесс best-effort зануляет доступные буферы; после drill временные данные уничтожаются.** Обещать надёжный secure erase поверх SSD с wear leveling нельзя, и план этого не утверждает.
 
 ### 10.3. Acceptance criteria
 
@@ -1022,7 +1074,7 @@ Shamir-разделение применяется **только к KEK**. От
 |---|---|---|
 | 1 | Создание snapshot | plaintext hash посчитан; deterministic CBOR; AES-256-GCM; уникальный DEK на snapshot; chunk AAD однозначно содержит registry ID, snapshot ID, version, chunk size, indexes и plaintext hash; DEK wrapping имеет отдельный domain и auth tag |
 | 2 | Размещение | ciphertext записан в три MinIO с разными credentials и volume; ciphertext hash перепроверен **после** записи у каждого |
-| 3 | Threshold | после удаления coordinator: `2-of-5` — восстановление KEK **отказывает**; `3-of-5` — успешно; coordinator не видел shares; shares не появляются в логах, артефактах и `docker inspect`; после drill ephemeral volume и контейнеры уничтожены |
+| 3 | Threshold | после удаления coordinator: `2-of-5` — восстановление KEK **отказывает**; `3-of-5` — успешно; coordinator не видел shares; shares не появляются в логах, артефактах и диагностике; после drill временные данные уничтожены |
 | 4 | Отказ custodian | один MinIO остановлен или его volume удалён → восстановление из оставшихся успешно |
 | 5 | Повреждение replica | изменён один байт → ciphertext hash не совпал → replica исключена, попытки расшифровать её как корректную нет |
 | 6 | Потеря primary | контейнер `source-db` удалён вместе с volume; clean-room поднимается с нуля; восстановление идёт только по документированной процедуре |
@@ -1033,7 +1085,7 @@ Shamir-разделение применяется **только к KEK**. От
 
 ### 10.4. Границы применимости — что lab не доказывает
 
-Несколько контейнеров на одной машине — это не несколько дата-центров. У них общий host, ядро, физический диск, Docker daemon и один администратор, то есть одна точка компрометации.
+Несколько изолированных процессов на одной машине — это не несколько дата-центров. У них общий host, ядро, физический диск и один администратор, то есть одна точка компрометации.
 
 | Проверяется | Не проверяется |
 |---|---|
@@ -1051,34 +1103,19 @@ Shamir-разделение применяется **только к KEK**. От
 
 `destroy-primary` и `corrupt-replica` удаляют данные. Они допустимы только потому, что работают на изолированной fixture, — и это должно проверяться самим скриптом, а не дисциплиной запускающего. Обязательные предохранители, без которых скрипт не выполняется:
 
-- фиксированное имя Compose-проекта `onelayer-recovery-lab`; всё вне него игнорируется;
-- проверка label `com.onelayer.fixture=true` на каждом контейнере и volume перед удалением;
+- фиксированный рабочий каталог `onelayer-recovery-lab`; всё вне него игнорируется;
+- проверка synthetic-маркера на каждом локальном fixture-ресурсе перед удалением;
 - проверка synthetic-маркера внутри самой БД (таблица-маркер с известным значением);
 - отказ при обнаружении production-подобного hostname или credential;
-- удаление **только** явно поименованных volume; `docker system prune` и широкий `docker volume prune` запрещены;
+- удаление **только** явно поименованных локальных каталогов; широкая очистка запрещена;
 - confirmation token в окружении запуска: `DESTROY_ONELAYER_FIXTURE=yes`;
 - вывод только имён тестовых ресурсов, без credentials.
 
-Проверки выполняются последовательно, любая непрошедшая — немедленный выход с ненулевым кодом. Это требование безопасности, а не дополнительный hardening: скрипт с `docker volume rm` в репозитории проекта будет запущен на машине разработчика с другими проектами.
+Проверки выполняются последовательно, любая непрошедшая — немедленный выход с ненулевым кодом. Это требование безопасности, а не дополнительный hardening: destructive-скрипт в репозитории проекта будет запущен на машине разработчика с другими проектами.
 
 ### 10.6. Артефакты
 
-Каталог `deploy/recovery-lab/` уже существует как prototype. Его наличие не означает прохождение Gate E0: при наступлении gate-а он обязан удовлетворить контрактам §10.1–10.5 и пройти полный acceptance drill.
-
-```text
-deploy/recovery-lab/
-├── compose.yaml
-├── networks/
-├── minio/
-├── key-holders/
-├── scripts/
-│   ├── create-snapshot
-│   ├── corrupt-replica
-│   ├── destroy-primary
-│   ├── restore-clean-room
-│   └── reconcile-anchor
-└── README.md
-```
+В текущем MVP отдельный recovery-lab не поставляется. Gate E0 остаётся будущим production-hardening блоком: до его начала нужно зафиксировать runtime topology, внешнее storage и процедуру полного acceptance drill.
 
 Gate E0 выполняется на synthetic-данных и потому **не требует** законченного legal approval — в отличие от shadow pilot (§11).
 
@@ -1106,7 +1143,7 @@ Gate E0 выполняется на synthetic-данных и потому **н�
 
 ```text
 Gate D
-├── Gate E0: Docker Recovery Lab      (synthetic-данные, test keys — legal approval не требуется)
+├── Gate E0: Recovery Lab (deferred)   (synthetic-данные, test keys — legal approval не требуется)
 └── DPIA / legal approval             (gate 1)
 
 Gate E0 PASSED  +  legal approval
@@ -1192,6 +1229,6 @@ Skeleton M1–M12 в первую неделю не создаётся.
 | 4. Program audit | Gate E |
 | 5. Backend penetration test | Gate E |
 | 6. 60-day shadow pilot | Gate E |
-| 7. Restore drill | Gate E (Gate E0 — предварительное условие, gate **не** закрывает: контейнеры на одном host не являются независимыми дата-центрами) |
+| 7. Restore drill | Gate E (Gate E0 — предварительное условие, gate **не** закрывает: процессы на одном host не являются независимыми дата-центрами) |
 | 8. Governance/key ceremony approval | Gate E |
 | 9. Mainnet go-live decision | выход Gate E |

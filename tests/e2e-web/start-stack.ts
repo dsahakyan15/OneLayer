@@ -1,5 +1,5 @@
-// Boots the deterministic E2E stack: the fixture backend plus a production
-// build of apps/mvp-web pointed at it. No Docker, no validator, no SOL.
+// Boots deterministic E2E: the fixture backend plus a production build of
+// apps/mvp-web pointed at it. No validator and no SOL are required.
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";

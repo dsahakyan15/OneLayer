@@ -5,7 +5,11 @@ import { parseCredentials, SESSION_COOKIE, SessionStore } from "../src/admin-ses
 import { routeAdmin, type AdminContext, type AdminRequest } from "../src/admin.ts";
 
 const credentials = parseCredentials(
-  JSON.stringify({ operator: "operator-password-0123456789", auditor: "auditor-password-0123456789" }),
+  JSON.stringify({
+    operator: "operator-password-0123456789",
+    auditor: "auditor-password-0123456789",
+    chief_admin: "chief_admin-password-0123456789",
+  }),
 );
 
 /**
@@ -50,7 +54,7 @@ function request(overrides: Partial<AdminRequest>): AdminRequest {
   };
 }
 
-async function login(sessions: SessionStore, role: "operator" | "auditor") {
+async function login(sessions: SessionStore, role: "operator" | "auditor" | "chief_admin") {
   const response = await routeAdmin(context(sessions), request({
     method: "POST",
     path: "/v1/admin/session",
@@ -112,6 +116,56 @@ test("an auditor is refused at the API, not only in the UI", async () => {
     cookieHeader: auditor.cookieHeader,
   }));
   assert.equal(read.status, 200);
+});
+
+test("backup mutations are operator-only and backup deletion is forbidden", async () => {
+  const sessions = new SessionStore(credentials);
+  const auditor = await login(sessions, "auditor");
+  const headers = { cookieHeader: auditor.cookieHeader, csrfHeader: auditor.csrfToken };
+
+  const createCenter = await routeAdmin(context(sessions), request({
+    method: "POST",
+    path: "/v1/admin/backup-centers",
+    body: { name: "Unauthorized center" },
+    ...headers,
+  }));
+  assert.equal(createCenter.status, 403);
+  assert.equal((createCenter.body as any).code, "ROLE_FORBIDDEN");
+
+  const refresh = await routeAdmin(context(sessions), request({
+    method: "POST",
+    path: "/v1/admin/snapshots/refresh",
+    body: {},
+    idempotencyKey: "backup-auditor-key",
+    ...headers,
+  }));
+  assert.equal(refresh.status, 403);
+  assert.equal((refresh.body as any).code, "ROLE_FORBIDDEN");
+
+  const deletion = await routeAdmin(context(sessions), request({
+    method: "DELETE",
+    path: "/v1/admin/snapshots",
+    ...headers,
+  }));
+  assert.equal(deletion.status, 403);
+  assert.equal((deletion.body as any).code, "BACKUP_DELETE_FORBIDDEN");
+});
+
+test("only chief_admin can reach the Restore Approval signer route", async () => {
+  const sessions = new SessionStore(credentials);
+  const operationId = "00000000-0000-0000-0000-000000000001";
+  for (const role of ["operator", "auditor"] as const) {
+    const actor = await login(sessions, role);
+    const response = await routeAdmin(context(sessions), request({
+      method: "POST",
+      path: `/v1/admin/recovery/operations/${operationId}/approve`,
+      body: { snapshotId: operationId, merkleRoot: "00".repeat(32), target: "local-demo-target" },
+      cookieHeader: actor.cookieHeader,
+      csrfHeader: actor.csrfToken,
+    }));
+    assert.equal(response.status, 403);
+    assert.equal((response.body as any).code, "ROLE_FORBIDDEN");
+  }
 });
 
 test("mutations without the CSRF token are refused for operators too", async () => {

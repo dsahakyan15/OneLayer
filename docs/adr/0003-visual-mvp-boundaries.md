@@ -46,7 +46,7 @@ angle-bracket type assertions потребители запускаются с
 Чего это **не** проверяет: on-chain инварианты программы (покрыты Rust-тестами
 `onchain/`), криптографию сертификата (покрыта unit-тестами
 `apps/demo-api`, `apps/verifier`, `packages/*`) и реальную finalization.
-Последнее закрывает guarded `OL-C-34` (`deploy/devnet-demo/scripts/live-smoke`).
+Последнее закрывает отдельно разрешённый native live-devnet smoke (`OL-C-34`).
 
 ## Решение 4. Live smoke проверяет публичный путь, не подписывает в браузере
 

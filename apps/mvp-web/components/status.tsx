@@ -70,7 +70,22 @@ const INCIDENT_INDEX_STATUS: Record<string, StatusDescriptor> = {
   STALE: { icon: "!", label: "INDEX STALE", tone: "warn", explanation: "The index lags behind the finalized head or has not reached the anchor slot." },
   UNAVAILABLE: { icon: "!", label: "INDEX UNAVAILABLE", tone: "warn", explanation: "The incident index did not answer, or answered without a watermark." },
   INDEX_INCONSISTENT: { icon: "!", label: "INDEX INCONSISTENT", tone: "bad", explanation: "The index claims to be ahead of the finalized head." },
-  RPC_DISAGREEMENT: { icon: "!", label: "RPC DISAGREEMENT", tone: "warn", explanation: "Independent RPC endpoints disagree about the finalized head." },
+};
+
+const BACKUP_STATUS: Record<string, StatusDescriptor> = {
+  COPIED: { icon: "✔", label: "COPIED", tone: "ok", explanation: "The encrypted SnapshotPackageV1 was copied and its ciphertext hash was verified." },
+  PENDING_RETRY: { icon: "◷", label: "PENDING RETRY", tone: "warn", explanation: "This center is unavailable; the same immutable replica can be retried after recovery." },
+  FAILED: { icon: "✖", label: "ERROR", tone: "bad", explanation: "The center rejected the encrypted replica. No plaintext was stored." },
+  HEALTHY: { icon: "✔", label: "HEALTHY", tone: "ok", explanation: "The local BackupCenter is available for encrypted replicas." },
+  UNAVAILABLE: { icon: "◷", label: "UNAVAILABLE", tone: "warn", explanation: "The local BackupCenter is unavailable for writes." },
+  ERROR: { icon: "✖", label: "ERROR", tone: "bad", explanation: "The local BackupCenter reported an error." },
+};
+
+const RECOVERY_STATUS: Record<string, StatusDescriptor> = {
+  AWAITING_APPROVAL: { icon: "◷", label: "AWAITING RESTORE APPROVAL", tone: "warn", explanation: "Threshold and integrity checks passed; a chief_admin must approve this exact snapshot, root and target." },
+  APPROVED: { icon: "→", label: "APPROVED · RESTORE READY", tone: "info", explanation: "The chief_admin approval is bound to this snapshot, Merkle root and target; the operator may execute the bounded restore." },
+  RESTORED: { icon: "✔", label: "RESTORED", tone: "ok", explanation: "The full Snapshot was applied to the bounded local target and plaintext was cleared." },
+  FAILED: { icon: "✖", label: "RECOVERY FAILED", tone: "bad", explanation: "Recovery stopped fail-closed. No partial restore was reported." },
 };
 
 const UNKNOWN_STATUS: StatusDescriptor = {
@@ -90,6 +105,14 @@ export function describeTransaction(state: string | undefined): StatusDescriptor
 
 export function describeIncidentIndex(status: string | undefined): StatusDescriptor {
   return (status !== undefined && INCIDENT_INDEX_STATUS[status]) || UNKNOWN_STATUS;
+}
+
+export function describeBackup(status: string | undefined): StatusDescriptor {
+  return (status !== undefined && BACKUP_STATUS[status]) || UNKNOWN_STATUS;
+}
+
+export function describeRecovery(status: string | undefined): StatusDescriptor {
+  return (status !== undefined && RECOVERY_STATUS[status]) || UNKNOWN_STATUS;
 }
 
 export function StatusBadge({ status, testId }: { status: StatusDescriptor; testId?: string }): ReactNode {

@@ -1,8 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// Guarded live-devnet smoke (OL-C-34). It runs against the Compose stack that
-// `deploy/devnet-demo/scripts/live-smoke` has already brought up, and is never
-// part of the default CI run.
+// Guarded live-devnet smoke (OL-C-34) against the native MVP. It is never part
+// of the default CI run.
 export default defineConfig({
   testDir: "./specs-live",
   workers: 1,

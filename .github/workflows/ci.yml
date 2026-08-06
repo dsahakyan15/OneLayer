@@ -34,12 +34,6 @@ jobs:
         working-directory: apps/verifier
       - run: node --test --experimental-strip-types tests/e2e/*.test.ts
       - run: npm ci
-        working-directory: apps/monitor
-      - run: npm run typecheck
-        working-directory: apps/monitor
-      - run: npm test
-        working-directory: apps/monitor
-      - run: npm ci
         working-directory: packages/snapshot-ts
       - run: npm run typecheck
         working-directory: packages/snapshot-ts
@@ -73,8 +67,8 @@ jobs:
         working-directory: apps/mvp-web
       - run: npm run typecheck
         working-directory: apps/mvp-web
-      # No devnet endpoint is reachable from the build; the deterministic E2E
-      # stack replaces both Compose services (OL-C-29).
+      # No devnet endpoint is reachable from the build; deterministic E2E uses
+      # the in-process fixture backend (OL-C-29).
       - run: npm run build
         working-directory: apps/mvp-web
         env:

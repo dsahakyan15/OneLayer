@@ -120,6 +120,19 @@ a {
   font-size: var(--ol-text-l);
 }
 
+.ol-subcard {
+  background: var(--ol-surface-raised);
+  border: 1px solid var(--ol-border);
+  border-radius: var(--ol-radius-2);
+  padding: var(--ol-space-4);
+  margin: var(--ol-space-3) 0;
+}
+
+.ol-stack {
+  display: grid;
+  gap: var(--ol-space-3);
+}
+
 .ol-grid {
   display: grid;
   gap: var(--ol-space-3);

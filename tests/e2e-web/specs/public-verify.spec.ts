@@ -37,6 +37,14 @@ test("a scanned certificate URL verifies", async ({ page }) => {
   await expect(page.getByTestId("incident-index-status")).toContainText("INDEX CHECKED");
 });
 
+test("a QR from a paused registry is refused", async ({ page }) => {
+  const qrUrl = await issueCertificate(page);
+  await scenario(page, { registryPaused: true });
+  await page.goto(qrUrl);
+  await expect(page.getByTestId("verification-status")).toContainText("INVALID");
+  await expect(page.getByTestId("verification-code")).toHaveText("REGISTRY_PAUSED");
+});
+
 test("manual input reaches the same result as the QR link", async ({ page }) => {
   const qrUrl = await issueCertificate(page);
   await page.goto("/verify");

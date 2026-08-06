@@ -1,4 +1,4 @@
-import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Pool } from "pg";
@@ -13,6 +13,8 @@ import { PostgresIncidentStore } from "./incident-store.ts";
 import { SolanaPublisherRpc } from "./solana-rpc.ts";
 import { parseCredentials, SessionStore, CSRF_HEADER } from "./admin-session.ts";
 import { routeAdmin, type AdminContext } from "./admin.ts";
+import { workingRegistryStatus } from "./registry-status.ts";
+import { splitRecoveryKek } from "../../../packages/snapshot-ts/src/index.ts";
 
 const MAX_BODY = 1_048_576;
 const REGISTRY_ID = "gov.registry.land";
@@ -43,6 +45,10 @@ if (issuerSecretKey.length !== 32) throw new Error("ONELAYER_ISSUER_SECRET_FILE 
 const adminCredentials = parseCredentials(secret("ONELAYER_ADMIN_CREDENTIALS_FILE"));
 if (rpcUrl !== "https://api.devnet.solana.com") throw new Error("demo API is devnet-only");
 const pool = new Pool({ connectionString: databaseUrl, max: 5 });
+const snapshotKek = randomBytes(32);
+const recoveryShares = splitRecoveryKek(snapshotKek);
+const recoveryKeys = new Map<string, Uint8Array>();
+const restoreApprovalPrivateKey = generateKeyPairSync("ed25519").privateKey;
 
 const [configAddress] = await findRegistryConfigPda(registryIdHash(REGISTRY_ID), {
   programAddress: programId as Address,
@@ -63,6 +69,13 @@ const adminContext: AdminContext = {
   programId: programId as Address,
   configPda: configAddress,
   issuerSecretKey,
+  // The bounded MVP writer keeps its DEK-wrapping KEK and the out-of-band
+  // 3-of-5 custody material in process memory only. Neither is returned to
+  // the browser, written to the database, or included in the timeline.
+  snapshotKek,
+  recoveryShares,
+  recoveryKeys,
+  restoreApprovalPrivateKey,
   publicWebBaseUrl,
   now: () => new Date(),
 };
@@ -135,8 +148,19 @@ async function ensureFixture(): Promise<void> {
   if (result.rows.length !== 1 || result.rows[0].marker !== MARKER) throw new Error("synthetic fixture marker missing");
 }
 
+async function requireWorkingRegistry(response: ServerResponse): Promise<boolean> {
+  const status = await workingRegistryStatus(incidentRpc, configAddress);
+  if (status === "WORKING") return true;
+  if (status === "PAUSED") json(response, 409, { code: "REGISTRY_PAUSED" });
+  else json(response, 503, { code: "REGISTRY_STATUS_UNAVAILABLE" });
+  return false;
+}
+
 async function registerArtifact(input: Record<string, unknown>): Promise<void> {
   await ensureFixture();
+  const registryStatus = await workingRegistryStatus(incidentRpc, configAddress);
+  if (registryStatus === "PAUSED") throw new Error("REGISTRY_PAUSED");
+  if (registryStatus === "UNAVAILABLE") throw new Error("REGISTRY_STATUS_UNAVAILABLE");
   const registryId = text(input.registryId, "registryId", /^gov\.registry\.land$/);
   const batchSequence = unsigned(input.batchSequence, "batchSequence");
   const registryVersion = unsigned(input.registryVersion, "registryVersion");
@@ -391,6 +415,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   }
   const certificatePackage = url.pathname.match(/^\/v1\/certificates\/([0-9a-f]{32})\/package$/);
   if (request.method === "GET" && certificatePackage) {
+    if (!(await requireWorkingRegistry(response))) return;
     const result = await pool.query(
       "SELECT package_base64url, encode(certificate_hash,'hex') AS certificate_hash, qr_url FROM demo_certificate WHERE certificate_id=$1",
       [certificatePackage[1]],
@@ -415,6 +440,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   // not served here — they come from the package the verifier checked.
   const certificateMetadata = url.pathname.match(/^\/v1\/certificates\/([0-9a-f]{32})\/metadata$/);
   if (request.method === "GET" && certificateMetadata) {
+    if (!(await requireWorkingRegistry(response))) return;
     const result = await pool.query(
       `SELECT c.certificate_id, c.batch_sequence::text, c.status, c.issued_at, c.qr_url,
               c.disclosure_mode, c.disclosed_paths, c.record_version::text,
@@ -450,6 +476,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   }
   const qr = url.pathname.match(/^\/v1\/qr\/([0-9a-f]{32})\.(svg|png)$/);
   if (request.method === "GET" && qr) {
+    if (!(await requireWorkingRegistry(response))) return;
     const result = await pool.query("SELECT qr_url FROM demo_certificate WHERE certificate_id=$1", [qr[1]]);
     if (!result.rows.length) { json(response, 404, { code: "CERTIFICATE_NOT_FOUND" }); return; }
     const qrUrl: string = result.rows[0].qr_url;
@@ -467,6 +494,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   }
   const page = url.pathname.match(/^\/c\/([0-9a-f]{32})$/);
   if (request.method === "GET" && page) {
+    if (!(await requireWorkingRegistry(response))) return;
     const certificateId = page[1];
     const certificate = await pool.query("SELECT encode(certificate_hash,'hex') AS certificate_hash FROM demo_certificate WHERE certificate_id=$1", [certificateId]);
     if (!certificate.rows.length || qrHashHex(url.searchParams.get("h")) !== certificate.rows[0].certificate_hash) {

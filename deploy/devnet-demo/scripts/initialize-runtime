@@ -7,16 +7,13 @@ runtime=/dev/shm/onelayer-devnet-demo
 umask 077
 mkdir -p "$runtime"
 random_hex() { od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; }
-[[ -s "$runtime/postgres-password" ]] || random_hex > "$runtime/postgres-password"
-[[ -s "$runtime/restore-password" ]] || random_hex > "$runtime/restore-password"
 [[ -s "$runtime/internal-token" ]] || random_hex > "$runtime/internal-token"
 # Software issuer test key and demo Admin credentials: tmpfs only, never in the
 # repository, never in the browser (§5.4 test identity).
 [[ -s "$runtime/issuer-secret" ]] || random_hex > "$runtime/issuer-secret"
 if [[ ! -s "$runtime/admin-credentials.json" ]]; then
-  printf '{"operator":"%s","auditor":"%s"}\n' "$(random_hex)" "$(random_hex)" > "$runtime/admin-credentials.json"
+  printf '{"operator":"%s","auditor":"%s","chief_admin":"%s"}\n' "$(random_hex)" "$(random_hex)" "$(random_hex)" > "$runtime/admin-credentials.json"
 fi
-printf 'postgresql://onelayer_demo:%s@postgres:5432/onelayer_demo\n' "$(cat "$runtime/postgres-password")" > "$runtime/database-url"
 if [[ ! -s "$runtime/test-payer.json" ]]; then
   NO_DNA=1 solana-keygen new --no-bip39-passphrase --silent --force -o "$runtime/test-payer.json"
 fi
@@ -30,9 +27,6 @@ if [[ -s "$program_keypair" ]]; then
 fi
 chmod 600 "$runtime"/*
 chmod 644 \
-  "$runtime/postgres-password" \
-  "$runtime/restore-password" \
-  "$runtime/database-url" \
   "$runtime/internal-token" \
   "$runtime/issuer-secret" \
   "$runtime/admin-credentials.json"

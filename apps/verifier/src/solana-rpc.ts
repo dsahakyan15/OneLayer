@@ -6,9 +6,14 @@ import {
   getProgramDerivedAddress,
   signature,
 } from "@solana/kit";
+import { registryIdHash } from "../../../packages/canonical-ts/src/index.ts";
+import {
+  findRegistryConfigPda,
+  getRegistryConfigDecoder,
+} from "../../../packages/onchain-client/src/index.ts";
 import type { CertificateBody } from "../../../packages/canonical-ts/src/index.ts";
 import { decodeLedgerSegment, findAnchorEntry } from "./solana-account.ts";
-import type { ChainReader, ObservedAnchor } from "./verify.ts";
+import type { ChainReader, ObservedAnchor, ObservedRegistry } from "./verify.ts";
 
 function u32be(value: number): Uint8Array {
   const bytes = new Uint8Array(4);
@@ -48,6 +53,27 @@ export class SolanaRpcChainReader implements ChainReader {
 
   constructor(rpcUrl: string) {
     this.rpc = createSolanaRpc(rpcUrl);
+  }
+
+  async getRegistryConfig(body: CertificateBody): Promise<ObservedRegistry> {
+    const registryHash = registryIdHash(body.registryId);
+    const programAddress = this.addressDecoder.decode(body.anchor.solanaProgramId);
+    const [configAddress] = await findRegistryConfigPda(registryHash, { programAddress });
+    const accountResponse = await this.rpc.getAccountInfo(configAddress, {
+      commitment: "finalized",
+      encoding: "base64",
+    }).send();
+    const account = accountResponse.value;
+    if (account === null) throw new TypeError("registry config account not found");
+    if (account.owner !== programAddress) throw new TypeError("registry config owner mismatch");
+    const config = getRegistryConfigDecoder().decode(accountData(account.data));
+    if (config.version !== 1 || !equalBytes(new Uint8Array(config.registryIdHash), registryHash)) {
+      throw new TypeError("registry config is invalid");
+    }
+    return {
+      registryIdHash: new Uint8Array(config.registryIdHash),
+      paused: config.paused,
+    };
   }
 
   async getAnchor(body: CertificateBody): Promise<ObservedAnchor> {
@@ -107,4 +133,8 @@ export class SolanaRpcChainReader implements ChainReader {
   async getFinalizedHeadSlot(): Promise<bigint> {
     return BigInt(await this.rpc.getSlot({ commitment: "finalized" }).send());
   }
+}
+
+function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
 }

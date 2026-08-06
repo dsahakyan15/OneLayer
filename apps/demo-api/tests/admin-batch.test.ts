@@ -94,6 +94,9 @@ test("an issued certificate verifies against the anchored batch", async () => {
 
   const signed = decodeCertificatePackageBase64url(issued.packageBase64url);
   const chain: ChainReader = {
+    async getRegistryConfig(body) {
+      return { registryIdHash: registryIdHash(body.registryId), paused: false };
+    },
     async getAnchor() {
       return {
         programId,
@@ -137,6 +140,9 @@ test("a tampered package byte fails verification", async () => {
   const bytes = Buffer.from(issued.packageBase64url, "base64url");
   bytes[bytes.length - 1] ^= 0x01;
   const chain: ChainReader = {
+    async getRegistryConfig(body) {
+      return { registryIdHash: registryIdHash(body.registryId), paused: false };
+    },
     async getAnchor() {
       return {
         programId,
@@ -198,6 +204,9 @@ function multiFieldBatch(source: SyntheticRecordRow[] = MULTI_FIELD) {
 
 function anchorReader(prepared: ReturnType<typeof buildBatch>): ChainReader {
   return {
+    async getRegistryConfig() {
+      return { registryIdHash: registryIdHash(REGISTRY_ID), paused: false };
+    },
     async getAnchor() {
       return {
         programId,

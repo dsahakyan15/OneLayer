@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+command=${1:-start}
+demo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$demo_dir/../.." && pwd)
+scripts="$demo_dir/scripts"
+native_root="$demo_dir/.runtime/native"
+postgres_data="$native_root/postgres"
+logs_dir="$native_root/logs"
+pids_dir="$native_root/pids"
+runtime=/dev/shm/onelayer-devnet-demo
+pg_port=${ONELAYER_NATIVE_PG_PORT:-55432}
+pg_user=onelayer_demo
+database=onelayer_demo
+database_url_file="$native_root/database-url"
+
+die() {
+  echo "native demo: $*" >&2
+  exit 1
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 is required"
+}
+
+require_command node
+require_command npm
+require_command curl
+require_command sha256sum
+
+pg_bin_dir=""
+if command -v brew >/dev/null 2>&1; then
+  brew_prefix=$(brew --prefix postgresql@17 2>/dev/null || true)
+  if [[ -x "$brew_prefix/bin/pg_ctl" ]]; then
+    pg_bin_dir="$brew_prefix/bin"
+  fi
+fi
+if [[ -z "$pg_bin_dir" ]] && command -v pg_ctl >/dev/null 2>&1; then
+  pg_bin_dir=$(dirname "$(command -v pg_ctl)")
+fi
+[[ -x "$pg_bin_dir/pg_ctl" ]] || die "PostgreSQL 17 is required; install it with: brew install postgresql@17"
+
+pg_ctl="$pg_bin_dir/pg_ctl"
+initdb="$pg_bin_dir/initdb"
+psql="$pg_bin_dir/psql"
+createdb="$pg_bin_dir/createdb"
+pg_isready="$pg_bin_dir/pg_isready"
+
+mkdir -p "$logs_dir" "$pids_dir"
+
+psql_db() {
+  local db=$1
+  shift
+  "$psql" -X -h 127.0.0.1 -p "$pg_port" -U "$pg_user" -d "$db" "$@"
+}
+
+postgres_running() {
+  "$pg_ctl" -D "$postgres_data" status >/dev/null 2>&1
+}
+
+service_pid() {
+  local name=$1
+  local pid_file="$pids_dir/$name.pid"
+  [[ -s "$pid_file" ]] || return 1
+  local pid
+  pid=$(<"$pid_file")
+  kill -0 "$pid" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$pid"
+}
+
+port_in_use() {
+  local port=$1
+  (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null
+}
+
+ensure_runtime() {
+  "$scripts/initialize-runtime" >/dev/null
+  mkdir -p "$native_root"
+  printf 'postgresql://%s@127.0.0.1:%s/%s\n' "$pg_user" "$pg_port" "$database" > "$database_url_file"
+  chmod 600 "$database_url_file"
+}
+
+ensure_node_dependencies() {
+  [[ -d "$repo_root/apps/demo-api/node_modules/pg" ]] || die "demo-api dependencies are missing; run npm --prefix apps/demo-api ci"
+  [[ -d "$repo_root/apps/verifier/node_modules/@solana/kit" ]] || die "verifier dependencies are missing; run npm --prefix apps/verifier ci"
+  [[ -d "$repo_root/apps/mvp-web/node_modules/next" ]] || die "mvp-web dependencies are missing; run npm --prefix apps/mvp-web ci"
+  [[ -d "$repo_root/packages/onchain-client/node_modules/@solana/kit" ]] || die "shared on-chain dependencies are missing; run npm --prefix packages/onchain-client ci"
+}
+
+ensure_postgres() {
+  if [[ ! -f "$postgres_data/PG_VERSION" ]]; then
+    mkdir -p "$postgres_data"
+    "$initdb" -D "$postgres_data" -U "$pg_user" --auth=trust --encoding=UTF8 --locale=C >/dev/null
+  fi
+  if ! postgres_running; then
+    "$pg_ctl" -D "$postgres_data" -l "$logs_dir/postgres.log" \
+      -o "-p $pg_port -h 127.0.0.1" start >/dev/null
+  fi
+  for _ in $(seq 1 60); do
+    if "$pg_isready" -h 127.0.0.1 -p "$pg_port" -U "$pg_user" -d postgres >/dev/null 2>&1; then
+      break
+    fi
+    sleep 1
+  done
+  "$pg_isready" -h 127.0.0.1 -p "$pg_port" -U "$pg_user" -d postgres >/dev/null \
+    || die "PostgreSQL did not become ready; see $logs_dir/postgres.log"
+
+  if [[ "$(psql_db postgres -Atqc "SELECT count(*) FROM pg_database WHERE datname='$database'")" != 1 ]]; then
+    "$createdb" -h 127.0.0.1 -p "$pg_port" -U "$pg_user" "$database"
+  fi
+}
+
+migrate_database() {
+  psql_db "$database" -v ON_ERROR_STOP=1 <<'SQL'
+CREATE TABLE IF NOT EXISTS schema_migration (
+  version TEXT PRIMARY KEY,
+  sha256 TEXT NOT NULL,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+SQL
+
+  for migration in "$repo_root"/db/migrations/*.sql; do
+    version=$(basename "$migration")
+    if [[ "$(psql_db "$database" -Atqc "SELECT count(*) FROM schema_migration WHERE version = '$version'")" == 0 ]]; then
+      digest=$(sha256sum "$migration" | cut -d' ' -f1)
+      psql_db "$database" -v ON_ERROR_STOP=1 -1 -f "$migration"
+      psql_db "$database" -v ON_ERROR_STOP=1 \
+        -c "INSERT INTO schema_migration(version, sha256) VALUES ('$version', '$digest')"
+    fi
+  done
+
+  psql_db "$database" -v ON_ERROR_STOP=1 -1 -f "$repo_root/db/fixtures/devnet-demo.sql"
+  marker=$(psql_db "$database" -Atqc "SELECT marker FROM demo_fixture_marker")
+  [[ "$marker" == ONELAYER_SYNTHETIC_DEVNET_DEMO_V1 ]] || die "native database fixture marker is missing"
+}
+
+ensure_ports() {
+  local port
+  for port in 8080 8090 8091; do
+    if port_in_use "$port"; then
+      case "$port" in
+        8080) service=verifier ;;
+        8090) service=demo-api ;;
+        8091) service=mvp-web ;;
+      esac
+      service_pid "$service" >/dev/null 2>&1 || die "127.0.0.1:$port is already in use; stop the other MVP services first"
+    fi
+  done
+}
+
+start_process() {
+  local name=$1
+  shift
+  if service_pid "$name" >/dev/null 2>&1; then
+    return
+  fi
+  rm -f "$pids_dir/$name.pid"
+  nohup setsid "$@" > "$logs_dir/$name.log" 2>&1 < /dev/null &
+  echo "$!" > "$pids_dir/$name.pid"
+}
+
+stop_process() {
+  local name=$1
+  local pid
+  pid=$(service_pid "$name" 2>/dev/null || true)
+  [[ -n "$pid" ]] || { rm -f "$pids_dir/$name.pid"; return; }
+  kill -- "-$pid" >/dev/null 2>&1 || kill "$pid" >/dev/null 2>&1 || true
+  for _ in $(seq 1 20); do
+    kill -0 "$pid" >/dev/null 2>&1 || break
+    sleep 0.25
+  done
+  rm -f "$pids_dir/$name.pid"
+}
+
+wait_for_http() {
+  local url=$1
+  for _ in $(seq 1 60); do
+    if curl --silent --fail --max-time 2 "$url" >/dev/null 2>&1; then
+      return
+    fi
+    sleep 1
+  done
+  echo "timed out waiting for $url" >&2
+  tail -80 "$logs_dir/${2:-demo-api}.log" >&2 2>/dev/null || true
+  exit 50
+}
+
+build_web() {
+  npm --prefix "$repo_root/apps/mvp-web" run build
+}
+
+start_stack() {
+  ensure_runtime
+  ensure_node_dependencies
+  ensure_ports
+  ensure_postgres
+  migrate_database
+  build_web
+
+  start_process demo-api env \
+    PORT=8090 \
+    ONELAYER_DATABASE_URL_FILE="$database_url_file" \
+    ONELAYER_INTERNAL_TOKEN_FILE="$runtime/internal-token" \
+    ONELAYER_RPC_URL=https://api.devnet.solana.com \
+    ONELAYER_VERIFIER_URL=http://127.0.0.1:8080 \
+    ONELAYER_PUBLIC_BASE_URL=http://127.0.0.1:8090 \
+    ONELAYER_PUBLIC_WEB_URL=http://127.0.0.1:8091 \
+    ONELAYER_PROGRAM_ID=6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo \
+    ONELAYER_ISSUER_SECRET_FILE="$runtime/issuer-secret" \
+    ONELAYER_ADMIN_CREDENTIALS_FILE="$runtime/admin-credentials.json" \
+    npm --prefix "$repo_root/apps/demo-api" start
+  wait_for_http http://127.0.0.1:8090/v1/health demo-api
+
+  start_process verifier env \
+    PORT=8080 \
+    ONELAYER_RPC_URL=https://api.devnet.solana.com \
+    ONELAYER_INCIDENT_INDEX_URL=http://127.0.0.1:8090 \
+    ONELAYER_LOOKUP_URL=http://127.0.0.1:8090 \
+    ONELAYER_MAX_INDEX_LAG_SLOTS=5000 \
+    ONELAYER_CORS_ALLOWED_ORIGIN=http://127.0.0.1:8091 \
+    npm --prefix "$repo_root/apps/verifier" start
+  wait_for_http http://127.0.0.1:8080/v1/health verifier
+
+  start_process mvp-web env \
+    PORT=8091 \
+    HOSTNAME=127.0.0.1 \
+    NODE_ENV=production \
+    NEXT_TELEMETRY_DISABLED=1 \
+    ONELAYER_ADMIN_API_URL=http://127.0.0.1:8090 \
+    ONELAYER_VERIFIER_URL=http://127.0.0.1:8080 \
+    npm --prefix "$repo_root/apps/mvp-web" start
+  wait_for_http http://127.0.0.1:8091/verify mvp-web
+
+  echo "Native MVP is running"
+  echo "Admin panel:  http://127.0.0.1:8091/admin"
+  echo "OneLayer panel: http://127.0.0.1:8091/verify"
+  echo "Demo credentials: $runtime/admin-credentials.json"
+  echo "Logs: $logs_dir"
+}
+
+stop_stack() {
+  stop_process mvp-web
+  stop_process verifier
+  stop_process demo-api
+  if postgres_running; then
+    "$pg_ctl" -D "$postgres_data" stop -m fast >/dev/null
+  fi
+}
+
+status_stack() {
+  printf 'postgres: '
+  if postgres_running; then echo running; else echo stopped; fi
+  for service in demo-api verifier mvp-web; do
+    printf '%s: ' "$service"
+    if service_pid "$service" >/dev/null 2>&1; then echo running; else echo stopped; fi
+  done
+  for endpoint in http://127.0.0.1:8090/v1/health http://127.0.0.1:8080/v1/health http://127.0.0.1:8091/verify; do
+    code=$(curl --silent --output /dev/null --write-out '%{http_code}' --max-time 2 "$endpoint" || true)
+    printf '%s %s\n' "$code" "$endpoint"
+  done
+}
+
+case "$command" in
+  start)
+    start_stack
+    ;;
+  stop|down)
+    stop_stack
+    ;;
+  restart)
+    stop_stack
+    start_stack
+    ;;
+  build)
+    build_web
+    ;;
+  migrate)
+    ensure_runtime
+    ensure_postgres
+    migrate_database
+    ;;
+  status)
+    status_stack
+    ;;
+  logs)
+    tail -f "$logs_dir/demo-api.log" "$logs_dir/verifier.log" "$logs_dir/mvp-web.log"
+    ;;
+  *)
+    echo "usage: deploy/devnet-demo/native [start|stop|restart|build|migrate|status|logs]" >&2
+    exit 2
+    ;;
+esac
