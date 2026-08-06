@@ -116,11 +116,11 @@ Recovery Plane
   ├─ threshold key holders
   └─ Recovery Toolkit
 
-Public Plane
+Internal Registry Plane
   ├─ Certificate Issuer
   ├─ QR / certificate package
-  ├─ Public Verifier
-  └─ API for banks/notaries
+  ├─ Internal Verifier
+  └─ Internal API for registry workstations
 ```
 
 ### 3.1. Компоненты
@@ -134,7 +134,7 @@ Public Plane
 | M5 | Anchor Publisher | HSM signing и отправка Solana-транзакции |
 | M6 | Solana Program | Проверка роли, sequence и запись root metadata |
 | M7 | Certificate Issuer | Подписанный certificate package и QR |
-| M8 | Public Verifier | Проверка certificate, proof и on-chain anchor |
+| M8 | Internal Verifier | Проверка certificate, proof и on-chain anchor; доступ только из сети рабочих компьютеров реестра |
 | M9 | Integrity Monitor | Независимое обнаружение out-of-process изменений |
 | M10 | Snapshot Coordinator | Создание и распределение encrypted replicas |
 | M11 | Recovery Toolkit | Проверка snapshots и восстановленных records |
@@ -717,7 +717,12 @@ QR не должен содержать открытые PII по умолчан
 
 ## 9. API
 
-### 9.1. Public API
+### 9.1. Internal Verification API
+
+Этот API не является public API, несмотря на HTTP/REST-формат. Его routes
+доступны только с управляемых рабочих компьютеров сотрудников реестра через
+private network/VPN. Public internet ingress запрещён; банки, нотариусы,
+покупатели и другие внешние лица не вызывают эти endpoints напрямую.
 
 | Method | Endpoint | Назначение |
 |---|---|---|
@@ -866,11 +871,14 @@ Monitor сравнивает:
 **Flow:** workflow подписан → DB изменена → CDC и workflow сопоставлены → canonical version → batch → finalized anchor → certificate.  
 **Acceptance:** запись попала в anchor не позднее SLA; sequence непрерывен; proof проходит проверку.
 
-### UC-02. Проверка QR владельцем
+### UC-02. Проверка QR сотрудником реестра
 
-**Actors:** владелец, Public Verifier.  
-**Flow:** scan QR → load/decode certificate → issuer signature → canonical hash → Merkle proof → Solana finalized anchor → incident check.  
-**Result:** historical validity и отдельный признак current status.
+**Actors:** сотрудник реестра; внешний заявитель передаёт документ или QR по
+утверждённому процессу.
+**Flow:** scan QR на управляемом рабочем компьютере → load/decode certificate → issuer signature → canonical hash → Merkle proof → Solana finalized anchor → incident check.
+**Result:** сотрудник получает historical validity и отдельный признак current
+status и передаёт заявителю только разрешённый результат. Прямого доступа
+заявителя к сайту нет.
 
 ### UC-03. Проверка при недоступном государственном backend
 
@@ -912,9 +920,14 @@ Governance публикует AlgorithmTransition, одновременно ра
 
 Import разбивается на deterministic batches, каждый имеет source cursor range, import job ID и signed manifest. До production выполняется полный reconciliation и sampling юридических дел.
 
-### UC-13. Банк проверяет объект
+### UC-13. Сотрудник реестра отвечает на запрос банка
 
-Банк получает consent/authorisation, отправляет certificate или selective proof, получает signed verification response. API не раскрывает больше данных, чем требуется цели проверки.
+Банк получает consent/authorisation и передаёт certificate или selective proof
+сотруднику реестра через утверждённый канал. Сотрудник выполняет проверку во
+внутреннем verifier и возвращает signed verification response или другой
+разрешённый отчёт. Банк не получает прямой сетевой доступ к OneLayer API и не
+может открыть QR URL самостоятельно; ответ не раскрывает больше данных, чем
+требуется цели проверки.
 
 ### UC-14. Открытие и закрытие инцидента
 
@@ -934,7 +947,10 @@ Governance отзывает OperatorRole, создаёт новую роль д�
 - workload identity вместо static secrets;
 - OIDC для операторов;
 - PAM/JIT access;
-- separate admin workstations;
+- separate managed registry workstations;
+- private network/VPN ingress only for `mvp-web`, Admin API и Internal Verifier;
+- device identity/allowlist на периметре; public internet ingress запрещён;
+- banks, notaries and other external parties have no direct site/API route;
 - egress allowlist для Publisher;
 - Publisher не имеет inbound-доступа из public network;
 - DB credentials read-only и ограничены schema/view.
@@ -1124,7 +1140,7 @@ Hash не объявляется анонимным автоматически. 
 - audited program;
 - HSM publisher;
 - mainnet anchors;
-- public verifier;
+- internal verifier;
 - certificate issuance on request;
 - incident workflow;
 - production observability.

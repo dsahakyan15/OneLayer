@@ -21,7 +21,7 @@ JSON/CSV сертификата пользователя
   → transaction review + Wallet Standard signature
   → finalized anchor
   → signed CertificatePackageV1 + QR
-  → публичная проверка OneLayer
+  → внутренняя проверка OneLayer сотрудником реестра
 ```
 
 Параллельно Admin должен поддерживать bounded local backup/recovery flow:
@@ -77,7 +77,7 @@ proof, finalized anchor и incident status.
 
 | ID | Задача | Состояние |
 |---|---|---|
-| `OL-C-21` | Один Next.js App Router client `apps/mvp-web` с закрытой Admin-панелью и публичной OneLayer-панелью, общими tokens/status components и разными trust boundaries. | готово |
+| `OL-C-21` | Один Next.js App Router client `apps/mvp-web` с закрытой Admin-панелью и закрытой OneLayer-панелью; обе доступны только с управляемых рабочих компьютеров реестра, с общими tokens/status components и разными trust boundaries. | UI готово; deployment boundary обязательна |
 | `OL-C-22` | Admin: список/детали записей, ручной ввод/JSON-import и preview canonical payload, disclosed fields, commitments и batch leaf; `certificateHash` только после finalized package. | готово |
 | `OL-C-23` | Transaction review: program ID, instruction, accounts с signer/writable flags, registry, segment PDA, batch, roots, fee payer, fee/rent, simulation logs; RPC accounts проверяются по owner, длине и discriminator. | готово |
 | `OL-C-24` | Wallet Standard для test operator на `solana:devnet`; browser подписывает только точное prepared message, keypair/seed в UI отсутствуют, signed transaction передаётся единственному durable publisher. | готово |
@@ -101,7 +101,7 @@ proof, finalized anchor и incident status.
 | `OL-C-37` | Импорт JSON (`internalRecordId` + `fields`) и CSV; построчная валидация, dry-run, отчёт строки/пути и идемпотентный upsert новой версии. | готово |
 | `OL-C-38` | Динамические canonical metadata: field tree из фактических полей, per-field commitments, `fieldRoot`, `recordCommitment`, batch leaf; общий источник для builder, reconcile и fixture. | готово |
 | `OL-C-39` | `SELECTIVE_FIELDS`: в package попадают только выбранные значения, соли и field proofs; `fieldRoot` и anchor не меняются; `FULL_RECORD` остаётся default. | готово |
-| `OL-C-40` | Динамический QR и публичная карточка: QR строится из выданного package только при `RegistryConfig.paused = false`; UI показывает только доказанные раскрытые поля и cluster/slot/signature. | готово |
+| `OL-C-40` | Динамический QR и внутренняя карточка: QR строится из выданного package только при `RegistryConfig.paused = false`; UI показывает только доказанные раскрытые поля и cluster/slot/signature. | готово |
 | `OL-C-41` | Полный UI-контур: dashboard с фактическими метриками, record/certificate details, incident panel и «как это работает»; навигация покрывает use cases. | готово |
 
 ### 2.4. Backup и recovery control plane
@@ -159,11 +159,16 @@ proof, finalized anchor и incident status.
 - QR содержит `URL + certificateId + certificateHash`, но не данные записи.
 - Рабочий registry — это существующий on-chain `RegistryConfig` с
   `paused = false`. QR нельзя выдать, получить, открыть или проверить, пока
-  registry paused; Admin API, public QR routes и независимый verifier обязаны
-  проверять этот флаг и возвращать `REGISTRY_PAUSED` (или fail-closed при
-  недоступном config).
-- Публичная карточка получает значения только из проверенного package, а не из
-  БД; нераскрытые поля не подменяются плейсхолдерами.
+  registry paused; Admin API, внутренние QR routes и независимый verifier
+  обязаны проверять этот флаг и возвращать `REGISTRY_PAUSED` (или fail-closed
+  при недоступном config).
+- Внутренняя карточка получает значения только из проверенного package, а не
+  из БД; нераскрытые поля не подменяются плейсхолдерами.
+- OneLayer — закрытый сайт реестра. Admin, QR, package, metadata, certificate
+  detail и verification routes доступны только с управляемых рабочих
+  компьютеров сотрудников реестра через private network/VPN. Публичный
+  internet ingress запрещён; банк, нотариус, покупатель и любое другое
+  внешнее лицо не получают прямой сетевой доступ к сайту.
 - Локальный MVP принимает только loopback HTTP с заметкой
   `DEVNET SYNTHETIC DEMO`; остальные HTTP origins отклоняются. Нормативный
   транспорт — HTTPS.
@@ -171,11 +176,12 @@ proof, finalized anchor и incident status.
   и содержит watermark. Недоступный или устаревший индекс не может дать
   зелёный `VERIFIED` и приводит к `VERIFIED_NO_INCIDENT_CHECK`.
 
-### 3.3. UI, роли и публикация
+### 3.3. UI, роли, публикация и граница доступа
 
 Один `apps/mvp-web` содержит route groups Admin и OneLayer. Wallet hooks живут
-только в client leaf-components; публичная проверка wallet не требует.
-Внутренние API доступны браузеру через same-origin proxy, без широкого CORS.
+только в client leaf-components; проверка выполняется сотрудником реестра с
+управляемого рабочего компьютера. Внутренние API доступны браузеру через
+same-origin proxy, без широкого CORS и без публичного ingress.
 
 Роли:
 
@@ -240,8 +246,14 @@ custodians и не закрывают release gate 7.
 4a. Certificate QR выдаётся и принимается только для рабочего registry:
     `RegistryConfig` существует и имеет `paused = false`; при pause issuance,
     QR endpoints и verifier возвращают `REGISTRY_PAUSED`.
-5. Camera/image/manual QR flow в fresh browser context даёт `VERIFIED`;
-   cross-device scan проверяется только на отдельно разрешённом HTTPS staging.
+4b. Сайт и все его Admin/QR/package/metadata/verification routes доступны
+    только с управляемых рабочих компьютеров сотрудников реестра через
+    private network/VPN; public internet ingress отсутствует. Банк, нотариус,
+    покупатель и другое внешнее лицо не могут открыть сайт или вызвать эти
+    routes напрямую. Это отдельное deployment/security acceptance criterion и
+    не заменяется скрытием кнопок, CORS или demo login.
+5. Camera/image/manual QR flow на управляемом рабочем компьютере даёт
+   `VERIFIED`; доступ с внешнего устройства и из public internet отклоняется.
 6. QR/package/field tampering даёт `INVALID`, direct synthetic DB tampering —
    `DISPUTED`; stale/unavailable incident index — `VERIFIED_NO_INCIDENT_CHECK`;
    есть fixtures для `VERIFIED_HISTORICAL` и `SUPERSEDED`.
@@ -269,8 +281,8 @@ custodians и не закрывают release gate 7.
 16. `SELECTIVE_FIELDS` даёт `VERIFIED` для подмножества путей; package не
     содержит значения/соли нераскрытых путей, а root/proofs совпадают с
     `FULL_RECORD` той же версии.
-17. Public certificate detail показывает ровно поля из проверенного package и
-    не читает значения в обход package.
+17. Internal certificate detail показывает ровно поля из проверенного package
+    и не читает значения в обход package.
 18. Все сценарии `docs/use-cases-ru.md`, кроме явных CLI-only исключений,
     доступны из UI; dashboard показывает фактические API-метрики.
 19. Backup Admin показывает пять стартовых центров, folders, health и
@@ -304,7 +316,7 @@ packages/onchain-client/      # checked-in Codama/Kit client
 packages/snapshot-ts/         # SnapshotPackageV1 и threshold recovery
 apps/pilot-pipeline/          # один процесс с логическими модулями
 apps/demo-api/                # Admin HTTP runtime и backup/recovery
-apps/mvp-web/                 # Admin + public OneLayer
+apps/mvp-web/                 # internal Admin + OneLayer
 apps/verifier/                # REST verifier
 tests/e2e/                    # integration smoke
 tests/e2e-web/                # deterministic browser E2E
@@ -319,10 +331,11 @@ docs/adr/
 |---|---|
 | Pipeline | вызовы функций в одном процессе, PostgreSQL transactions |
 | Pipeline → Publisher | `publish_queue` с claim/lease |
-| Browser → `mvp-web` | same-origin HTTPS; точный loopback HTTP только для demo |
+| Browser → `mvp-web` | same-origin HTTPS from a managed registry workstation over private network/VPN; точный loopback HTTP только для demo |
 | `mvp-web` → API/verifier | server-side same-origin proxy, loopback HTTP |
 | Publisher → Solana | allowlisted devnet JSON-RPC |
-| Public verifier | REST |
+| Internal verifier | REST, reachable only from the registry network |
+| External parties | no direct route; verification result is shared by registry staff |
 
 В MVP не вводятся gRPC/protobuf и новые процессы без подтверждённой границы
 развёртывания или владения. WORM используется для immutable manifest/evidence,
@@ -406,7 +419,8 @@ Fixture-only recovery остаётся demo/prototype-частью и не за�
 
 ## 9. Связанные документы
 
-- `IMPLEMENTATION_PLAN.md` — исходный общий план; оставлен без изменений.
+- `IMPLEMENTATION_PLAN.md` — исходный общий план и общая внутренняя граница
+  доступа сайта.
 - `CONTEXT.md` — термины Certificate Package, Record Version, Anchor, Snapshot,
   BackupCenter, Recovery Share и Restore Approval.
 - `docs/adr/0003-visual-mvp-boundaries.md` — границы и отклонения визуального
@@ -415,6 +429,8 @@ Fixture-only recovery остаётся demo/prototype-частью и не за�
   `CertificatePackageV1`, не в Solana.
 - `docs/adr/0005-mvp-backup-centers-and-recovery.md` — пять локальных центров и
   threshold recovery.
+- `docs/adr/0006-internal-site-access-boundary.md` — доступ к сайту только с
+  управляемых рабочих компьютеров реестра.
 - `docs/use-cases-ru.md` — пользовательские сценарии MVP.
 - `docs/presentation-ru.md` — объяснение потока и границ для презентации.
 - `deploy/devnet-demo/README.md` — запуск native demo-контура.
