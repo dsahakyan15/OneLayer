@@ -1,0 +1,17 @@
+# Ticket 16 — explicit software writer key and durable version binding
+
+Date: 2026-10-01. DeepSeek v4.1 Flash / max reasoning worker plus coordinator integration. No commit or production provisioning.
+
+`ONELAYER_SNAPSHOT_KEK_FILE` and `ONELAYER_SNAPSHOT_KEY_VERSION` are an explicit pair. The file contains exactly 32 binary bytes and must be a private regular file. The loader refuses symlinks, FIFO/directory files, group/other access, oversized/short content, partial or explicitly empty configuration and malformed version labels; errors disclose neither path nor key material. Both variables absent keep the API available but backup creation returns 503 SNAPSHOT_KEY_UNAVAILABLE before fixture creation or state reads. The issuer signing key is no longer a snapshot-key fallback, and main no longer generates and splits a fresh writer KEK on each startup.
+
+Migration 0018 and `snapshot-key-store.ts` bind (registry, key version) to a domain-separated material fingerprint. Main awaits this registration before listening. Restart with the same material/version succeeds; different material under the same version fails; rotation appends a new version and preserves old bindings. Concurrent first registrations have one winner. UPDATE/DELETE/TRUNCATE bindings are refused by triggers. This is software integrity bookkeeping; a database owner can disable triggers, so production runtime privileges remain a separate provisioning gate.
+
+Evidence completed before final broad checks: API typecheck PASS, worker unit 130 PASS; lifecycle 2 PASS; coordinator binding 2 PASS; admin-access 1 PASS, durable-admin-http 1 PASS, OIDC session 3 PASS, service-read-http 2 PASS. Coordinator later added two session-view tests; final counts are in the continuation report. Child API integration installs and asserts the shared local-network-only preload before importing main.
+
+The lifecycle test encrypts a snapshot, restarts the real API with the same explicit key, and restores with threshold shares against disposable PostgreSQL. Binding tests use separate child processes for restart checks and separate database connections for the conflicting-registration race. No live storage centers, on-chain checkpoint completeness or isolated production restore are claimed.
+
+Open: holder ceremony, identity-checked KMS/HSM, key-provider isolation, complete rotation/retention policy, separate Recovery Controller and full-state restore. The ordinary API still has legacy recovery/restore-approval machinery; this increment does not close ticket 17. Production keys must be provisioned outside this repository's mount, whose file modes are not suitable for private key storage.
+
+2026-10-02 DeepSeek max review identified inherited runtime UPDATE/DELETE privileges. Additive migration 0019 revokes those privileges and TRUNCATE, preserving 0018. Actual SET ROLE regression confirms SELECT/INSERT still work and destructive statements fail at the ACL. Focused key+checksum regressions 9/9 PASS; API typecheck PASS. See the [continuation report](../continuation-2026-10-01.md) for final review disposition.
+
+Final 2026-10-02 disposition: DeepSeek max review/cross-review completed; original findings corrected and validated. Coordinated affected browser suites 92/92 PASS, focused key/checksum 9/9 PASS, additional selective/scalar/retry coverage PASS. Full production/restart acceptance remains open. See [final continuation report](../continuation-2026-10-01.md).
