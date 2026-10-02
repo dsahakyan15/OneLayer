@@ -83,6 +83,10 @@ Development agents не получают production KEK/shares/private keys и �
 
 ## 7. Существующие проверки
 
+Перед созданием или обновлением PR проверяй точный состав ветки в чистом checkout/worktree и выполняй относящиеся к изменению команды из текущего `.github/workflows/ci.yml`. Установленные зависимости соседнего локального проекта могут скрыть ошибки CI: verifier импортирует source `packages/onchain-client`, поэтому `npm ci` в этом package должен выполняться до verifier tests/typecheck. Не исправляй отсутствие зависимостей ослаблением strict TypeScript или ручной правкой generated client.
+
+В PR укажи реально выполненные проверки и ограничения. После push проверь GitHub checks; локальный PASS и remote PASS фиксируй отдельно. Не объявляй CI успешным, пока есть failed или pending checks.
+
 Выбирай команды по затронутому scope, затем обязательные CI gates. На дату плана существуют:
 
 ```bash

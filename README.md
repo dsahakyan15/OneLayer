@@ -4,7 +4,7 @@
 
 The full English desktop launcher is unfinished. Its normal startup exposes only Overview, Connection and local service checks; it cannot configure a connection, sign in or open role workspaces. Separate web/API modules are partially implemented, but workflow publication/certificate handoff and real full-state restore remain incomplete.
 
-See [what works and what remains](docs/implementation-status-2026-10-02.md) and the [usage-pipeline review](.scratch/production-desktop/evidence/launcher-usage-pipeline-review-2026-10-02.md). This documents the local working tree; this documentation-only PR does not ship the uncommitted implementation. The demo flow below describes the legacy devnet pilot, not a completed desktop application.
+See [what works and what remains](docs/implementation-status-2026-10-02.md) and the [usage-pipeline review](.scratch/production-desktop/evidence/launcher-usage-pipeline-review-2026-10-02.md). This documents the local working tree; this documentation and CI-order PR does not ship the uncommitted implementation. The demo flow below describes the legacy devnet pilot, not a completed desktop application.
 
 OneLayer is a verifiable land-registry pilot for Solana devnet. It validates a
 record, builds a Merkle batch, anchors the batch on-chain, issues a signed

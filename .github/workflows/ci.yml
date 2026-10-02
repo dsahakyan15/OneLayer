@@ -16,6 +16,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # Verifier source imports the generated client directly. Install its
+      # dependencies before verifier tests/typecheck resolve those imports.
+      - run: npm ci
+        working-directory: packages/onchain-client
       - run: cargo test --all
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo fmt --all -- --check
@@ -39,8 +43,6 @@ jobs:
         working-directory: packages/snapshot-ts
       - run: npm test
         working-directory: packages/snapshot-ts
-      - run: npm ci
-        working-directory: packages/onchain-client
       - run: npm run check-drift
         working-directory: packages/onchain-client
       - run: npm run typecheck
