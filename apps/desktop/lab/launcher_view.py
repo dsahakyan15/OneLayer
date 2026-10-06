@@ -309,6 +309,7 @@ class LauncherView:
         page.set_valign(Gtk.Align.START)
         page.pack_start(self._session_control_card(), False, False, 0)
         page.pack_start(self._live_pages.connection_card, False, False, 0)
+        page.pack_start(self._live_pages.setup_card, False, False, 0)
         return _scrolled(page)
 
     def _session_control_card(self):

@@ -260,12 +260,47 @@ build_web() {
   npm --prefix "$repo_root/apps/mvp-web" run build
 }
 
+# Record which registry namespace this stack is actually serving. A reuse of a
+# running stack must verify this identity: a request for an isolated namespace
+# must never silently bind to a legacy-namespace stack (ADR-0010).
+record_stack_identity() {
+  node - "$pids_dir/stack-identity.json" "${ONELAYER_REGISTRY_ID:-gov.registry.land}" "${ONELAYER_SYNTHETIC_PROFILE:-}" <<'NODE'
+const fs = require('node:fs');
+const [file, registryId, syntheticProfile] = process.argv.slice(2);
+const identity = {
+  schema: "onelayer.stack-identity.v1",
+  registryId,
+  syntheticProfile: syntheticProfile === "1" || syntheticProfile === "true",
+  recordedAt: new Date().toISOString(),
+};
+fs.writeFileSync(file, `${JSON.stringify(identity)}\n`, { mode: 0o600 });
+NODE
+}
+
+# The synthetic demo trust policy has a 30-day validity. When it expires (or no
+# longer authorizes this deployment) the documented rotation is to move the old
+# policy aside and provision a fresh one; create-demo-trust-policy.ts refuses to
+# overwrite. This is local policy-file management — it never signs or sends a
+# chain transaction and never touches the legacy registry config.
+rotate_expired_trust_policy() {
+  local policy_file="$native_root/verifier-trust-policy.json"
+  [[ -f "$policy_file" ]] || return 0
+  if node --experimental-transform-types "$repo_root/apps/verifier/scripts/create-demo-trust-policy.ts" \
+      "$runtime/issuer-secret" "$policy_file" "$verifier_trust_state" >/dev/null 2>&1; then
+    return 0
+  fi
+  local retired="$policy_file.retired-$(date -u +%Y%m%dT%H%M%SZ)"
+  mv "$policy_file" "$retired"
+  echo "native demo: demo trust policy expired or stale; retired to $(basename "$retired") and re-provisioning" >&2
+  node --experimental-transform-types "$repo_root/apps/verifier/scripts/create-demo-trust-policy.ts" \
+    "$runtime/issuer-secret" "$policy_file" "$verifier_trust_state"
+}
+
 start_stack() {
   ensure_private_state
   ensure_runtime
   ensure_node_dependencies
-  node --experimental-transform-types "$repo_root/apps/verifier/scripts/create-demo-trust-policy.ts" \
-    "$runtime/issuer-secret" "$native_root/verifier-trust-policy.json" "$verifier_trust_state"
+  rotate_expired_trust_policy
   ensure_ports
   ensure_postgres
   migrate_database
@@ -281,10 +316,12 @@ start_stack() {
     ONELAYER_PUBLIC_BASE_URL=http://127.0.0.1:8090 \
     ONELAYER_PUBLIC_WEB_URL=http://127.0.0.1:8091 \
     ONELAYER_PROGRAM_ID=6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo \
+    ONELAYER_REGISTRY_ID="${ONELAYER_REGISTRY_ID:-gov.registry.land}" \
     ONELAYER_ISSUER_SECRET_FILE="$runtime/issuer-secret" \
     ONELAYER_ADMIN_CREDENTIALS_FILE="$runtime/admin-credentials.json" \
     npm --prefix "$repo_root/apps/demo-api" start
   wait_for_http http://127.0.0.1:8090/v1/health demo-api
+  record_stack_identity
 
   start_process verifier env \
     PORT=8080 \

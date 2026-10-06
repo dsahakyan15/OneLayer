@@ -127,6 +127,7 @@ class LiveDemoController:
         qr_decoder: Any,
         mode: str = "live",
         emit: Callable[[str, Mapping[str, Any]], None] | None = None,
+        setup: Any = None,
     ):
         if mode not in ("live", "fixture"):
             raise ValueError("mode must be live or fixture")
@@ -135,6 +136,7 @@ class LiveDemoController:
         self._qr = qr_decoder
         self._mode = mode
         self._emit_fn = emit
+        self._setup = setup
         self._lock = threading.RLock()
         self._busy: str | None = None
         self._generation = 0
@@ -153,6 +155,7 @@ class LiveDemoController:
         self._report: VerificationReport | None = None
         self._verify_pending = False
         self._error: dict[str, str] | None = None
+        self._setup_assessment: dict[str, Any] | None = None
 
     # -- construction helpers ---------------------------------------------
 
@@ -196,8 +199,13 @@ class LiveDemoController:
         """Everything the pages render. Contains no secret material."""
         with self._lock:
             review = self._review
+            profile = self._api.profile
             return {
                 "mode": self._mode,
+                "registryId": profile.registry_id,
+                "namespaceLabel": profile.namespace_label,
+                "namespaceDetail": profile.namespace_detail,
+                "legacyRegistry": profile.is_legacy_registry,
                 "sessionState": self._session_state,
                 "operatorAddress": self._operator_address,
                 "session": self._api.session_summary.as_dict() if self._api.session_summary else None,
@@ -211,6 +219,8 @@ class LiveDemoController:
                 "savedPackage": self._saved_package,
                 "savedQr": self._saved_qr,
                 "report": self._report.as_dict() if self._report is not None else None,
+                "setupAvailable": self.setup_available,
+                "setup": dict(self._setup_assessment) if self._setup_assessment else None,
                 "error": dict(self._error) if self._error is not None else None,
                 "busy": self._busy,
             }
@@ -284,6 +294,8 @@ class LiveDemoController:
             OPERATION_SAVE_PACKAGE: self.save_package,
             OPERATION_SAVE_QR: self.save_qr,
             OPERATION_VERIFY: self.verify_file,
+            "assess_setup": self.assess_setup,
+            "prepare_setup": self.prepare_setup,
         }.get(operation)
         if handler is None:
             raise ControllerError("UNKNOWN_OPERATION")
@@ -377,6 +389,41 @@ class LiveDemoController:
             self._verify_pending = False
             self._error = None
         self._emit("session", {"state": "signed-out"})
+
+    # -- devnet setup (ADR-0010) -----------------------------------------
+    #
+    # Read-only assessment and explicitly-approved preparation. Nothing here
+    # runs automatically: `prepare_setup` is only ever called after the
+    # operator has seen `planned_action_summary` and pressed confirm.
+
+    @property
+    def setup_available(self) -> bool:
+        return self._setup is not None and self._mode == "live"
+
+    def assess_setup(self):
+        """Read-only chain assessment. Never signs or sends a transaction."""
+        if not self.setup_available:
+            raise ControllerError("SETUP_UNAVAILABLE")
+        assessment = self._setup.assess()
+        with self._lock:
+            self._setup_assessment = assessment.as_dict()
+        self._emit("setup", {"assessment": assessment.as_dict()})
+        return assessment
+
+    def prepare_setup(self):
+        """Idempotent chain preparation. Requires explicit user confirmation.
+
+        The caller must have already shown `planned_action_summary` and gotten
+        an explicit approve click. The seed's own pre-mutation gate still
+        refuses a missing authority before the first chain mutation.
+        """
+        if not self.setup_available:
+            raise ControllerError("SETUP_UNAVAILABLE")
+        assessment = self._setup.prepare()
+        with self._lock:
+            self._setup_assessment = assessment.as_dict()
+        self._emit("setup", {"assessment": assessment.as_dict()})
+        return assessment
 
     # -- records ----------------------------------------------------------
 

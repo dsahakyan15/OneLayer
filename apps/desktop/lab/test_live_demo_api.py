@@ -45,6 +45,7 @@ from live_demo_api import (  # noqa: E402
     VerificationReport,
     certificate_body_cbor,
     certificate_hash_hex,
+    configured_registry_id,
     decode_certificate_package,
     normalize_verification_result,
     parse_qr_payload,
@@ -432,6 +433,27 @@ class NormalizationTests(unittest.TestCase):
         self.assertEqual(report.code, "VERIFICATION_STATUS_UNKNOWN")
         self.assertEqual(report.disclosed_fields, {})
 
+    def test_verifier_unknown_lifecycle_stays_unknown_not_verified(self):
+        # The /v2 verifier's deliberate answer (backend contract §4): no
+        # complete authenticated lifecycle source exists. It must never be
+        # displayed as verified or current, and must stay distinct from INVALID.
+        payload = {
+            "status": "UNKNOWN",
+            "certificateId": CERT_ID,
+            "lifecycle": {"status": "UNAUTHENTICATED"},
+            "disclosureMode": "SELECTIVE_FIELDS",
+            "disclosedFields": {"status": "ACTIVE"},
+        }
+        report = normalize_verification_result(payload)
+        self.assertEqual(report.status, "UNKNOWN")
+        self.assertFalse(report.is_verified)
+
+    def test_revoked_is_never_current(self):
+        payload = {"status": "REVOKED", "certificateId": CERT_ID}
+        report = normalize_verification_result(payload)
+        self.assertEqual(report.status, "REVOKED")
+        self.assertFalse(report.is_verified)
+
     def test_verified_no_incident_check_is_never_promoted(self):
         payload = {
             "status": "VERIFIED_NO_INCIDENT_CHECK",
@@ -549,12 +571,49 @@ class ProfileTests(unittest.TestCase):
                 LiveDemoProfile(**kwargs)
 
     def test_foreign_registry_is_refused(self):
+        # ADR-0010: an explicitly configured isolated namespace is legitimate
+        # (same deployed program, new config PDA). Only malformed ids refuse.
         with self.assertRaises(ValueError):
             LiveDemoProfile(
                 demo_api_origin="http://127.0.0.1:8090",
                 verifier_origin="http://127.0.0.1:8080",
-                registry_id="evil.registry",
+                registry_id="not a registry id",
             )
+        with self.assertRaises(ValueError):
+            LiveDemoProfile(
+                demo_api_origin="http://127.0.0.1:8090",
+                verifier_origin="http://127.0.0.1:8080",
+                registry_id="",
+            )
+
+    def test_isolated_namespace_is_accepted_and_labeled(self):
+        profile = LiveDemoProfile(
+            demo_api_origin="http://127.0.0.1:8090",
+            verifier_origin="http://127.0.0.1:8080",
+            registry_id="demo.synthetic.onelayer",
+        )
+        self.assertEqual(profile.registry_id, "demo.synthetic.onelayer")
+        self.assertFalse(profile.is_legacy_registry)
+        self.assertIn("Synthetic", profile.namespace_label)
+        self.assertIn("Not the production registry", profile.namespace_detail)
+
+    def test_legacy_namespace_is_the_default_and_is_labeled(self):
+        profile = LiveDemoProfile(
+            demo_api_origin="http://127.0.0.1:8090",
+            verifier_origin="http://127.0.0.1:8080",
+        )
+        self.assertEqual(profile.registry_id, "gov.registry.land")
+        self.assertTrue(profile.is_legacy_registry)
+        self.assertIn("Legacy", profile.namespace_label)
+
+    def test_configured_registry_id_reads_env_explicitly(self):
+        self.assertEqual(configured_registry_id({}), "gov.registry.land")
+        self.assertEqual(
+            configured_registry_id({"ONELAYER_REGISTRY_ID": "demo.synthetic.onelayer"}),
+            "demo.synthetic.onelayer",
+        )
+        with self.assertRaises(ValueError):
+            configured_registry_id({"ONELAYER_REGISTRY_ID": "bad id!"})
 
 
 # --------------------------------------------------------------------------

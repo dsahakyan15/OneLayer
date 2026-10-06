@@ -19,6 +19,7 @@ Honesty rules enforced here:
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -43,6 +44,11 @@ STATUS_STYLES = {
     "SUPERSEDED": ("status-warn", "chip-warn"),
     "DISPUTED": ("status-warn", "chip-warn"),
     "INVALID": ("status-bad", "chip-bad"),
+    # The verifier's /v2 vocabulary. ``UNKNOWN`` is the honest lifecycle answer
+    # (no complete authenticated lifecycle source) and must never be green.
+    "UNKNOWN": ("status-warn", "chip-warn"),
+    "REVOKED": ("status-bad", "chip-bad"),
+    "HISTORICAL": ("status-warn", "chip-warn"),
 }
 PUBLISH_CHIPS = {
     "idle": ("chip-idle", "Not prepared"),
@@ -126,6 +132,7 @@ class LiveDemoPages:
 
     def _build(self) -> None:
         self.connection_card = self._build_connection_card()
+        self.setup_card = self._build_setup_card()
         self.records_page = self._build_records_page()
         self.publish_page = self._build_publish_page()
         self.certificates_page = self._build_certificates_page()
@@ -157,10 +164,16 @@ class LiveDemoPages:
         """
         return self._banner()
 
-    def _banner_text(self) -> str:
-        fixture = self._controller.mode == "fixture"
-        return ("FIXTURE DATA — synthetic test backends, not live devnet"
+    def _banner_text(self, snapshot: Mapping[str, Any] | None = None) -> str:
+        fixture = (snapshot or {}).get("mode") == "fixture" if snapshot is not None \
+            else self._controller.mode == "fixture"
+        base = ("FIXTURE DATA — synthetic test backends, not live devnet"
                 if fixture else "Local devnet · synthetic demo data only")
+        if snapshot is not None:
+            registry_id = snapshot.get("registryId")
+            if isinstance(registry_id, str) and registry_id:
+                base += " · registry " + registry_id
+        return base
 
     def _banner(self) -> Gtk.Box:
         row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
@@ -182,9 +195,15 @@ class LiveDemoPages:
         grid = Gtk.Grid()
         grid.set_column_spacing(12)
         grid.set_row_spacing(6)
-        _kv_row(grid, 0, "Operator", "operator (test operator of the demo registry)")
-        _kv_row(grid, 1, "Password", "read from /dev/shm at sign-in · never typed, shown or logged")
+        grid.attach(_label("Namespace", "subtle"), 0, 0, 1, 1)
+        self.namespace_value = _label("—", "value", wrap=True, max_chars=52)
+        self.namespace_value.set_selectable(True)
+        grid.attach(self.namespace_value, 1, 0, 1, 1)
+        _kv_row(grid, 1, "Operator", "operator (test operator of the demo registry)")
+        _kv_row(grid, 2, "Password", "read from /dev/shm at sign-in · never typed, shown or logged")
         card.pack_start(grid, False, False, 0)
+        self.namespace_detail_label = _label("", "subtle", wrap=True)
+        card.pack_start(self.namespace_detail_label, False, False, 0)
         buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         self.sign_in_button = Gtk.Button.new_with_mnemonic("_Sign in")
         _add_classes(self.sign_in_button, "accent")
@@ -205,6 +224,186 @@ class LiveDemoPages:
         self.connection_error = _label("", "subtle", wrap=True)
         card.pack_start(self.connection_error, False, False, 0)
         return card
+
+    def _build_setup_card(self) -> Gtk.Widget:
+        """Devnet chain setup (ADR-0010): read-only assessment and explicit
+        approval before any transaction is signed or sent."""
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        _add_classes(card, "card")
+        card.pack_start(_label("Devnet setup", "card-title"), False, False, 0)
+        card.pack_start(_label(
+            "Chain preparation (initialize_registry, grant_operator, fund_operator, "
+            "create_ledger_segment) is never run automatically. Check the setup "
+            "first; approving sends real devnet transactions and requires your "
+            "explicit confirmation.", "subtle", wrap=True), False, False, 0)
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.setup_check_button = Gtk.Button.new_with_mnemonic("C_heck setup (read-only)")
+        _add_classes(self.setup_check_button, "ghost")
+        self.setup_check_button.connect("clicked", lambda _w: self._on_setup_check())
+        buttons.pack_start(self.setup_check_button, False, False, 0)
+        self.setup_prepare_button = Gtk.Button.new_with_mnemonic("_Review and prepare…")
+        _add_classes(self.setup_prepare_button, "accent")
+        self.setup_prepare_button.set_sensitive(False)
+        self.setup_prepare_button.connect("clicked", lambda _w: self._on_setup_prepare())
+        buttons.pack_start(self.setup_prepare_button, False, False, 0)
+        card.pack_start(buttons, False, False, 0)
+        self.setup_status = _label("Not checked.", "subtle", wrap=True)
+        card.pack_start(self.setup_status, False, False, 0)
+        self.setup_steps_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        card.pack_start(self.setup_steps_box, False, False, 0)
+        self.setup_error = _label("", "subtle", wrap=True)
+        card.pack_start(self.setup_error, False, False, 0)
+        return card
+
+    def _on_setup_check(self) -> None:
+        if self._busy:
+            return
+        self._run_setup_operation("assess_setup")
+
+    def _on_setup_prepare(self) -> None:
+        """Explicit confirmation before any chain mutation.
+
+        Shows the concrete planned actions and requires a deliberate approve
+        click. Nothing is signed or sent without it.
+        """
+        if self._busy:
+            return
+        assessment = self._controller.snapshot().get("setup")
+        if not isinstance(assessment, dict):
+            self.setup_status.set_text("Check the setup first.")
+            return
+        summary = self._setup_summary_text(assessment)
+        confirmed = self._confirm_setup(summary)
+        if not confirmed:
+            self.setup_status.set_text("Preparation cancelled. No transaction was sent.")
+            return
+        self._run_setup_operation("prepare_setup")
+
+    def _confirm_setup(self, summary: str) -> bool:
+        """Modal confirmation. Overridable in tests (``_confirm_setup`` seam)."""
+        dialog = Gtk.MessageDialog(
+            transient_for=self._window,
+            flags=0,
+            message_type=Gtk.MessageType.WARNING,
+            buttons=Gtk.ButtonsType.OK_CANCEL,
+            text="Approve devnet chain setup?",
+        )
+        dialog.format_secondary_text(summary)
+        response = dialog.run()
+        dialog.destroy()
+        return response == Gtk.ResponseType.OK
+
+    @staticmethod
+    def _setup_summary_text(assessment: Mapping[str, Any]) -> str:
+        """Concrete action summary shown before the approve click."""
+        lines = [
+            "Cluster: {0}".format(assessment.get("cluster")),
+            "Program: {0}".format(assessment.get("programId")),
+            "Registry: {0}".format(assessment.get("registryId")),
+            "Config PDA: {0}".format(assessment.get("configPda")),
+            "",
+            "Planned actions:",
+        ]
+        planned = [s for s in (assessment.get("steps") or [])
+                   if isinstance(s, dict) and s.get("actionKind")]
+        if not planned:
+            lines.append("  (none — every step is already satisfied)")
+        for step in planned:
+            lines.append("  [{0}] {1}".format(step.get("status"), step.get("actionKind")))
+            if step.get("requiredSigner"):
+                lines.append("      signer: {0}".format(step.get("requiredSigner")))
+        codes = assessment.get("blockerCodes") or []
+        if codes:
+            lines.append("")
+            lines.append("Blockers: {0}".format(", ".join(str(c) for c in codes)))
+            if "GOVERNANCE_KEY_UNAVAILABLE" in codes:
+                lines.append(
+                    "The legacy registry's governance authority is permanently lost; "
+                    "governance-signed setup cannot run on this namespace.")
+        lines.append("")
+        lines.append("Approving sends real devnet transactions.")
+        return "\n".join(lines)
+
+    def _run_setup_operation(self, operation: str) -> None:
+        self._busy = True
+        self.setup_check_button.set_sensitive(False)
+        self.setup_prepare_button.set_sensitive(False)
+        self.setup_status.set_text("Working…")
+
+        def run() -> None:
+            try:
+                self._controller.call(operation)
+            except Exception:  # noqa: BLE001 - already reported as a code
+                pass
+            finally:
+                GLib.idle_add(self._setup_finished)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _setup_finished(self) -> bool:
+        self._busy = False
+        self.render()
+        return False
+
+    def _render_setup(self, snapshot: Mapping[str, Any]) -> None:
+        self.setup_error.set_text(_error_text(snapshot.get("error"), "prepare_setup")
+                                  or _error_text(snapshot.get("error"), "assess_setup"))
+        assessment = snapshot.get("setup")
+        available = bool(snapshot.get("setupAvailable"))
+        self.setup_check_button.set_sensitive(not self._busy and available)
+        if not available:
+            self.setup_status.set_text(
+                "Chain setup is available in live mode only.")
+            for child in self.setup_steps_box.get_children():
+                self.setup_steps_box.remove(child)
+            return
+        if not isinstance(assessment, dict):
+            if not self._busy:
+                self.setup_status.set_text("Not checked. Use “Check setup” for a read-only assessment.")
+            return
+        prepared = assessment.get("prepared")
+        ok = assessment.get("ok")
+        if prepared and ok:
+            self.setup_status.set_text("Prepared. The registry is ready for the demo flow.")
+        elif prepared:
+            code = assessment.get("refusalCode")
+            self.setup_status.set_text(
+                "Preparation finished with a refusal: {0}".format(code or "unknown"))
+        else:
+            ready = sum(1 for s in (assessment.get("steps") or [])
+                        if isinstance(s, dict) and s.get("status") in ("READY", "SATISFIED"))
+            self.setup_status.set_text(
+                "Assessment only — {0} step(s) ready. Nothing was sent.".format(ready))
+        for child in self.setup_steps_box.get_children():
+            self.setup_steps_box.remove(child)
+        for step in (assessment.get("steps") or [])[:12]:
+            if not isinstance(step, dict):
+                continue
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            status = str(step.get("status") or "")
+            chip_class = {
+                "READY": "chip-ok", "SATISFIED": "chip-ok", "EXECUTED": "chip-ok",
+                "ACTION_REQUIRED": "chip-load", "BLOCKED": "chip-bad",
+            }.get(status, "chip-idle")
+            chip = _label(status, "chip", chip_class)
+            chip.set_halign(Gtk.Align.START)
+            row.pack_start(chip, False, False, 0)
+            detail = "{0} — {1}".format(step.get("actionKind") or step.get("id"), step.get("detail") or "")
+            row.pack_start(_label(_bounded(detail, 110), "subtle", wrap=True), True, True, 0)
+            self.setup_steps_box.pack_start(row, False, False, 0)
+        self.setup_steps_box.show_all()
+        codes = assessment.get("blockerCodes") or []
+        if codes and "GOVERNANCE_KEY_UNAVAILABLE" in codes:
+            warn = _label(
+                "Governance-signed setup cannot run on the legacy registry "
+                "(authority permanently lost). An isolated ADR-0010 namespace is "
+                "the honest path and is never selected implicitly.", "subtle", wrap=True)
+            self.setup_steps_box.pack_start(warn, False, False, 0)
+        self.setup_steps_box.show_all()
+        has_actions = any(isinstance(s, dict) and s.get("actionKind")
+                          for s in (assessment.get("steps") or []))
+        self.setup_prepare_button.set_sensitive(
+            not self._busy and available and has_actions and not prepared)
 
     def _build_records_page(self) -> Gtk.Widget:
         page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -464,6 +663,7 @@ class LiveDemoPages:
         snapshot = self._controller.snapshot()
         self._render_banner(snapshot)
         self._render_connection(snapshot)
+        self._render_setup(snapshot)
         self._render_records(snapshot)
         self._render_publish(snapshot)
         self._render_certificates(snapshot)
@@ -471,7 +671,7 @@ class LiveDemoPages:
 
     def _render_banner(self, snapshot: Mapping[str, Any]) -> None:
         fixture = snapshot.get("mode") == "fixture"
-        text = self._banner_text()
+        text = self._banner_text(snapshot)
         for label in self._banners:
             label.set_text(text)
             context = label.get_style_context()
@@ -480,6 +680,15 @@ class LiveDemoPages:
             context.add_class("fixture-banner" if fixture else "live-banner")
 
     def _render_connection(self, snapshot: Mapping[str, Any]) -> None:
+        registry_id = snapshot.get("registryId")
+        namespace_label = snapshot.get("namespaceLabel")
+        namespace_detail = snapshot.get("namespaceDetail")
+        if isinstance(registry_id, str) and registry_id:
+            self.namespace_value.set_text(
+                "{0} — {1}".format(registry_id, _bounded(namespace_label, 64)))
+        else:
+            self.namespace_value.set_text("—")
+        self.namespace_detail_label.set_text(_bounded(namespace_detail, 160) if namespace_detail else "")
         state = snapshot.get("sessionState")
         chips = {
             "signed-out": ("chip-idle", "Signed out"),

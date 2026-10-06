@@ -89,6 +89,7 @@ class LiveDemoViewFixture(unittest.TestCase):
         # Pack every page so the window tree is the real one.
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         outer.pack_start(self.pages.connection_card, False, False, 0)
+        outer.pack_start(self.pages.setup_card, False, False, 0)
         self.view_stack = Gtk.Stack()
         for name, widget in self.pages.pages():
             self.view_stack.add_named(widget, name)
@@ -187,6 +188,69 @@ class ConnectionTests(LiveDemoViewFixture):
         self.assertIn("If the local demo stack is not running", detail)
         self.assertNotIn("Cannot reach", detail)
         self.assertNoSecrets()
+
+
+class SetupCardTests(LiveDemoViewFixture):
+    """ADR-0010 setup: read-only check and explicit approval before any send."""
+
+    def test_setup_card_exposes_check_and_review_actions(self):
+        self.assertTrue(hasattr(self.pages, "setup_card"))
+        self.assertTrue(hasattr(self.pages, "setup_check_button"))
+        self.assertTrue(hasattr(self.pages, "setup_prepare_button"))
+        texts = self.texts(self.pages.setup_card)
+        joined = "\n".join(texts)
+        self.assertIn("Devnet setup", joined)
+        self.assertIn("never run automatically", joined)
+        self.assertIn("explicit confirmation", joined)
+
+    def test_setup_is_unavailable_in_fixture_mode_and_says_so(self):
+        self.pages.render()
+        self.assertIn("live mode only", self.pages.setup_status.get_text())
+        self.assertFalse(self.pages.setup_check_button.get_sensitive())
+        self.assertFalse(self.pages.setup_prepare_button.get_sensitive())
+
+    def test_prepare_requires_explicit_confirmation(self):
+        # Even with a summary present, a cancelled dialog must not call prepare.
+        calls = []
+        assessment = {
+            "cluster": "solana:devnet", "programId": "p", "registryId": "r",
+            "configPda": "c", "blockerCodes": [],
+            "steps": [{"status": "ACTION_REQUIRED", "actionKind": "grant_operator"}],
+        }
+        real_snapshot = self.controller.snapshot
+        self.controller.snapshot = lambda: {**real_snapshot(), "setup": assessment}
+        self.pages._confirm_setup = lambda summary: False
+        self.controller.call = lambda op, **kw: calls.append(op)
+        self.pages._on_setup_prepare()
+        self.assertEqual(calls, [])
+        self.assertIn("cancelled", self.pages.setup_status.get_text())
+        self.assertIn("No transaction was sent", self.pages.setup_status.get_text())
+
+    def test_setup_summary_names_the_transaction_before_approval(self):
+        assessment = {
+            "cluster": "solana:devnet",
+            "programId": "6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo",
+            "registryId": "demo.synthetic.onelayer",
+            "configPda": "BPgSTnDHop1NhMrksBWJtZV2zqVmUM1iusEuUXocCnFU",
+            "blockerCodes": ["GOVERNANCE_KEY_UNAVAILABLE"],
+            "steps": [
+                {"status": "ACTION_REQUIRED", "actionKind": "initialize_registry",
+                 "requiredSigner": "governance 4Y4pGizJm5"},
+            ],
+        }
+        summary = self.pages._setup_summary_text(assessment)
+        self.assertIn("solana:devnet", summary)
+        self.assertIn("demo.synthetic.onelayer", summary)
+        self.assertIn("initialize_registry", summary)
+        self.assertIn("governance 4Y4pGizJm5", summary)
+        self.assertIn("GOVERNANCE_KEY_UNAVAILABLE", summary)
+        self.assertIn("real devnet transactions", summary)
+
+    def test_namespace_is_rendered_on_the_connection_card(self):
+        self.pages.render()
+        text = self.pages.namespace_value.get_text()
+        self.assertIn("gov.registry.land", text)
+        self.assertIn("Legacy", text)
 
 
 class RecordsPageTests(LiveDemoViewFixture):

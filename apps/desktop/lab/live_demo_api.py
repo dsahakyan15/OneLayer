@@ -92,6 +92,7 @@ __all__ = [
     "VerificationReport",
     "certificate_body_cbor",
     "certificate_hash_hex",
+    "configured_registry_id",
     "decode_certificate_package",
     "loopback_origin",
     "normalize_verification_result",
