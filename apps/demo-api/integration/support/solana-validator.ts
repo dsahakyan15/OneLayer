@@ -60,9 +60,12 @@ export async function buildSbfProgram(source: SbfProgramSource): Promise<BuiltPr
     cached = false;
     await mkdir(outDir, { recursive: true });
     await exec("cargo", [
-      "build-sbf", "--offline",
+      // A clean runner must be able to fetch the exact lockfile dependencies.
+      // No live-chain access occurs: this only compiles local fixture programs.
+      "build-sbf", "--tools-version", "v1.52",
       "--manifest-path", join(source.crateDir, "Cargo.toml"),
       "--sbf-out-dir", outDir,
+      "--", "--locked",
     ], {
       env: { ...process.env, CARGO_TARGET_DIR: join(cache, `target-${source.libName}`) },
       maxBuffer: 64 * 1024 * 1024,

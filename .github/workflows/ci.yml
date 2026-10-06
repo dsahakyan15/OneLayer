@@ -67,6 +67,8 @@ jobs:
         working-directory: apps/demo-api
       - run: npm test
         working-directory: apps/demo-api
+      - name: Install pinned Agave for local-validator integration
+        run: bash scripts/ci/install-agave.sh "$RUNNER_TEMP/onelayer-agave"
       - run: npm run test:integration
         working-directory: apps/demo-api
 
@@ -120,6 +122,9 @@ jobs:
         working-directory: packages/onchain-client
       - run: npm ci
         working-directory: apps/demo-api
+      # Installed smoke exercises the real QR decoder rooted in this package.
+      - run: npm ci
+        working-directory: apps/mvp-web
       - name: Install Linux desktop test runtime
         run: |
           sudo apt-get update

@@ -1,6 +1,19 @@
 # Desktop platform lab
 
-## Actual usability — 2026-10-02
+## Local launch — 2026-10-06
+
+```bash
+./deploy/devnet-demo/live-demo          # local services + GTK launcher; no chain writes
+./deploy/devnet-demo/live-demo status   # health + read-only devnet assessment
+./deploy/devnet-demo/live-demo check    # fresh-start prerequisites
+./deploy/devnet-demo/live-demo stop
+```
+
+The wrapper selects private Unix state when the checkout filesystem cannot enforce file permissions. It reports the selected namespace and refuses a recorded namespace mismatch when reusing services. The default remains legacy `gov.registry.land`; its lost governance key is surfaced as a blocker. No setup transaction runs at startup.
+
+Coordinator checks: 286 desktop tests passed; the installed source-dependent lab smoke passed after correcting its ledger-day fixture. Actual local services and launcher startup were checked on the target desktop. Durable workflow integration, independent source review and complete live publication acceptance remain open. See [current evidence](../../.scratch/production-desktop/evidence/10/live-demo-launcher-2026-10-06.md).
+
+## Historical usability review — 2026-10-02
 
 Normal startup has no connection configuration or sign-in, and authenticated summaries do not open role workspaces. The synthetic session adapter is a test harness. The full English application remains unfinished. See [implementation status](../../docs/implementation-status-2026-10-02.md) and [personal usage-pipeline review](../../.scratch/production-desktop/evidence/launcher-usage-pipeline-review-2026-10-02.md). Tests described below validate bounded lab behavior, not full installed-app acceptance.
 

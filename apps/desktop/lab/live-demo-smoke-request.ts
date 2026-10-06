@@ -29,7 +29,8 @@ import { intentHash } from "../../demo-api/src/transaction-state.ts";
 
 const REGISTRY_ID = "gov.registry.land";
 const INTENT_ID = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
-const DAY_UTX = 20_665;
+// The program and signer bind the ledger day as YYYYMMDD, not epoch days.
+const DAY_UTC = 20261006;
 const BLOCKHASH = "11111111111111111111111111111111";
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
@@ -52,7 +53,7 @@ async function main(): Promise<void> {
   const [configPda] = await findRegistryConfigPda(registryIdHash(REGISTRY_ID), { programAddress: programId });
   const [rolePda] = await findRolePda({ config: configPda, operator }, { programAddress: programId });
   const [segmentPda] = await findLedgerSegmentPda(
-    { config: configPda, dayUtc: DAY_UTX, segmentIndex: 0 },
+    { config: configPda, dayUtc: DAY_UTC, segmentIndex: 0 },
     { programAddress: programId },
   );
   const prepared = prepareAnchorTransaction({
@@ -90,7 +91,7 @@ async function main(): Promise<void> {
     rolePda,
     segmentPda,
     segmentIndex: 0,
-    dayUtc: DAY_UTX,
+    dayUtc: DAY_UTC,
     feePayer: operator,
     recentBlockhash: BLOCKHASH,
     lastValidBlockHeight: "1000",
@@ -115,7 +116,7 @@ async function main(): Promise<void> {
         rolePda,
         segmentPda,
         segmentIndex: 0,
-        dayUtc: DAY_UTX,
+        dayUtc: DAY_UTC,
         feePayer: operator,
         recentBlockhash: BLOCKHASH,
         lastValidBlockHeight: 1_000n,
