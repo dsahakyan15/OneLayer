@@ -116,7 +116,7 @@ ensure_postgres() {
   fi
   if ! postgres_running; then
     "$pg_ctl" -D "$postgres_data" -l "$logs_dir/postgres.log" \
-      -o "-p $pg_port -h 127.0.0.1" start >/dev/null
+      -o "-p $pg_port -h 127.0.0.1 -k ''" start >/dev/null
   fi
   for _ in $(seq 1 60); do
     if "$pg_isready" -h 127.0.0.1 -p "$pg_port" -U "$pg_user" -d postgres >/dev/null 2>&1; then

@@ -66,7 +66,7 @@ function fieldText(value: CborValue): string {
     : entry.type === "text" ? entry.value
     : entry.type === "int" ? entry.value
     : entry.type === "bytes" ? entry.hex
-    : entry.type === "array" ? entry.value.map(plain)
+    : entry.type === "array" ? entry.items.map(plain)
     : Object.fromEntries(Object.entries(entry.entries).map(([k, v]) => [k, plain(v)]));
   const converted = plain(value);
   return typeof converted === "string" ? converted : JSON.stringify(converted);
@@ -158,9 +158,43 @@ export async function issueWorkflowCertificate(
   const records = intent.items.map((leaf, index) => preparedRecordForLeaf(leaf, payloads[index], registryId, keys));
   records.sort((left, right) => left.leafIndex - right.leafIndex);
 
-  // Idempotency: the unique index key is (registry, operation, record, version,
-  // disclosure mode, paths). A repeated command returns the prior certificate.
-  const disclosureKey = request.disclosedPaths === undefined ? "FULL" : [...new Set(request.disclosedPaths)].sort().join("\u0000");
+  // Idempotency: one certificate per (operation, record, version, disclosure
+  // set). The request is normalized exactly like issueCertificate normalizes it:
+  // an explicit list that covers every field of this version is FULL_RECORD; a
+  // shorter list is SELECTIVE_FIELDS keyed by its sorted unique paths. Applying
+  // the same rule to stored rows means an omitted disclosure, a reordered full
+  // list and a repeated selective set all resolve to one certificate instead of
+  // racing the unique index.
+  const targetRecord = records.find((record) => record.internalRecordId === request.recordId)!;
+  const availablePaths = targetRecord.fields.map((field) => field.path);
+  const requested = request.disclosedPaths === undefined ? undefined : [...new Set(request.disclosedPaths)];
+  if (requested !== undefined) {
+    if (requested.length === 0) throw new WorkflowCertificateError(400, "PUBLICATION_DISCLOSURE_EMPTY");
+    const unknown = requested.find((path) => !availablePaths.includes(path));
+    if (unknown !== undefined) throw new WorkflowCertificateError(400, "PUBLICATION_DISCLOSURE_PATH_UNKNOWN");
+  }
+  const selective = requested !== undefined && requested.length < availablePaths.length;
+  const disclosureKey = selective ? [...requested!].sort().join("\u0000") : "FULL";
+  // A stored row is compared with the same normalization, so a legacy
+  // SELECTIVE_FIELDS row whose path set covers the whole version is recognized
+  // as the same full disclosure. An unrecognized shape never matches.
+  const storedKey = (mode: unknown, paths: unknown): string | null => {
+    if (mode === "FULL_RECORD") return "FULL";
+    if (mode !== "SELECTIVE_FIELDS" || !Array.isArray(paths)) return null;
+    const unique = [...new Set(paths as string[])];
+    return unique.length >= availablePaths.length ? "FULL" : unique.sort().join("\u0000");
+  };
+  const storedCertificate = (stored: any): WorkflowIssuedCertificate => ({
+    certificateId: stored.certificate_id,
+    certificateHash: stored.certificate_hash,
+    qrUrl: stored.qr_url,
+    recordVersion: stored.record_version,
+    disclosureMode: stored.disclosure_mode,
+    disclosedPaths: stored.disclosed_paths,
+    fieldCount: availablePaths.length,
+    anchor: { batchSequence: row.batch_sequence, anchorSlot: row.slot, transactionSignature: row.signature, merkleRoot: row.merkle_root },
+    replayed: true,
+  });
   const existing = await pool.query(
     `SELECT certificate_id, encode(certificate_hash,'hex') AS certificate_hash, qr_url, record_version::text,
             disclosure_mode, disclosed_paths
@@ -169,21 +203,8 @@ export async function issueWorkflowCertificate(
     [registryId, request.operationId, request.recordId, request.version],
   );
   for (const candidate of existing.rows) {
-    const candidateKey = (candidate.disclosed_paths as string[]).length === 0
-      ? "FULL"
-      : [...candidate.disclosed_paths].sort().join("\u0000");
-    if (candidateKey !== disclosureKey) continue;
-    return {
-      certificateId: candidate.certificate_id,
-      certificateHash: candidate.certificate_hash,
-      qrUrl: candidate.qr_url,
-      recordVersion: candidate.record_version,
-      disclosureMode: candidate.disclosure_mode,
-      disclosedPaths: candidate.disclosed_paths,
-      fieldCount: records.find((record) => record.internalRecordId === request.recordId)?.fields.length ?? 0,
-      anchor: { batchSequence: row.batch_sequence, anchorSlot: row.slot, transactionSignature: row.signature, merkleRoot: row.merkle_root },
-      replayed: true,
-    };
+    if (storedKey(candidate.disclosure_mode, candidate.disclosed_paths) !== disclosureKey) continue;
+    return storedCertificate(candidate);
   }
 
   const batch: PreparedBatch = {
@@ -215,7 +236,7 @@ export async function issueWorkflowCertificate(
       issuerKeyId: deps.issuerKeyId,
       issuerSecretKey: deps.issuerSecretKey,
       publicBaseUrl: deps.publicBaseUrl,
-      disclosedPaths: request.disclosedPaths,
+      disclosedPaths: selective ? requested : undefined,
     },
   );
 
@@ -247,24 +268,21 @@ export async function issueWorkflowCertificate(
   } catch (error) {
     await client.query("ROLLBACK");
     if ((error as { code?: string }).code === "23505") {
-      // A concurrent identical issuance won; return it instead of a 500.
-      const replay = await pool.query(
+      // A concurrent identical issuance won; return it instead of a 500. The
+      // lookup uses the same normalized comparison as the pre-check, so an
+      // explicit-full vs omitted-full race still resolves to one certificate.
+      const concurrent = await pool.query(
         `SELECT certificate_id, encode(certificate_hash,'hex') AS certificate_hash, qr_url, record_version::text,
                 disclosure_mode, disclosed_paths
            FROM demo_certificate
           WHERE registry_id = $1 AND anchor_operation_id = $2 AND internal_record_id = $3 AND record_version = $4`,
         [registryId, request.operationId, request.recordId, request.version],
       );
-      const found = replay.rows.find((candidate) => {
-        const key = (candidate.disclosed_paths as string[]).length === 0 ? "FULL" : [...candidate.disclosed_paths].sort().join("\u0000");
-        return key === disclosureKey;
-      });
-      if (found !== undefined) {
-        return { certificateId: found.certificate_id, certificateHash: found.certificate_hash, qrUrl: found.qr_url,
-          recordVersion: found.record_version, disclosureMode: found.disclosure_mode, disclosedPaths: found.disclosed_paths,
-          fieldCount: records.find((record) => record.internalRecordId === request.recordId)?.fields.length ?? 0,
-          anchor: { batchSequence: row.batch_sequence, anchorSlot: row.slot, transactionSignature: row.signature, merkleRoot: row.merkle_root }, replayed: true };
-      }
+      const found = concurrent.rows.find((candidate) => storedKey(candidate.disclosure_mode, candidate.disclosed_paths) === disclosureKey);
+      if (found !== undefined) return storedCertificate(found);
+      // A unique-index collision that does not resolve to this normalized
+      // disclosure is surfaced as a coded conflict, never as a raw pg 23505.
+      throw new WorkflowCertificateError(409, "PUBLICATION_CERTIFICATE_CONFLICT");
     }
     throw error;
   } finally {

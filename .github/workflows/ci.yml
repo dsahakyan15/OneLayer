@@ -128,7 +128,7 @@ jobs:
       - name: Install Linux desktop test runtime
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-secret-1 dbus-x11 xvfb xauth fonts-dejavu-core
+          sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-secret-1 dbus-x11 xvfb xauth fonts-dejavu-core librsvg2-common shared-mime-info
       - name: Exercise GTK interactions and launcher transport
         run: dbus-run-session -- xvfb-run -a --server-args="-screen 0 1280x900x24" /usr/bin/python3 -m unittest discover -s apps/desktop/lab -v
       - name: Exercise local launch readiness

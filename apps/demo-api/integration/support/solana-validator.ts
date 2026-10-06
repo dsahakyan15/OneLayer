@@ -3,7 +3,7 @@
 // Never touches devnet/mainnet: the validator binds to 127.0.0.1 on random
 // free ports, keeps its ledger in a fresh temporary directory and is killed
 // (whole process group) in test teardown. Program binaries are built from the
-// repository sources into a temporary cache keyed by the source digest, so a
+// repository sources into a temporary cache keyed by the source and toolchain digest, so a
 // stale `target/deploy` artifact can never be what the test exercises.
 import { spawn, execFile, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -12,7 +12,7 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { createServer } from "node:net";
 import { createSocket } from "node:dgram";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { TestContext } from "node:test";
 import { promisify } from "node:util";
 
@@ -47,12 +47,19 @@ async function sourceFiles(dir: string): Promise<string[]> {
 export async function buildSbfProgram(source: SbfProgramSource): Promise<BuiltProgram> {
   const files = [...await sourceFiles(join(source.crateDir, "src")), join(source.crateDir, "Cargo.toml"), ...(source.extraInputs ?? [])];
   const digest = createHash("sha256");
+  // Reusing source-identical bytes compiled by another toolchain would conceal
+  // a pinned-toolchain regression. Include the executable version and build args.
+  const toolchain = await exec("cargo", ["build-sbf", "--version"], {
+    timeout: 30_000, maxBuffer: 16 * 1024,
+  });
+  digest.update(toolchain.stdout.trim()).update("\0tools:v1.52;cargo:--locked\0");
   for (const file of files) {
     if (!existsSync(file)) continue;
     digest.update(file.replace(source.crateDir, "")).update("\0").update(await readFile(file)).update("\0");
   }
   const key = digest.digest("hex").slice(0, 24);
-  const cache = join(tmpdir(), "onelayer-sbf-cache");
+  const cache = process.env.ONELAYER_SBF_CACHE_DIR ?? join(tmpdir(), "onelayer-sbf-cache");
+  if (!isAbsolute(cache)) throw new Error("ONELAYER_SBF_CACHE_DIR must be absolute");
   const outDir = join(cache, `${source.libName}-${key}`);
   const so = join(outDir, `${source.libName}.so`);
   let cached = true;
