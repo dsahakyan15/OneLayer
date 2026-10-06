@@ -25,9 +25,17 @@ import { authorizeServiceRead, matchServiceRead, type ServiceReadRoute } from ".
 import { workingRegistryStatus } from "./registry-status.ts";
 import { loadSnapshotKeyConfig } from "./snapshot-key-config.ts";
 import { bindSnapshotKeyVersion } from "./snapshot-key-store.ts";
+import { PublicationRpc } from "./publication-rpc.ts";
+import { loadPublicationConfig } from "./publication-config.ts";
+import { LocalKeyPublicationSigner } from "./publication-signer.ts";
+import { WorkflowPublicationRuntime } from "./workflow-runtime.ts";
 
 const MAX_BODY = 1_048_576;
-const REGISTRY_ID = "gov.registry.land";
+// The deployment registry is explicit. Default stays the legacy synthetic id;
+// an isolated devnet demo configures its own namespace (never silently).
+const REGISTRY_ID = process.env.ONELAYER_REGISTRY_ID ?? "gov.registry.land";
+if (!/^[A-Za-z0-9._:-]{1,128}$/.test(REGISTRY_ID)) throw new Error("ONELAYER_REGISTRY_ID is invalid");
+const REGISTRY_ID_PATTERN = new RegExp(`^${REGISTRY_ID.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
 const MARKER = "ONELAYER_SYNTHETIC_DEVNET_DEMO_V1";
 /** Verifier batch sequences are u64; the demo stores them in a BIGINT column. */
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
@@ -108,6 +116,25 @@ const servicePrincipals = new ServicePrincipalStore(servicePool);
 if (internalAuth === "service-principal") await servicePrincipals.initialize();
 const serviceGate = new ServiceRequestGate();
 
+// Workflow publication runtime: enabled only with explicit deployment keys and
+// an allow-listed lab signer key. Without configuration the API still starts
+// and the publication routes answer PUBLICATION_UNAVAILABLE (fail closed).
+const publicationConfig = await loadPublicationConfig();
+let publication: AdminContext["publication"];
+if (publicationConfig !== undefined) {
+  const signer = await LocalKeyPublicationSigner.create(publicationConfig.signerKeyFile, {
+    registryId: REGISTRY_ID, programId, configPda: configAddress,
+  });
+  publication = {
+    runtime: new WorkflowPublicationRuntime(pool, new PublicationRpc(rpcUrl, programId), signer, {
+      registryId: REGISTRY_ID, programId: programId as Address, configPda: configAddress,
+      operatorKeyId: publicationConfig.operatorKeyId, keys: publicationConfig.keys,
+    }),
+    keys: publicationConfig.keys,
+    operatorKeyId: publicationConfig.operatorKeyId,
+  };
+}
+
 const adminContext: AdminContext = {
   ...(oidcConfig && sessions instanceof PostgresSessionStore ? { oidc: {
     client: new OidcClient(oidcConfig), login: identity => sessions.loginOidc(identity),
@@ -131,6 +158,8 @@ const adminContext: AdminContext = {
   }),
   recoveryKeys,
   restoreApprovalPrivateKey,
+  ...(publication === undefined ? {} : { publication }),
+  snapshotFullState: process.env.ONELAYER_SNAPSHOT_FULL_STATE === "1",
   publicWebBaseUrl,
   now: () => new Date(),
 };
@@ -272,7 +301,7 @@ async function requireWorkingRegistry(response: ServerResponse): Promise<boolean
 }
 
 function registrationFields(input: Record<string, unknown>) {
-  const registryId = text(input.registryId, "registryId", /^gov\.registry\.land$/);
+  const registryId = text(input.registryId, "registryId", REGISTRY_ID_PATTERN);
   const batchSequence = unsigned(input.batchSequence, "batchSequence");
   const registryVersion = unsigned(input.registryVersion, "registryVersion");
   const merkleRoot = text(input.merkleRoot, "merkleRoot", /^[0-9a-f]{64}$/);

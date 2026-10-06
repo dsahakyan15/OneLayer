@@ -84,12 +84,12 @@ import {
 import { workingRegistryStatus } from "./registry-status.ts";
 import { routeOidc, type OidcRoutes } from "./oidc-routes.ts";
 import { routeWorkflow } from "./registry-workflow.ts";
-import { requireUnrestrictedResourceAccess } from "./resource-access.ts";
+import { requireUnrestrictedResourceAccess, requireResourceAccess } from "./resource-access.ts";
 import type { WorkflowPublicationRuntime } from "./workflow-runtime.ts";
 import { WorkflowRuntimeError } from "./workflow-runtime.ts";
 import { issueWorkflowCertificate, WorkflowCertificateError } from "./workflow-certificate.ts";
 import type { PublicationKeys } from "./publication-intent.ts";
-import { SNAPSHOT_STATE_SCHEMA_VERSION, encryptSnapshotStateV2, type SnapshotStateV2 } from "./backup.ts";
+import { SNAPSHOT_STATE_SCHEMA_VERSION, SNAPSHOT_STATE_FORMAT, SNAPSHOT_STATE_FORMAT_V2, encryptSnapshotStateV2, type SnapshotStateV2 } from "./backup.ts";
 
 const SEGMENTS_PER_DAY = 3;
 const OPERATOR_KEY_ID = "browser-test-operator-1";
@@ -112,6 +112,9 @@ export interface AdminContext {
   snapshotKek?: Uint8Array;
   /** Configured stable version identifier this writer commits; explicit fixtures may keep the frozen memory label. */
   snapshotKeyEncryptionVersion?: string;
+  /** When true, snapshots carry the full V2 inventory (workflow/publication) and
+   * are always NON_FINALIZED until a checkpoint binding exists. Default false. */
+  snapshotFullState?: boolean;
   /** Recovery shares are injected by the out-of-band bounded demo setup. The ordinary API never generates or holds them. */
   recoveryShares?: readonly KeyShare[];
   /** Process-memory signing key for Restore Approval. */
@@ -737,6 +740,27 @@ function disclosureRequest(value: unknown): string[] | undefined {
 }
 
 /**
+ * Certificate disclosure scope: the exact record and every disclosed field path
+ * must be inside the session's resource policy. An omitted disclosure means
+ * FULL_RECORD, which is only allowed when the session is unrestricted for both
+ * records and certificates; `certificates.issue` alone never passes.
+ */
+function requireResourceAccessObjectAndFields(
+  session: AdminSession,
+  registryId: string,
+  recordId: string,
+  disclosedPaths: string[] | undefined,
+): void {
+  if (disclosedPaths === undefined) {
+    requireUnrestrictedResourceAccess(session.resourcePolicy, registryId, "records.read");
+    requireUnrestrictedResourceAccess(session.resourcePolicy, registryId, "certificates.read");
+    return;
+  }
+  requireResourceAccess(session.resourcePolicy, { registryId, recordId, fieldPaths: disclosedPaths, action: "records.read" });
+  requireResourceAccess(session.resourcePolicy, { registryId, recordId, fieldPaths: disclosedPaths, action: "certificates.read" });
+}
+
+/**
  * Reads the finalized ledger segment and recomputes `anchor_hash` from the
  * entry the program wrote. Refusing when the entry is missing or disagrees with
  * the reviewed batch keeps a wrong anchor out of the demo tables.
@@ -1273,7 +1297,7 @@ async function backupOverview(context: AdminContext): Promise<AdminResponse> {
   };
 }
 
-async function snapshotState(executor: Pool | PoolClient, context: AdminContext): Promise<SnapshotStateV1> {
+async function snapshotState(executor: Pool | PoolClient, context: AdminContext): Promise<SnapshotStateV2> {
   const [records, recordVersions, certificates, canonicalCertificates, leaves, anchors, batches, events, audit] = await Promise.all([
     executor.query(`${RECORD_QUERY} ORDER BY r.source_cursor`),
     executor.query(
@@ -1387,9 +1411,14 @@ async function snapshotState(executor: Pool | PoolClient, context: AdminContext)
     })),
   ];
 
+  const workflow = context.snapshotFullState === true
+    ? await workflowSnapshotInventory(executor, context.registryId)
+    : emptyWorkflowSnapshotInventory();
   return {
     registryId: context.registryId,
     capturedAt: context.now().toISOString().replace(/\.\d{3}Z$/, "Z"),
+    schemaVersion: SNAPSHOT_STATE_SCHEMA_VERSION,
+    keyEncryptionVersion: snapshotKeyEncryptionVersion(context),
     records: currentRecords,
     recordVersions: recordVersionRows,
     certificatePackages: [...certificateRows, ...canonicalCertificateRows],
@@ -1405,6 +1434,55 @@ async function snapshotState(executor: Pool | PoolClient, context: AdminContext)
     manifests: manifestRows,
     anchorReferences: anchorRows,
     operationHistory: operationRows,
+    ...workflow,
+  };
+}
+
+type WorkflowSnapshotInventory = Pick<SnapshotStateV2,
+  | "workflowRecords" | "workflowVersions" | "workflowDrafts" | "workflowRevisions" | "workflowRequests"
+  | "workflowOutbox" | "workflowAudit" | "publicationOperations" | "publicationItems"
+  | "publicationIntents" | "publicationAnchors">;
+
+function emptyWorkflowSnapshotInventory(): WorkflowSnapshotInventory {
+  return {
+    workflowRecords: [], workflowVersions: [], workflowDrafts: [], workflowRevisions: [], workflowRequests: [],
+    workflowOutbox: [], workflowAudit: [], publicationOperations: [], publicationItems: [],
+    publicationIntents: [], publicationAnchors: [],
+  };
+}
+
+/**
+ * Workflow/publication inventory for the full-state payload (ticket 14). This is
+ * data capture only: it does not, and must not, bind the state to a trusted
+ * finalized anchor. A snapshot carrying this inventory stays NON_FINALIZED until
+ * a dedicated checkpoint binding exists.
+ */
+async function workflowSnapshotInventory(executor: Pool | PoolClient, registryId: string): Promise<WorkflowSnapshotInventory> {
+  const [records, versions, drafts, revisions, requests, outbox, audit, operations, items, intents, anchors] = await Promise.all([
+    executor.query("SELECT registry_id, record_id, version FROM wf_record WHERE registry_id=$1 ORDER BY record_id", [registryId]),
+    executor.query("SELECT registry_id, record_id, version, payload, payload_hash, operation, creator, approver, evidence FROM wf_version WHERE registry_id=$1 ORDER BY record_id, version", [registryId]),
+    executor.query("SELECT draft_id::text, registry_id, record_id, creator, revision, base_version, state, approver, committed_version FROM wf_draft WHERE registry_id=$1 ORDER BY draft_id", [registryId]),
+    executor.query("SELECT r.draft_id::text, r.revision, r.payload, r.payload_hash, r.operation, r.editor FROM wf_revision r JOIN wf_draft d USING(draft_id) WHERE d.registry_id=$1 ORDER BY r.draft_id, r.revision", [registryId]),
+    executor.query("SELECT registry_id, actor, idempotency_key, request_hash, response FROM wf_request WHERE registry_id=$1 ORDER BY actor, idempotency_key", [registryId]),
+    executor.query("SELECT event_id::text, registry_id, record_id, version, payload_hash, created_at FROM wf_outbox WHERE registry_id=$1 ORDER BY record_id, version", [registryId]),
+    executor.query("SELECT event_id::text, registry_id, actor, action, details, created_at FROM wf_audit WHERE registry_id=$1 ORDER BY event_id", [registryId]),
+    executor.query("SELECT operation_id::text, registry_id, owner, fence, lease_until, created_at, state, blocked_reason, superseded_by::text, context_slot::text FROM wf_publication WHERE registry_id=$1 ORDER BY created_at", [registryId]),
+    executor.query("SELECT i.operation_id::text, i.ordinal, i.event_id::text FROM wf_publication_item i JOIN wf_publication p USING(operation_id) WHERE p.registry_id=$1 ORDER BY i.operation_id, i.ordinal", [registryId]),
+    executor.query("SELECT i.operation_id::text, i.registry_id, i.batch_sequence::text, encode(i.intent_bytes,'hex') AS intent_bytes, i.intent_hash, i.fence, i.worker, i.created_at FROM wf_publication_intent i JOIN wf_publication p USING(operation_id) WHERE i.registry_id=$1 ORDER BY i.operation_id", [registryId]),
+    executor.query("SELECT a.operation_id::text, a.attempt_id::text, a.registry_id, a.batch_sequence::text, a.intent_hash, a.merkle_root, a.manifest_hash, a.anchor_hash, a.signature, a.slot::text, a.proof, a.segment_pda, a.fence, a.worker, a.finalized_at FROM wf_publication_anchor a WHERE a.registry_id=$1 ORDER BY a.finalized_at", [registryId]),
+  ]);
+  return {
+    workflowRecords: records.rows.map((row) => ({ ...row })),
+    workflowVersions: versions.rows.map((row) => ({ ...row })),
+    workflowDrafts: drafts.rows.map((row) => ({ ...row })),
+    workflowRevisions: revisions.rows.map((row) => ({ ...row })),
+    workflowRequests: requests.rows.map((row) => ({ ...row })),
+    workflowOutbox: outbox.rows.map((row) => ({ ...row })),
+    workflowAudit: audit.rows.map((row) => ({ ...row })),
+    publicationOperations: operations.rows.map((row) => ({ ...row })),
+    publicationItems: items.rows.map((row) => ({ ...row })),
+    publicationIntents: intents.rows.map((row) => ({ ...row })),
+    publicationAnchors: anchors.rows.map((row) => ({ ...row })),
   };
 }
 
@@ -1618,14 +1696,21 @@ async function refreshBackups(
     const snapshotId = randomUUID();
     const state = await snapshotState(client, context);
     const anchor = await latestSnapshotAnchor(client, context.registryId);
-    const encrypted = encryptSnapshotState({
-      registryId: context.registryId,
-      snapshotId: uuidBytes(snapshotId),
-      snapshotVersion,
-      state,
-      kek,
-      keyEncryptionVersion,
-    });
+    const fullState = context.snapshotFullState === true;
+    // The full-state (V2) payload has no checkpoint binding to a trusted
+    // finalized anchor, so it is never FINALIZED and its merkle_root column is
+    // the zero root: the legacy record-batch root does not prove this state.
+    const snapshotStatus = fullState ? "NON_FINALIZED" : (anchor.finalized ? "FINALIZED" : "NON_FINALIZED");
+    const storedRoot = fullState ? ZERO_ROOT : anchor.merkleRoot;
+    const encrypted = fullState
+      ? encryptSnapshotStateV2({
+          registryId: context.registryId, snapshotId: uuidBytes(snapshotId), snapshotVersion,
+          state, kek, keyEncryptionVersion,
+        })
+      : encryptSnapshotState({
+          registryId: context.registryId, snapshotId: uuidBytes(snapshotId), snapshotVersion,
+          state, kek, keyEncryptionVersion,
+        });
     const packageBytes = Buffer.from(encrypted.encoded);
     await client.query(
       `INSERT INTO snapshot (
@@ -1637,8 +1722,8 @@ async function refreshBackups(
         snapshotId,
         context.registryId,
         snapshotVersion.toString(),
-        anchor.finalized ? "FINALIZED" : "NON_FINALIZED",
-        anchor.merkleRoot,
+        snapshotStatus,
+        storedRoot,
         toHex(encrypted.snapshot.plaintextHash),
         toHex(encrypted.snapshot.ciphertextHash),
         packageBytes,
@@ -1691,8 +1776,8 @@ async function refreshBackups(
       snapshotId,
       snapshotVersion: snapshotVersion.toString(),
       packageFormat: SNAPSHOT_FORMAT,
-      snapshotStatus: anchor.finalized ? "FINALIZED" : "NON_FINALIZED",
-      merkleRoot: anchor.merkleRoot,
+      snapshotStatus,
+      merkleRoot: storedRoot,
       plaintextHash: toHex(encrypted.snapshot.plaintextHash),
       ciphertextHash: toHex(encrypted.snapshot.ciphertextHash),
       centers: centers.rows.map((center, index) => ({ centerId: center.center_id, status: replicaStatuses[index] })),
@@ -1824,6 +1909,18 @@ interface SnapshotStateSummary {
   manifests: number;
   anchorReferences: number;
   operationHistory: number;
+  // V2 only.
+  workflowRecords?: number;
+  workflowVersions?: number;
+  workflowDrafts?: number;
+  workflowRevisions?: number;
+  workflowRequests?: number;
+  workflowOutbox?: number;
+  workflowAudit?: number;
+  publicationOperations?: number;
+  publicationItems?: number;
+  publicationIntents?: number;
+  publicationAnchors?: number;
 }
 
 function recoveryKeys(context: AdminContext): Map<string, Uint8Array> {
@@ -1986,11 +2083,11 @@ function snapshotStateSummary(plaintext: Uint8Array, registryId: string): Snapsh
   const format = value.entries.format;
   const version = value.entries.version;
   const stateRegistry = value.entries.registryId;
-  if (
-    format?.type !== "text" || format.value !== "ONELAYER_SNAPSHOT_STATE_V1" ||
-    version?.type !== "int" || version.value !== "1" ||
-    stateRegistry?.type !== "text" || stateRegistry.value !== registryId
-  ) {
+  const isV1 = format?.type === "text" && format.value === SNAPSHOT_STATE_FORMAT
+    && version?.type === "int" && version.value === "1";
+  const isV2 = format?.type === "text" && format.value === SNAPSHOT_STATE_FORMAT_V2
+    && version?.type === "int" && version.value === "2";
+  if ((!isV1 && !isV2) || stateRegistry?.type !== "text" || stateRegistry.value !== registryId) {
     throw new ApiError(422, "SNAPSHOT_STATE_INVALID");
   }
   const required = [
@@ -2009,6 +2106,17 @@ function snapshotStateSummary(plaintext: Uint8Array, registryId: string): Snapsh
     const entry = value.entries[field];
     if (entry?.type !== "array") throw new ApiError(422, "SNAPSHOT_STATE_INVALID");
     summary[field] = entry.items.length;
+  }
+  if (isV2) {
+    const workflow = [
+      "workflowRecords", "workflowVersions", "workflowDrafts", "workflowRevisions", "workflowRequests",
+      "workflowOutbox", "workflowAudit", "publicationOperations", "publicationItems", "publicationIntents", "publicationAnchors",
+    ] as const;
+    for (const field of workflow) {
+      const entry = value.entries[field];
+      if (entry?.type !== "array") throw new ApiError(422, "SNAPSHOT_STATE_INVALID");
+      summary[field] = entry.items.length;
+    }
   }
   return summary;
 }
@@ -2030,7 +2138,7 @@ async function recoveryOperationResponse(
             o.approval_id::text, o.created_at, o.approved_at, o.completed_at,
             a.transaction_signature, a.finalized_at,
             p.approval_digest, p.approval_signature, p.signed_at,
-            t.target_id, t.state_summary, t.restored_at
+            t.target_id, t.state_summary, t.restored_at, t.target_kind, t.imported_at
        FROM recovery_operation o
        JOIN snapshot s ON s.snapshot_id = o.snapshot_id
        LEFT JOIN demo_anchor a
@@ -2042,6 +2150,12 @@ async function recoveryOperationResponse(
   );
   if (result.rows.length === 0) throw new ApiError(404, "RECOVERY_OPERATION_NOT_FOUND");
   const row = result.rows[0];
+  const targetImported = row.target_kind === "IMPORTED" && row.imported_at !== null;
+  // Honest state: VALIDATED means content was decrypted and checked but no
+  // target was imported. A legacy RESTORED row whose target is SUMMARY_ONLY is
+  // reported as VALIDATED with its raw value preserved in `historicalState`;
+  // `restoredTarget` is null unless a real target import is verified.
+  const honestState = targetImported ? "RESTORED" : row.state === "RESTORED" ? "VALIDATED" : row.state;
   const body: Record<string, unknown> = {
     recoveryOperationId: row.recovery_operation_id,
     operationId: row.recovery_operation_id,
@@ -2051,8 +2165,10 @@ async function recoveryOperationResponse(
     snapshotVersion: row.snapshot_version,
     snapshotStatus: row.snapshot_status,
     target: row.target,
-    state: row.state,
-    status: row.state,
+    state: honestState,
+    status: honestState,
+    historicalState: row.state,
+    targetImported,
     anchor: {
       batchSequence: row.anchor_batch_sequence,
       anchorSlot: row.anchor_slot,
@@ -2076,7 +2192,11 @@ async function recoveryOperationResponse(
       ciphertextHash: "MATCH",
       plaintextHash: "MATCH",
       merkleRoot: "MATCH",
+      targetImported,
     },
+    // The validation summary is exposed independently of `restoredTarget`; it is
+    // evidence of content checks, never of a usable restored database.
+    validationSummary: row.state_summary === null ? null : jsonValue(row.state_summary),
     failureCode: row.failure_code,
     createdBy: row.created_by,
     approvedBy: row.approved_by,
@@ -2093,12 +2213,14 @@ async function recoveryOperationResponse(
       signedBy: row.approved_by,
       signedAt: row.signed_at === null ? null : iso(row.signed_at),
     },
-    restoredTarget: row.target_id === null ? null : {
+    restoredTarget: targetImported && row.target_id !== null ? {
       targetId: row.target_id,
       stateSummary: jsonValue(row.state_summary),
       restoredAt: iso(row.restored_at),
+      importedAt: iso(row.imported_at),
+      usable: true,
       plaintextCleared: true,
-    },
+    } : null,
     ...extra,
   };
   return { status, body };
@@ -2132,7 +2254,7 @@ async function failRecoveryOperation(
   await context.pool.query(
     `UPDATE recovery_operation
         SET state = 'FAILED', failure_code = $2, completed_at = now()
-      WHERE recovery_operation_id = $1 AND state NOT IN ('RESTORED', 'FAILED')`,
+      WHERE recovery_operation_id = $1 AND state NOT IN ('VALIDATED', 'RESTORED', 'FAILED')`,
     [operationId, code],
   );
   await appendEvent(context.pool, context, session, null, "RECOVERY_FAILED", {
@@ -2271,7 +2393,7 @@ async function approveRecovery(
   );
   if (current.rows.length === 0) throw new ApiError(404, "RECOVERY_OPERATION_NOT_FOUND");
   const operation = current.rows[0];
-  if (operation.state === "APPROVED" || operation.state === "RESTORED") {
+  if (operation.state === "APPROVED" || operation.state === "VALIDATED" || operation.state === "RESTORED") {
     return recoveryOperationResponse(context, operationId, 200, { replayed: true });
   }
   if (operation.state !== "AWAITING_APPROVAL") throw new ApiError(409, "RESTORE_APPROVAL_INVALID_STATE");
@@ -2360,7 +2482,7 @@ async function restoreRecovery(
   );
   if (current.rows.length === 0) throw new ApiError(404, "RECOVERY_OPERATION_NOT_FOUND");
   const operation = current.rows[0];
-  if (operation.state === "RESTORED") return recoveryOperationResponse(context, operationId, 200, { replayed: true });
+  if (operation.state === "VALIDATED" || operation.state === "RESTORED") return recoveryOperationResponse(context, operationId, 200, { replayed: true });
   if (operation.state !== "APPROVED" || operation.approval_id === null) {
     throw new ApiError(409, "RESTORE_APPROVAL_REQUIRED");
   }
@@ -2433,20 +2555,22 @@ async function restoreRecovery(
     const client = await context.pool.connect();
     try {
       await client.query("BEGIN");
-      // The bounded local target consumes the complete validated state inside
-      // this transaction, then retains only an auditable digest/summary. The
-      // plaintext itself is never a target column and is zeroed in finally.
+      // Content was decrypted and validated; no target database was imported.
+      // The row records SUMMARY_ONLY evidence and the operation becomes
+      // VALIDATED, never RESTORED. RESTORED requires a real import + validation.
       await client.query(
         `INSERT INTO recovery_restore_target (
            registry_id, target_id, recovery_operation_id, snapshot_id,
-           merkle_root, plaintext_hash, state_summary
-         ) VALUES ($1,$2,$3,$4,decode($5,'hex'),decode($6,'hex'),$7)
+           merkle_root, plaintext_hash, state_summary, target_kind, imported_at
+         ) VALUES ($1,$2,$3,$4,decode($5,'hex'),decode($6,'hex'),$7,'SUMMARY_ONLY',NULL)
          ON CONFLICT (registry_id, target_id) DO UPDATE SET
            recovery_operation_id = EXCLUDED.recovery_operation_id,
            snapshot_id = EXCLUDED.snapshot_id,
            merkle_root = EXCLUDED.merkle_root,
            plaintext_hash = EXCLUDED.plaintext_hash,
            state_summary = EXCLUDED.state_summary,
+           target_kind = 'SUMMARY_ONLY',
+           imported_at = NULL,
            restored_at = now()`,
         [
           context.registryId,
@@ -2460,16 +2584,17 @@ async function restoreRecovery(
       );
       await client.query(
         `UPDATE recovery_operation
-            SET state = 'RESTORED', completed_at = now()
+            SET state = 'VALIDATED', completed_at = now()
           WHERE recovery_operation_id = $1 AND state = 'APPROVED'`,
         [operation.recovery_operation_id],
       );
-      await appendEvent(client, context, session, null, "RESTORE_COMPLETED", {
+      await appendEvent(client, context, session, null, "RESTORE_VALIDATED", {
         recoveryOperationId: operation.recovery_operation_id,
         snapshotId: operation.snapshot_id,
         merkleRoot: operation.merkle_root,
         target: operation.target,
         stateSummary,
+        targetKind: "SUMMARY_ONLY",
         plaintextCleared: true,
       });
       await client.query("COMMIT");
@@ -2771,6 +2896,8 @@ async function dispatch(context: AdminContext, request: AdminRequest): Promise<A
     return { status: 204, body: null };
   }
 
+  const publicationResponse = await routePublications(context, request, session);
+  if (publicationResponse !== null) return publicationResponse;
   if (request.path.startsWith('/v2/admin/workflow/')) return routeWorkflow(context, request, session);
 
   // Legacy routes operate on whole-registry projections. Until scoped queries
