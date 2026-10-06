@@ -50,6 +50,10 @@ _Avoid_: backup password, center key
 Отдельное подписанное разрешение `chief_admin` на восстановление конкретного snapshot, его root и target. Оно не заменяет recovery shares.
 _Avoid_: operator confirmation, fourth share
 
+**Validated Recovery Material**:
+Расшифрованное содержимое Snapshot с проверенными schema, hashes и commitments, пригодное для следующего шага восстановления. Состояние `VALIDATED` подтверждает материал; `RESTORED` подтверждает импортированные и проверенные данные в target.
+_Avoid_: restored summary, restored hash
+
 **Retention Window**:
 Правило, по которому каждый BackupCenter хранит не более 12 snapshots и сохраняет хотя бы один Finalized Snapshot. Старейшие не-finalized snapshots удаляются первыми.
 _Avoid_: arbitrary cleanup, manual delete
@@ -67,3 +71,19 @@ _Avoid_: backup operator
 **Chief Admin**:
 Роль, которая отдельно подписывает Restore Approval после предоставления трёх Recovery Shares.
 _Avoid_: one-person recovery, operator
+
+**Key Holder**:
+Участник, который хранит собственную Recovery Share и предоставляет её для конкретной операции восстановления. Он не получает полномочий на изменение реестра или Restore Approval только в силу владения долей.
+_Avoid_: backup center, sole recovery admin
+
+## Product language
+
+User decision, 2026-10-01: the application interface is English. Launcher and
+workspaces use English navigation, labels, status explanations, accessibility
+text and errors. Protocol identifiers and registry/user-provided values retain
+their original bytes; this does not translate or rewrite record contents.
+Internal project documentation and discussion may remain Russian.
+
+## Implementation boundary — 2026-10-02
+
+The definitions above describe intended domain semantics. Current demo Snapshot capture omits newer workflow/publication state; RESTORED records a validated digest/summary without importing a usable target database. A finalized anchor does not establish current document suitability. The normal launcher has no usable login or role workspace. See [current implementation status](docs/implementation-status-2026-10-02.md) before interpreting these terms as delivered behavior.

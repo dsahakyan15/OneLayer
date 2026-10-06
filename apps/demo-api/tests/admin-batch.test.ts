@@ -1,3 +1,4 @@
+import { syntheticTrustPolicy, SYNTHETIC_CONFIG, SYNTHETIC_GENESIS } from "../../../tests/support/trust-fixtures.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { decodeCertificatePackageBase64url } from "../../verifier/src/certificate-codec.ts";
@@ -15,6 +16,7 @@ const issuerSecret = new Uint8Array(32).fill(9);
 const programId = new Uint8Array(32).fill(4);
 const segmentPda = new Uint8Array(32).fill(5);
 const signature = new Uint8Array(64).fill(6);
+const trustPolicy = syntheticTrustPolicy({ programId, issuerSeed: issuerSecret });
 
 const rows: SyntheticRecordRow[] = [
   { internalRecordId: "SYNTHETIC-1", sourceCursor: 1n, recordVersion: 1n, status: "ACTIVE", recordFieldKeyHex: "01".repeat(32) },
@@ -94,11 +96,13 @@ test("an issued certificate verifies against the anchored batch", async () => {
 
   const signed = decodeCertificatePackageBase64url(issued.packageBase64url);
   const chain: ChainReader = {
+    async getGenesisHash() { return SYNTHETIC_GENESIS; },
     async getRegistryConfig(body) {
-      return { registryIdHash: registryIdHash(body.registryId), paused: false };
+      return { registryIdHash: registryIdHash(body.registryId), paused: false, configPda: SYNTHETIC_CONFIG, programId };
     },
     async getAnchor() {
       return {
+        registryConfigPda: SYNTHETIC_CONFIG,
         programId,
         segmentPda,
         derivedSegmentPda: segmentPda,
@@ -120,7 +124,7 @@ test("an issued certificate verifies against the anchored batch", async () => {
       return { registryId: REGISTRY_ID, indexedThroughSlot: 1_005n, incidents: [] };
     },
   };
-  assert.equal((await verifyCertificate(signed, chain, incidents)).status, "VERIFIED");
+  assert.equal((await verifyCertificate(signed, chain, incidents, { trustPolicy })).status, "VERIFIED");
 });
 
 test("a tampered package byte fails verification", async () => {
@@ -140,11 +144,13 @@ test("a tampered package byte fails verification", async () => {
   const bytes = Buffer.from(issued.packageBase64url, "base64url");
   bytes[bytes.length - 1] ^= 0x01;
   const chain: ChainReader = {
+    async getGenesisHash() { return SYNTHETIC_GENESIS; },
     async getRegistryConfig(body) {
-      return { registryIdHash: registryIdHash(body.registryId), paused: false };
+      return { registryIdHash: registryIdHash(body.registryId), paused: false, configPda: SYNTHETIC_CONFIG, programId };
     },
     async getAnchor() {
       return {
+        registryConfigPda: SYNTHETIC_CONFIG,
         programId,
         segmentPda,
         derivedSegmentPda: segmentPda,
@@ -172,6 +178,7 @@ test("a tampered package byte fails verification", async () => {
       decodeCertificatePackageBase64url(bytes.toString("base64url")),
       chain,
       incidents,
+      { trustPolicy },
     )).status;
   } catch {
     status = "INVALID";
@@ -204,11 +211,13 @@ function multiFieldBatch(source: SyntheticRecordRow[] = MULTI_FIELD) {
 
 function anchorReader(prepared: ReturnType<typeof buildBatch>): ChainReader {
   return {
+    async getGenesisHash() { return SYNTHETIC_GENESIS; },
     async getRegistryConfig() {
-      return { registryIdHash: registryIdHash(REGISTRY_ID), paused: false };
+      return { registryIdHash: registryIdHash(REGISTRY_ID), paused: false, configPda: SYNTHETIC_CONFIG, programId };
     },
     async getAnchor() {
       return {
+        registryConfigPda: SYNTHETIC_CONFIG,
         programId,
         segmentPda,
         derivedSegmentPda: segmentPda,
@@ -300,7 +309,7 @@ test("a selective disclosure verifies and carries only the chosen paths", async 
   const fullSigned = decodeCertificatePackageBase64url(full.packageBase64url);
   assert.equal(toHex(signed.body.fieldRoot), toHex(fullSigned.body.fieldRoot));
 
-  const result = await verifyCertificate(signed, anchorReader(prepared), cleanIndex);
+  const result = await verifyCertificate(signed, anchorReader(prepared), cleanIndex, { trustPolicy });
   assert.equal(result.status, "VERIFIED");
   assert.equal(result.disclosureMode, "SELECTIVE_FIELDS");
   assert.deepEqual(Object.keys(result.disclosedFields ?? {}), ["areaSquareMeters", "status"]);

@@ -1,4 +1,4 @@
-import { createHash, generateKeyPairSync, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, generateKeyPairSync, randomUUID, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { Pool } from "pg";
@@ -10,15 +10,28 @@ import { fixtureRoot, type SyntheticFixtureRow } from "./reconcile.ts";
 import { qrHashHex } from "./qr.ts";
 import { refreshIncidentIndex, type RegistryBinding } from "./incident-index.ts";
 import { PostgresIncidentStore } from "./incident-store.ts";
+import { incidentsRoute } from "./incident-route.ts";
 import { SolanaPublisherRpc } from "./solana-rpc.ts";
-import { parseCredentials, SessionStore, CSRF_HEADER } from "./admin-session.ts";
+import { parseCredentials, SessionStore, CSRF_HEADER, authorizeRequest, requirePermission, AuthorizationError, IdentityUnavailableError } from "./admin-session.ts";
+import { requireUnrestrictedResourceAccess } from "./resource-access.ts";
 import { routeAdmin, type AdminContext } from "./admin.ts";
+import { PostgresSessionStore } from "./postgres-session.ts";
+import { OidcClient, parseOidcConfig } from "./oidc.ts";
+import {
+  carriesHumanSession, carriesServiceBearer, parseServiceBearer, ServicePrincipalStore, ServiceRequestGate,
+  SERVICE_CREDENTIAL_REQUIRED, type ServiceAction, type ServicePrincipal,
+} from "./service-principal.ts";
+import { authorizeServiceRead, matchServiceRead, type ServiceReadRoute } from "./service-read-routes.ts";
 import { workingRegistryStatus } from "./registry-status.ts";
-import { splitRecoveryKek } from "../../../packages/snapshot-ts/src/index.ts";
+import { loadSnapshotKeyConfig } from "./snapshot-key-config.ts";
+import { bindSnapshotKeyVersion } from "./snapshot-key-store.ts";
 
 const MAX_BODY = 1_048_576;
 const REGISTRY_ID = "gov.registry.land";
 const MARKER = "ONELAYER_SYNTHETIC_DEVNET_DEMO_V1";
+/** Verifier batch sequences are u64; the demo stores them in a BIGINT column. */
+const U64_MAX = 0xffff_ffff_ffff_ffffn;
+const INT8_MAX = 0x7fff_ffff_ffff_ffffn;
 
 function required(name: string): string {
   const value = process.env[name];
@@ -31,7 +44,6 @@ function secret(pathName: string): string {
 }
 
 const databaseUrl = secret("ONELAYER_DATABASE_URL_FILE");
-const internalToken = secret("ONELAYER_INTERNAL_TOKEN_FILE");
 const rpcUrl = required("ONELAYER_RPC_URL");
 const verifierUrl = required("ONELAYER_VERIFIER_URL");
 const publicBaseUrl = required("ONELAYER_PUBLIC_BASE_URL");
@@ -42,11 +54,17 @@ if (!/^http:\/\/(?:127\.0\.0\.1|localhost):[0-9]{2,5}$/.test(publicWebBaseUrl)) 
 }
 const issuerSecretKey = Uint8Array.from(Buffer.from(secret("ONELAYER_ISSUER_SECRET_FILE"), "hex"));
 if (issuerSecretKey.length !== 32) throw new Error("ONELAYER_ISSUER_SECRET_FILE must hold 32 hex-encoded bytes");
-const adminCredentials = parseCredentials(secret("ONELAYER_ADMIN_CREDENTIALS_FILE"));
+const oidcConfig = process.env.ONELAYER_OIDC_CONFIG_FILE
+  ? parseOidcConfig(JSON.parse(secret("ONELAYER_OIDC_CONFIG_FILE"))) : undefined;
+const adminCredentials = oidcConfig ? [] : parseCredentials(secret("ONELAYER_ADMIN_CREDENTIALS_FILE"));
 if (rpcUrl !== "https://api.devnet.solana.com") throw new Error("demo API is devnet-only");
-const pool = new Pool({ connectionString: databaseUrl, max: 5 });
-const snapshotKek = randomBytes(32);
-const recoveryShares = splitRecoveryKek(snapshotKek);
+const pool = new Pool({ connectionString: databaseUrl, max: 5, connectionTimeoutMillis: 5_000 });
+// The snapshot writer key is explicit, restart-stable configuration. It is
+// never generated, split or persisted here: without configuration the API
+// still starts and snapshot creation fails closed (SNAPSHOT_KEY_UNAVAILABLE),
+// and a partial or invalid pair refuses startup instead of substituting a
+// process-random or issuer key.
+const snapshotKeyConfig = loadSnapshotKeyConfig();
 const recoveryKeys = new Map<string, Uint8Array>();
 const restoreApprovalPrivateKey = generateKeyPairSync("ed25519").privateKey;
 
@@ -55,25 +73,62 @@ const [configAddress] = await findRegistryConfigPda(registryIdHash(REGISTRY_ID),
 });
 const registryBinding: RegistryBinding = {
   registryId: REGISTRY_ID,
+  programId,
   configAddress,
   configBytes: new Uint8Array(getAddressEncoder().encode(configAddress)),
 };
 const incidentRpc = new SolanaPublisherRpc(rpcUrl, programId);
 const incidentStore = new PostgresIncidentStore(pool, configAddress);
 
+const sessionBackend = process.env.ONELAYER_SESSION_BACKEND ?? "postgres";
+if (sessionBackend !== "postgres" && sessionBackend !== "memory") throw new Error("invalid ONELAYER_SESSION_BACKEND");
+if (oidcConfig && sessionBackend !== 'postgres') throw new Error('OIDC requires durable PostgreSQL sessions');
+// Internal routes use durable scoped service principals by default. The isolated
+// in-memory test backend defaults to `disabled` (internal routes refused, no DB
+// dependency). The synthetic shared bearer survives only as an explicit
+// password-demo opt-in and is refused at startup in OIDC mode. No silent fallback.
+const internalAuth = process.env.ONELAYER_INTERNAL_AUTH ?? (sessionBackend === "memory" ? "disabled" : "service-principal");
+if (!["service-principal", "legacy-demo-token", "disabled"].includes(internalAuth)) throw new Error("invalid ONELAYER_INTERNAL_AUTH");
+if (oidcConfig && internalAuth !== "service-principal") throw new Error("OIDC mode requires service principals for internal routes");
+const legacyInternalToken = internalAuth === "legacy-demo-token" ? secret("ONELAYER_INTERNAL_TOKEN_FILE") : undefined;
+if (legacyInternalToken !== undefined && !/^[\x21-\x7e]{32,512}$/.test(legacyInternalToken)) throw new Error("legacy internal token must be 32-512 printable characters");
+if (oidcConfig && (!/^http:\/\/(?:127\.0\.0\.1|localhost):[0-9]{2,5}$/.test(publicBaseUrl) || new URL(publicBaseUrl).hostname !== new URL(publicWebBaseUrl).hostname)) {
+  throw new Error('OIDC lab API and web must use the same exact loopback hostname for host-only cookies');
+}
+if (oidcConfig && oidcConfig.redirectUri !== `${publicBaseUrl}/v2/admin/oidc/callback`) throw new Error('OIDC redirectUri must match the API callback');
+const sessions = sessionBackend === "postgres"
+  ? new PostgresSessionStore(pool, adminCredentials, { oidcOnly: Boolean(oidcConfig) })
+  : new SessionStore(adminCredentials);
+if (sessions instanceof PostgresSessionStore) await sessions.initialize();
+// Separate small pool: internal authentication cannot exhaust the pool used by
+// human sessions and admin data (M1). The gate below bounds it further.
+const servicePool = new Pool({ connectionString: databaseUrl, max: 2, connectionTimeoutMillis: 2_000 });
+const servicePrincipals = new ServicePrincipalStore(servicePool);
+// Any backend: service-principal mode refuses to start without schema 0012.
+if (internalAuth === "service-principal") await servicePrincipals.initialize();
+const serviceGate = new ServiceRequestGate();
+
 const adminContext: AdminContext = {
+  ...(oidcConfig && sessions instanceof PostgresSessionStore ? { oidc: {
+    client: new OidcClient(oidcConfig), login: identity => sessions.loginOidc(identity),
+    browserOrigin: publicWebBaseUrl, secureCookies: new URL(publicBaseUrl).protocol === 'https:',
+    successRedirect: `${publicWebBaseUrl}/admin`,
+  } } : {}),
   pool,
-  sessions: new SessionStore(adminCredentials),
+  sessions,
   rpc: incidentRpc,
   registryId: REGISTRY_ID,
   programId: programId as Address,
   configPda: configAddress,
   issuerSecretKey,
-  // The bounded MVP writer keeps its DEK-wrapping KEK and the out-of-band
-  // 3-of-5 custody material in process memory only. Neither is returned to
-  // the browser, written to the database, or included in the timeline.
-  snapshotKek,
-  recoveryShares,
+  // The bounded MVP writer holds only the explicitly provisioned key material
+  // for the life of the process; it is never returned to the browser, written
+  // to the database, or included in the timeline. Recovery shares are not
+  // generated or stored by the ordinary API process.
+  ...(snapshotKeyConfig === undefined ? {} : {
+    snapshotKek: snapshotKeyConfig.kek,
+    snapshotKeyEncryptionVersion: snapshotKeyConfig.keyEncryptionVersion,
+  }),
   recoveryKeys,
   restoreApprovalPrivateKey,
   publicWebBaseUrl,
@@ -103,6 +158,10 @@ async function refreshIndex(): Promise<void> {
   await indexRefresh;
 }
 
+// Recovery-anchor and snapshot-anchor selection (admin.ts) accept the index
+// only after a recent complete refresh, so keep refreshing in the background.
+setInterval(() => { void refreshIndex(); }, 30_000).unref();
+
 function json(response: ServerResponse, status: number, body: unknown): void {
   const encoded = JSON.stringify(body, (_key, value) => typeof value === "bigint" ? value.toString() : value);
   response.writeHead(status, {
@@ -127,11 +186,67 @@ async function body(request: IncomingMessage): Promise<Record<string, unknown>> 
   return parsed as Record<string, unknown>;
 }
 
-function authorized(request: IncomingMessage): boolean {
-  const supplied = request.headers.authorization?.replace(/^Bearer /, "") ?? "";
-  const left = Buffer.from(supplied);
-  const right = Buffer.from(internalToken);
-  return left.length === right.length && timingSafeEqual(left, right);
+class InternalRefusal extends Error {
+  constructor(readonly status: number, readonly code: string) { super(code); }
+}
+
+/**
+ * Admission for internal routes, before any body read or DB access: exact
+ * credential syntax, no human cookie, then the in-process rate/concurrency gate.
+ * Returns the gate key's release function.
+ */
+function admitInternal(request: IncomingMessage): () => void {
+  if (internalAuth === "disabled") throw new InternalRefusal(503, "SERVICE_AUTH_DISABLED");
+  if (carriesHumanSession(request.headers.cookie)) throw new AuthorizationError(401, SERVICE_CREDENTIAL_REQUIRED);
+  let key: string;
+  if (legacyInternalToken === undefined) {
+    const parsed = parseServiceBearer(request.headers.authorization);
+    if (!parsed) throw new AuthorizationError(401, SERVICE_CREDENTIAL_REQUIRED);
+    key = parsed.credentialId;
+  } else {
+    // Explicit synthetic demo mode: one shared bearer, digest + constant-time compare.
+    const header = request.headers.authorization ?? "";
+    const supplied = createHash("sha256").update(header.startsWith("Bearer ") ? header.slice(7) : "").digest();
+    const expected = createHash("sha256").update(legacyInternalToken).digest();
+    if (!timingSafeEqual(supplied, expected) || !header.startsWith("Bearer ")) throw new AuthorizationError(401, "UNAUTHORIZED");
+    key = "legacy";
+  }
+  const admitted = serviceGate.enter(key);
+  if (admitted === "BUSY") throw new InternalRefusal(429, "SERVICE_BUSY");
+  if (admitted === "RATE_LIMITED") throw new InternalRefusal(429, "SERVICE_RATE_LIMITED");
+  return admitted;
+}
+
+/**
+ * Identity, action and registry scope come from PostgreSQL only; forwarded
+ * headers, body fields and human cookies never contribute. `precheck`
+ * authorizes against the deployment registry without recording success; it
+ * runs before a request body is read.
+ */
+async function authorizeInternal(request: IncomingMessage, action: ServiceAction, registryId: unknown, precheck = false): Promise<ServicePrincipal | null> {
+  if (legacyInternalToken === undefined) {
+    return servicePrincipals.authorize(request.headers.authorization, action, registryId, { recordSuccess: !precheck });
+  }
+  if (registryId !== REGISTRY_ID) throw new AuthorizationError(403, "SERVICE_PERMISSION_FORBIDDEN");
+  return null;
+}
+
+/** Internal bodies must arrive within this bound; a slow body cannot pin a gate slot (N2). */
+const INTERNAL_BODY_TIMEOUT_MS = Number(process.env.ONELAYER_INTERNAL_BODY_TIMEOUT_MS ?? "10000");
+if (!Number.isSafeInteger(INTERNAL_BODY_TIMEOUT_MS) || INTERNAL_BODY_TIMEOUT_MS < 100 || INTERNAL_BODY_TIMEOUT_MS > 10_000) {
+  throw new Error("ONELAYER_INTERNAL_BODY_TIMEOUT_MS must be 100-10000");
+}
+
+async function internalBody(request: IncomingMessage): Promise<Record<string, unknown>> {
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; request.destroy(); }, INTERNAL_BODY_TIMEOUT_MS);
+  try { return await body(request); }
+  catch (error) {
+    if (timedOut) throw new InternalRefusal(408, "REQUEST_TIMEOUT");
+    if (error instanceof RangeError) throw new InternalRefusal(413, "REQUEST_TOO_LARGE");
+    if (error instanceof SyntaxError || error instanceof TypeError) throw new InternalRefusal(400, "REQUEST_INVALID");
+    throw error;
+  } finally { clearTimeout(timer); }
 }
 
 function text(value: unknown, name: string, pattern: RegExp): string {
@@ -156,11 +271,7 @@ async function requireWorkingRegistry(response: ServerResponse): Promise<boolean
   return false;
 }
 
-async function registerArtifact(input: Record<string, unknown>): Promise<void> {
-  await ensureFixture();
-  const registryStatus = await workingRegistryStatus(incidentRpc, configAddress);
-  if (registryStatus === "PAUSED") throw new Error("REGISTRY_PAUSED");
-  if (registryStatus === "UNAVAILABLE") throw new Error("REGISTRY_STATUS_UNAVAILABLE");
+function registrationFields(input: Record<string, unknown>) {
   const registryId = text(input.registryId, "registryId", /^gov\.registry\.land$/);
   const batchSequence = unsigned(input.batchSequence, "batchSequence");
   const registryVersion = unsigned(input.registryVersion, "registryVersion");
@@ -183,9 +294,31 @@ async function registerArtifact(input: Record<string, unknown>): Promise<void> {
   const recordVersion = input.recordVersion === undefined
     ? null
     : unsigned(input.recordVersion, "recordVersion");
+  return { registryId, batchSequence, registryVersion, merkleRoot, manifestHash, anchorHash, programId, segmentPda,
+    transactionSignature, anchorSlot, certificateId, certificateHash, certificatePackage, qrUrl, issuedAt, internalRecordId, recordVersion };
+}
+
+async function registerArtifact(input: Record<string, unknown>, principal: ServicePrincipal | null): Promise<void> {
+  // Field validation happens before any fixture or RPC work (N6): a malformed
+  // registration is a 400 client error, not a 500 after a chain call.
+  let fields: ReturnType<typeof registrationFields>;
+  try { fields = registrationFields(input); }
+  catch (error) {
+    if (error instanceof TypeError || error instanceof RangeError) throw new InternalRefusal(400, "REQUEST_INVALID");
+    throw error;
+  }
+  const { registryId, batchSequence, registryVersion, merkleRoot, manifestHash, anchorHash, programId, segmentPda,
+    transactionSignature, anchorSlot, certificateId, certificateHash, certificatePackage, qrUrl, issuedAt, internalRecordId, recordVersion } = fields;
+  await ensureFixture();
+  const registryStatus = await workingRegistryStatus(incidentRpc, configAddress);
+  if (registryStatus === "PAUSED") throw new Error("REGISTRY_PAUSED");
+  if (registryStatus === "UNAVAILABLE") throw new Error("REGISTRY_STATUS_UNAVAILABLE");
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    // A revoke/rotation committed after authorization (e.g. during the RPC
+    // status call above) rolls this write back instead of racing it (m2).
+    if (principal) await servicePrincipals.revalidate(client, principal);
     await client.query(
       `INSERT INTO demo_anchor (
         registry_id, batch_sequence, registry_version, merkle_root, manifest_hash, anchor_hash,
@@ -299,8 +432,10 @@ async function handleAdmin(
     cookieHeader: request.headers.cookie,
     csrfHeader: firstHeader(request.headers[CSRF_HEADER]),
     idempotencyKey: firstHeader(request.headers["idempotency-key"]),
+    originHeader: request.headers.origin,
   });
   if (result.setCookie !== undefined) response.setHeader("set-cookie", result.setCookie);
+  if (result.location !== undefined) response.setHeader('location', result.location);
   if (result.status === 204) {
     response.writeHead(204, { "cache-control": "no-store" });
     response.end();
@@ -315,7 +450,21 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
 
 async function handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
   const url = new URL(request.url ?? "/", publicBaseUrl);
-  if (url.pathname.startsWith("/v1/admin/")) {
+  const internalRoute = url.pathname === "/internal/register" || url.pathname === "/internal/reconcile";
+  // A service principal is never a human identity: its bearer is refused on
+  // every non-internal route, even alongside a valid admin cookie, except the
+  // exact verifier GET surface whitelisted in service-read-routes.ts. That
+  // surface exists only where durable service principals are configured; the
+  // legacy demo token never unlocks it.
+  const serviceBearer = carriesServiceBearer(request.headers.authorization);
+  const serviceRead = serviceBearer && internalAuth === "service-principal" && !internalRoute
+    ? matchServiceRead(request.method, url.pathname)
+    : null;
+  if (!internalRoute && serviceBearer && serviceRead === null) {
+    json(response, 401, { code: "SERVICE_PRINCIPAL_NOT_ALLOWED" });
+    return;
+  }
+  if (url.pathname.startsWith("/v1/admin/") || url.pathname.startsWith("/v2/admin/")) {
     await handleAdmin(request, response, url);
     return;
   }
@@ -324,19 +473,72 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     json(response, 200, { status: "ok", fixture: MARKER, cluster: "devnet" });
     return;
   }
-  if (request.method === "POST" && url.pathname === "/internal/register") {
-    if (!authorized(request)) { json(response, 401, { code: "UNAUTHORIZED" }); return; }
-    await registerArtifact(await body(request));
-    json(response, 201, { status: "registered" });
+  if (request.method === "POST" && internalRoute) {
+    const release = admitInternal(request);
+    try {
+      if (url.pathname === "/internal/register") {
+        // Credential + action are checked before the body is read; the registry
+        // scope is checked (and audited) once the body names it.
+        await authorizeInternal(request, "artifacts.register", REGISTRY_ID, true);
+        const input = await internalBody(request);
+        const principal = await authorizeInternal(request, "artifacts.register", input.registryId);
+        await registerArtifact(input, principal);
+        json(response, 201, { status: "registered" });
+      } else {
+        await authorizeInternal(request, "integrity.reconcile", REGISTRY_ID);
+        json(response, 200, await reconcile());
+      }
+    } finally { release(); }
     return;
   }
-  if (request.method === "POST" && url.pathname === "/internal/reconcile") {
-    if (!authorized(request)) { json(response, 401, { code: "UNAUTHORIZED" }); return; }
-    json(response, 200, await reconcile());
-    return;
+  // Admission for a whitelisted read, in the same order as the internal routes
+  // (human cookie, strict bearer syntax, in-process gate). The slot is held for
+  // the whole response-producing operation below, not only for the authorization
+  // call: the concurrency cap must bound in-flight read work (resource queries,
+  // the incident index refresh) and the pool connections that work holds.
+  const releaseServiceRead = serviceRead === null ? null : admitInternal(request);
+  try {
+    await handlePublicReads(request, response, url, serviceRead);
+  } finally { releaseServiceRead?.(); }
+}
+
+/**
+ * Everything after admission on the public surface: the legacy lookup routes
+ * and, for the whitelisted GETs, the live service-principal decision. A human
+ * request keeps the OIDC admission and export gate; an authorized service read
+ * bypasses that gate for the whitelisted path only.
+ */
+async function handlePublicReads(
+  request: IncomingMessage,
+  response: ServerResponse,
+  url: URL,
+  serviceRead: ServiceReadRoute | null,
+): Promise<void> {
+  if (serviceRead !== null) {
+    await authorizeServiceRead(servicePrincipals, request.headers.authorization, serviceRead, url, REGISTRY_ID);
+  }
+  if (oidcConfig && serviceRead === null) {
+    // Legacy QR/lookup routes must not bypass corporate session admission.
+    const session = await authorizeRequest(sessions, {
+      method: request.method ?? 'GET', cookieHeader: request.headers.cookie,
+      csrfHeader: firstHeader(request.headers[CSRF_HEADER]),
+    });
+    requirePermission(session, REGISTRY_ID, 'certificates.read');
+    requireUnrestrictedResourceAccess(session.resourcePolicy, REGISTRY_ID, 'certificates.read');
+    requirePermission(session, REGISTRY_ID, 'certificates.export');
+    requireUnrestrictedResourceAccess(session.resourcePolicy, REGISTRY_ID, 'certificates.export');
   }
   if (request.method === "GET" && url.pathname.startsWith("/v1/anchors/")) {
     const batchSequence = unsigned(url.pathname.slice("/v1/anchors/".length), "batchSequence");
+    // The verifier domain is u64, not the storage width: a value above u64 is
+    // not a batch sequence at all (400), and a valid u64 above INT8_MAX cannot
+    // exist in the BIGINT column (404). Both decisions are made before the
+    // query, and the 20-digit bound stops BigInt from ever parsing an unbounded
+    // number (a canonical u64 is at most 20 digits).
+    if (batchSequence.length > 20) { json(response, 400, { code: "BATCH_SEQUENCE_INVALID" }); return; }
+    const sequence = BigInt(batchSequence);
+    if (sequence > U64_MAX) { json(response, 400, { code: "BATCH_SEQUENCE_INVALID" }); return; }
+    if (sequence > INT8_MAX) { json(response, 404, { code: "ANCHOR_NOT_FOUND" }); return; }
     const result = await pool.query(
       "SELECT registry_id, batch_sequence::text, registry_version::text, encode(merkle_root,'hex') merkle_root, encode(manifest_hash,'hex') manifest_hash, program_id, segment_pda, transaction_signature, anchor_slot::text, commitment FROM demo_anchor WHERE registry_id=$1 AND batch_sequence=$2",
       [REGISTRY_ID, batchSequence],
@@ -345,40 +547,14 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     return;
   }
   if (request.method === "GET" && url.pathname === "/v1/incidents") {
-    if (url.searchParams.get("registryId") !== REGISTRY_ID) throw new TypeError("registryId is invalid");
-    const batchSequence = BigInt(unsigned(url.searchParams.get("batchSequence"), "batchSequence"));
-    await refreshIndex();
-    const [state, onchain, local] = await Promise.all([
-      incidentStore.loadState(REGISTRY_ID),
-      incidentStore.listNotices(REGISTRY_ID, batchSequence),
-      // Local monitor findings (direct-DB tampering) are not on-chain events and
-      // are reported as a separate source; they never set the watermark.
-      pool.query(
-        "SELECT first_suspect_batch::text, last_suspect_batch::text, status FROM integrity_incident WHERE registry_id=$1 AND first_suspect_batch <= $2 AND last_suspect_batch >= $2",
-        [REGISTRY_ID, batchSequence.toString()],
-      ),
-    ]);
-    const incidents = [
-      ...onchain.map((notice) => ({
-        firstBatchSequence: notice.firstSuspectBatch.toString(),
-        lastBatchSequence: notice.lastSuspectBatch.toString(),
-        status: notice.status,
-        source: "ONCHAIN" as const,
-        openedSlot: notice.openedSlot.toString(),
-        resolvedSlot: notice.resolvedSlot === null ? undefined : notice.resolvedSlot.toString(),
-      })),
-      ...local.rows.map((row) => ({
-        firstBatchSequence: row.first_suspect_batch,
-        lastBatchSequence: row.last_suspect_batch,
-        status: row.status === "OPEN" ? "OPEN" as const : "RESOLVED" as const,
-        source: "LOCAL_MONITOR" as const,
-      })),
-    ];
-    const body: Record<string, unknown> = { registryId: REGISTRY_ID, incidents };
-    // No watermark means "never indexed", which the verifier must read as
-    // UNAVAILABLE rather than as a complete empty answer.
-    if (state.indexedThroughSlot > 0n) body.indexedThroughSlot = state.indexedThroughSlot.toString();
-    json(response, 200, body);
+    // Status mapping, u64 strings and the numeric batch comparison live in
+    // incident-route.ts (tested in tests/incident-route.test.ts).
+    json(response, 200, await incidentsRoute({
+      registryId: REGISTRY_ID,
+      refresh: refreshIndex,
+      store: incidentStore,
+      queryLocal: (sql, values) => pool.query(sql, values),
+    }, url));
     return;
   }
   const certificateLifecycle = url.pathname.match(/^\/v1\/certificates\/([0-9a-f]{32})\/lifecycle$/);
@@ -400,6 +576,7 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
     const status: string = result.rows[0].status;
     json(response, 200, {
       registryId: REGISTRY_ID,
+      certificateId: certificateLifecycle[1],
       currentRecordVersion: result.rows[0].current_record_version,
       // DISPUTED is an incident state, not a lifecycle state: the certificate
       // itself has not been replaced.
@@ -409,7 +586,12 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   }
   const certificateStatus = url.pathname.match(/^\/v1\/certificates\/([0-9a-f]{32})\/status$/);
   if (request.method === "GET" && certificateStatus) {
-    const result = await pool.query("SELECT certificate_id, status, batch_sequence::text FROM demo_certificate WHERE certificate_id=$1", [certificateStatus[1]]);
+    // The registry filter keeps a foreign registry's certificate unreadable
+    // through its ID, like the lifecycle and metadata queries already do.
+    const result = await pool.query(
+      "SELECT certificate_id, status, batch_sequence::text FROM demo_certificate WHERE certificate_id=$1 AND registry_id=$2",
+      [certificateStatus[1], REGISTRY_ID],
+    );
     json(response, result.rows.length ? 200 : 404, result.rows[0] ?? { code: "CERTIFICATE_NOT_FOUND" });
     return;
   }
@@ -511,7 +693,23 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
 
 const port = Number(process.env.PORT ?? "8090");
 if (!Number.isSafeInteger(port) || port < 1 || port > 65535) throw new Error("PORT is invalid");
+// Startup binding: a configured version identifier must never be reused with
+// different key material across restarts. Registration is awaited before the
+// listener starts, so a conflicting restart refuses to serve. Only a
+// domain-separated digest reaches PostgreSQL; the KEK is never persisted.
+if (snapshotKeyConfig !== undefined) {
+  await bindSnapshotKeyVersion(pool, REGISTRY_ID, snapshotKeyConfig);
+}
 const server = createServer((request, response) => {
-  handle(request, response).catch((error: unknown) => json(response, 500, { code: "DEMO_API_ERROR", message: error instanceof Error ? error.message : "unknown error" }));
+  handle(request, response).catch((error: unknown) => {
+    if (error instanceof AuthorizationError) { json(response, error.status, { code: error.code }); return; }
+    if (error instanceof InternalRefusal) {
+      if (error.status === 429) response.setHeader("retry-after", "1");
+      json(response, error.status, { code: error.code });
+      return;
+    }
+    if (error instanceof IdentityUnavailableError) { json(response, 503, { code: 'IDENTITY_UNAVAILABLE' }); return; }
+    json(response, 500, { code: "DEMO_API_ERROR" });
+  });
 });
-server.listen(port, "0.0.0.0", () => process.stdout.write(`demo API listening on 0.0.0.0:${port}\n`));
+server.listen(port, "127.0.0.1", () => process.stdout.write(`demo API listening on 127.0.0.1:${port}\n`));

@@ -270,3 +270,98 @@ test("unknown admin paths are 404 for an authenticated session", async () => {
   }));
   assert.equal(response.status, 404);
 });
+
+const scopedRoutes: readonly [string, string][] = [
+  ["GET", "/schema"], ["GET", "/dashboard"], ["GET", "/records"],
+  ["GET", "/records/SYNTHETIC-1"], ["POST", "/records"], ["POST", "/records/import"],
+  ["GET", "/preview"], ["GET", "/certificates"], ["GET", "/timeline"],
+  ["GET", "/backup-centers"], ["POST", "/backup-centers"],
+  ["POST", "/backup-centers/center-1/health"], ["POST", "/backup-centers/center-1/availability"],
+  ["GET", "/snapshots"], ["POST", "/snapshots"],
+  ["GET", "/snapshots/refresh"], ["POST", "/snapshots/refresh"],
+  ["GET", "/backup-centers/refresh"], ["POST", "/backup-centers/refresh"],
+  ["GET", "/recovery"], ["GET", "/recovery/operations"],
+  ["POST", "/recovery/prepare"], ["POST", "/recovery/operations"],
+  ...["/recovery", "/recovery/operations"].flatMap((prefix): [string, string][] => [
+    ["GET", `${prefix}/00000000-0000-0000-0000-000000000001`],
+    ["POST", `${prefix}/00000000-0000-0000-0000-000000000001/approve`],
+    ["POST", `${prefix}/00000000-0000-0000-0000-000000000001/approval`],
+    ["POST", `${prefix}/00000000-0000-0000-0000-000000000001/restore`],
+  ]),
+  ["GET", "/snapshots/00000000-0000-0000-0000-000000000001"],
+  ["GET", "/snapshots/00000000-0000-0000-0000-000000000001/retry"],
+  ["POST", "/snapshots/00000000-0000-0000-0000-000000000001/retry"],
+  ["POST", "/publish-intents"],
+  ["GET", "/publish-intents/00000000-0000-0000-0000-000000000001"],
+  ...["signature", "reconciliation", "certificate", "rejection"].map((action): [string, string] =>
+    ["POST", `/publish-intents/00000000-0000-0000-0000-000000000001/${action}`]),
+];
+
+for (const restriction of ["no permissions", "foreign registry"] as const) {
+  test(`every admin data route denies ${restriction} before any SQL or RPC`, async () => {
+    for (const role of ["operator", "auditor", "chief_admin"] as const) {
+      const sessions = new SessionStore(credentials.map((credential) => ({
+        ...credential,
+        ...(restriction === "no permissions" ? { permissions: [] } : { registryIds: ["other.registry"] }),
+      })));
+      const actor = await login(sessions, role);
+      const ctx = context(sessions);
+      ctx.pool = { query() { assert.fail("forbidden request reached SQL"); }, connect() { assert.fail("forbidden request reached SQL transaction"); } } as any;
+      ctx.rpc = new Proxy({}, { get() { assert.fail("forbidden request reached RPC"); } }) as AdminContext["rpc"];
+      for (const [method, path] of scopedRoutes) {
+        const response = await routeAdmin(ctx, request({
+          method, path: `/v1/admin${path}`, cookieHeader: actor.cookieHeader, csrfHeader: actor.csrfToken,
+          // Request-supplied access claims must never widen the server grant.
+          body: { role: "operator", permissions: ["records.read", "recovery.approve"], registryId: ctx.registryId },
+          query: new URLSearchParams({ role: "operator", registryId: ctx.registryId }),
+        }));
+        assert.equal(response.status, 403, `${role}: ${method} ${path}`);
+      }
+    }
+  });
+}
+
+test("read-only narrowed access can read records but cannot learn aggregate counters or certificate metadata", async () => {
+  const sessions = new SessionStore(credentials.map((credential) => ({ ...credential, permissions: ["records.read" as const] })));
+  const actor = await login(sessions, "operator");
+  for (const [path, status] of [["records", 200], ["dashboard", 403], ["certificates", 403], ["timeline", 403]] as const) {
+    const response = await routeAdmin(context(sessions), request({ path: `/v1/admin/${path}`, cookieHeader: actor.cookieHeader }));
+    assert.equal(response.status, status);
+  }
+});
+
+test("logout, user revoke and role change invalidate sessions at the route boundary", async () => {
+  for (const change of ["logout", "revoke", "role"] as const) {
+    const sessions = new SessionStore(credentials);
+    const actor = await login(sessions, "operator");
+    if (change === "logout") {
+      const response = await routeAdmin(context(sessions), request({ method: "DELETE", cookieHeader: actor.cookieHeader, csrfHeader: actor.csrfToken }));
+      assert.equal(response.status, 204);
+    } else if (change === "revoke") sessions.revokeUser("operator");
+    else sessions.updateAccess("operator", { role: "auditor" });
+    const response = await routeAdmin(context(sessions), request({ path: "/v1/admin/records", cookieHeader: actor.cookieHeader }));
+    assert.equal(response.status, 401);
+    if (change === "role") {
+      const renewed = await login(sessions, "operator");
+      const mutation = await routeAdmin(context(sessions), request({ method: "POST", path: "/v1/admin/records", cookieHeader: renewed.cookieHeader, csrfHeader: renewed.csrfToken }));
+      assert.equal(mutation.status, 403);
+    }
+  }
+});
+
+test("an intent ID from another registry does not disclose its existence", async () => {
+  const sessions = new SessionStore(credentials);
+  const actor = await login(sessions, "auditor");
+  const ctx = context(sessions);
+  let queries = 0;
+  ctx.pool = { async query(sql: string, values: unknown[]) {
+    queries++;
+    assert.match(sql, /WHERE intent_id = \$1 AND registry_id = \$2/);
+    assert.deepEqual(values, ["00000000-0000-0000-0000-000000000001", ctx.registryId]);
+    return { rows: [] };
+  } } as any;
+  const response = await routeAdmin(ctx, request({ path: "/v1/admin/publish-intents/00000000-0000-0000-0000-000000000001", cookieHeader: actor.cookieHeader }));
+  assert.equal(response.status, 404);
+  assert.deepEqual(response.body, { code: "INTENT_NOT_FOUND" });
+  assert.equal(queries, 1);
+});

@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# Live-demo tamper entry (B4): thin wrapper over the accepted A3 CLI
+# (apps/verifier/scripts/live-demo-tamper.ts). Args and exit codes are the
+# A3 contract verbatim:
+#   --in FILE --out FILE [--mode area|qr-hash] [--field NAME] [--value TEXT]
+# Exit 0 created · 2 refused request · 3 refused input/output/package · 1 internal.
+# --out must not already exist (file or symlink -> OUTPUT_REFUSED).
+set -euo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$script_dir/../../.." && pwd)
+exec node --experimental-strip-types --disable-warning=ExperimentalWarning \
+  "$repo_root/apps/verifier/scripts/live-demo-tamper.ts" "$@"

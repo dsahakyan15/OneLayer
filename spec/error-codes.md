@@ -63,8 +63,31 @@
 | `VERIFIED_HISTORICAL` | certificate доказан, существует более новая record version |
 | `VERIFIED_NO_INCIDENT_CHECK` | криптографическая проверка успешна, incident index не доказал полноту |
 | `SUPERSEDED` | certificate заменён и policy требует отдельного статуса |
-| `DISPUTED` | batch покрыт открытым/подтверждённым incident |
+| `DISPUTED` | batch покрыт блокирующим incident (`OPEN`, `CONFIRMED` или `RESOLVED`) |
 | `INVALID` | криптографическая или schema-проверка не прошла |
+
+Влияние on-chain `IncidentNotice.status` на batch внутри
+`[first_suspect_batch, last_suspect_batch]` (u64 включительно, `0` и
+`2^64-1` допустимы):
+
+| Status | Verdict для batch в диапазоне | Recovery anchor |
+|---|---|---|
+| `OPEN` (1) | `DISPUTED` | запрещён |
+| `CONFIRMED` (2) | `DISPUTED` — подтверждение нарушения не восстанавливает пригодность данных | запрещён |
+| `FALSE_POSITIVE` (3) | не блокирует: `VERIFIED` при прочих успешных проверках | разрешён |
+| `RESOLVED` (4) | `DISPUTED` — закрытие расследования не восстанавливает пригодность данных ([ADR-0008](../docs/adr/0008-incident-status-data-suitability.md)) | запрещён |
+
+Incident index без полноты (`STALE`/`UNAVAILABLE`/`INDEX_INCONSISTENT`) не
+даёт ни `VERIFIED`, ни вывод об отсутствии incident. Incident wire API V1
+передаёт `OPEN` для `OPEN`/`CONFIRMED`/`RESOLVED` и `RESOLVED` только для
+`FALSE_POSITIVE`; точный статус — в `resolutionStatus`, признак блокировки — в `blocking`.
+Снятие блокировки одним incident не отменяет другие проверки и не доказывает `CURRENT`.
+Local monitor finding (`source: LOCAL_MONITOR`) без полного диапазона
+(`first_suspect_batch` или `last_suspect_batch` = NULL) покрывает все batches:
+передаётся как `firstBatchSequence: "0"`, `lastBatchSequence:
+"18446744073709551615"`, `unscopedRange: true`. В статусах `OPEN` и `RESOLVED` он даёт
+`DISPUTED` для любого batch и запрещает recovery anchor и доверенный snapshot.
+У local finding нет состояния `FALSE_POSITIVE`; административное закрытие не снимает блокировку.
 
 `incidentIndexStatus`:
 
@@ -102,3 +125,12 @@ package → `422`, missing certificate/anchor → `404`, unavailable dependency 
 `503`, internal invariant violation → `500`. `DISPUTED` и
 `VERIFIED_NO_INCIDENT_CHECK` — успешные `200` ответы со статусом, не transport
 errors.
+
+## 5. Backup и recovery (admin API)
+
+| Код | Условие |
+|---|---|
+| `RECOVERY_ANCHOR_UNAVAILABLE` (`409`) | нет finalized anchor, для которого incident index полон (`indexed_through_slot >= anchor_slot`) и обновлён не более 2 минут назад, и batch не покрыт `OPEN`/`CONFIRMED` on-chain notice либо открытым local finding |
+
+Тот же критерий полноты и свежести требуется, чтобы snapshot получил
+`FINALIZED` root: иначе snapshot сохраняется как не-finalized.

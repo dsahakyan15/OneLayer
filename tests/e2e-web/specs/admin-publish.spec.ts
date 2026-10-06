@@ -12,7 +12,7 @@ async function scenario(page: Page, body: Record<string, unknown>): Promise<void
 
 async function signIn(page: Page, user: "operator" | "auditor"): Promise<void> {
   await page.goto("/admin");
-  await page.getByTestId("login-username").selectOption(user);
+  await page.getByTestId("login-username").fill(user);
   await page.getByTestId("login-password").fill(user === "operator" ? OPERATOR_PASSWORD : AUDITOR_PASSWORD);
   await page.getByTestId("login-submit").click();
   await expect(page.getByTestId("session-role")).toHaveText(user);
@@ -60,7 +60,9 @@ test("operator publishes a batch and issues a certificate", async ({ page }) => 
   expect(qrUrl).toMatch(/\/c\/[0-9a-f]{32}\?h=[A-Za-z0-9_-]{43}$/);
 
   await page.goto(qrUrl as string);
-  await expect(page.getByTestId("verification-status")).toContainText("VERIFIED");
+  await expect(page.getByTestId("verification-result")).toHaveAttribute("data-result-version", "2");
+  await expect(page.getByTestId("proofs-status")).toContainText("PROOFS VERIFIED");
+  await expect(page.getByTestId("verification-status")).not.toHaveAttribute("data-tone", "ok");
 });
 
 test("no certificate is offered before the anchor is finalized", async ({ page }) => {

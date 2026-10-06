@@ -11,7 +11,7 @@ async function scenario(page: Page, body: Record<string, unknown>, reset = true)
 
 async function signIn(page: Page, user: "operator" | "chief_admin" = "operator"): Promise<void> {
   await page.goto("/admin");
-  await page.getByTestId("login-username").selectOption(user);
+  await page.getByTestId("login-username").fill(user);
   await page.getByTestId("login-password").fill(user === "operator" ? OPERATOR_PASSWORD : CHIEF_ADMIN_PASSWORD);
   await page.getByTestId("login-submit").click();
   await expect(page.getByTestId("session-role")).toHaveText(user);
@@ -127,7 +127,7 @@ test("anchor, incident and decryption failures stay fail-closed", async ({ page 
   }
 });
 
-test("three shares wait for chief approval, preserve the binding, and restore the full state", async ({ page }) => {
+test("approved recovery material is validated without claiming a target import", async ({ page }) => {
   await signIn(page);
   await page.goto("/admin/backups");
   await page.getByTestId("refresh-backups").click();
@@ -155,14 +155,16 @@ test("three shares wait for chief approval, preserve the binding, and restore th
   await page.goto("/admin/backups");
   await expect(page.getByTestId("recovery-state")).toContainText("AWAITING RESTORE APPROVAL");
   await page.getByTestId("approve-restore").click();
-  await expect(page.getByTestId("recovery-state")).toContainText("APPROVED · RESTORE READY");
+  await expect(page.getByTestId("recovery-state")).toContainText("APPROVED · VALIDATION READY");
 
   await page.getByTestId("logout").click();
   await signIn(page);
   await page.goto("/admin/backups");
-  await expect(page.getByTestId("recovery-state")).toContainText("APPROVED · RESTORE READY");
+  await expect(page.getByTestId("recovery-state")).toContainText("APPROVED · VALIDATION READY");
   await page.getByTestId("restore-recovery").click();
-  await expect(page.getByTestId("recovery-state")).toContainText("RESTORED");
-  await expect(page.getByTestId("recovery-plaintext-cleared")).toContainText("plaintext cleared");
+  await expect(page.getByTestId("recovery-state")).toContainText("VALIDATED · TARGET IMPORT PENDING");
+  await expect(page.getByTestId("recovery-state")).not.toContainText("RESTORED");
+  await expect(page.getByTestId("recovery-material-validated")).toContainText("target import remains pending");
+  await expect(page.getByTestId("recovery-plaintext-cleared")).toHaveCount(0);
   await expect(page.locator("body")).not.toContainText(RECOVERY_SHARES[0]);
 });

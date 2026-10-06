@@ -3,14 +3,21 @@
 import jsQR from "jsqr";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ApiError, publicApi, verify } from "../lib/api";
-import { VerificationResult, type VerificationResponse } from "./verification-result";
+import { VerificationResult, type VerificationResponse, type VerifyEnvelope } from "./verification-result";
 
 type Mode = "camera" | "image" | "manual";
 
 const QR_PATTERN = /^https?:\/\/[^/]+\/c\/([0-9a-f]{32})\?h=([A-Za-z0-9_-]{43})$/;
 
-function invalid(code: string): VerificationResponse {
-  return { status: "INVALID", code, warnings: [] };
+/** The rendered result plus the envelope that produced it. */
+interface Outcome {
+  body: VerificationResponse;
+  envelope: VerifyEnvelope;
+}
+
+/** A failure detected here, before a verifier answered: nothing is attributed upstream. */
+function invalid(code: string): Outcome {
+  return { body: { status: "INVALID", code, warnings: [] }, envelope: "local" };
 }
 
 /**
@@ -22,7 +29,7 @@ export function ScanPanel({ initial }: { initial?: { certificateId: string; qrHa
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [cameraError, setCameraError] = useState<string | null>(null);
-  const [result, setResult] = useState<VerificationResponse | null>(null);
+  const [result, setResult] = useState<Outcome | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
 
@@ -107,7 +114,8 @@ export function ScanPanel({ initial }: { initial?: { certificateId: string; qrHa
       // The QR hash is checked against the stored certificate hash before the
       // package is verified, so a swapped package fails immediately.
       const bundle = await publicApi(`/certificates/${certificateId}/package?h=${encodeURIComponent(qrHash)}`);
-      setResult(await verify(bundle.package_base64url));
+      const outcome = await verify(bundle.package_base64url);
+      setResult({ body: outcome.body, envelope: outcome.protocol });
     } catch (error) {
       setResult(invalid(error instanceof ApiError ? error.code : "VERIFICATION_FAILED"));
     } finally {
@@ -133,7 +141,8 @@ export function ScanPanel({ initial }: { initial?: { certificateId: string; qrHa
     setBusy(true);
     setResult(null);
     try {
-      setResult(await verify(value));
+      const outcome = await verify(value);
+      setResult({ body: outcome.body, envelope: outcome.protocol });
     } catch (error) {
       setResult(invalid(error instanceof ApiError ? error.code : "VERIFICATION_FAILED"));
     } finally {
@@ -205,7 +214,7 @@ export function ScanPanel({ initial }: { initial?: { certificateId: string; qrHa
       </section>
 
       {busy ? <p role="status" data-testid="checking">Checking the finalized Solana anchor…</p> : null}
-      {result !== null ? <VerificationResult result={result} /> : null}
+      {result !== null ? <VerificationResult result={result.body} envelope={result.envelope} /> : null}
     </>
   );
 }

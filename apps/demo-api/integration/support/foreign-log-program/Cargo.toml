@@ -1,0 +1,20 @@
+# Synthetic test-only program for the incident chain integration suite.
+# It is never deployed outside a disposable solana-test-validator.
+[package]
+name = "onelayer-foreign-log-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+name = "onelayer_foreign_log_fixture"
+
+[dependencies]
+anchor-lang = "1.1.2"
+
+# Standalone: not a member of the repository workspaces.
+[workspace]
+
+[profile.release]
+overflow-checks = true

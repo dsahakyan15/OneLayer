@@ -18,12 +18,15 @@ test("public REST verifies canonical package and exposes scoped lookups", async 
   const { packageBytes, signed } = await fixture();
   const body = signed.body;
   const server = createVerifierServer({
+    verifyOptions: { trustPolicy: { version: 1, revision: 1, validUntil: "2099-01-01T00:00:00Z", genesisHash: "synthetic-genesis", registryId: body.registryId, programIdHex: Buffer.from(body.anchor.solanaProgramId).toString("hex"), configPdaHex: "08".repeat(32), schemaVersions: [1], registryVersions: [body.anchor.registryVersion.toString()], issuers: [{ keyId: body.issuerKeyId, publicKeyHex: Buffer.from(body.issuerPublicKey).toString("hex"), algorithm: "Ed25519", validFrom: "2020-01-01T00:00:00Z", validUntil: "2099-01-01T00:00:00Z", revoked: false }] } },
     chain: {
+      async getGenesisHash() { return "synthetic-genesis"; },
       async getRegistryConfig() {
-        return { registryIdHash: registryIdHash(body.registryId), paused: false };
+        return { configPda: new Uint8Array(32).fill(8), programId: body.anchor.solanaProgramId, registryIdHash: registryIdHash(body.registryId), paused: false };
       },
       async getAnchor() {
         return {
+          registryConfigPda: new Uint8Array(32).fill(8),
           programId: body.anchor.solanaProgramId,
           segmentPda: body.anchor.segmentPda,
           derivedSegmentPda: body.anchor.segmentPda,
@@ -65,6 +68,16 @@ test("public REST verifies canonical package and exposes scoped lookups", async 
   });
   assert.equal(verification.status, 200);
   assert.equal((await verification.json()).status, "VERIFIED");
+
+  const v2 = await fetch(`${base}/v2/verify`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ certificatePackage: packageBytes.toString("base64url") }),
+  });
+  assert.equal(v2.status, 200);
+  const v2Body = await v2.json();
+  assert.equal(v2Body.resultVersion, 2);
+  assert.equal(v2Body.status, "UNKNOWN");
+  assert.equal(v2Body.proofs.status, "VERIFIED");
 
   const preflight = await fetch(`${base}/v1/verify`, {
     method: "OPTIONS",

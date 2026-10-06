@@ -16,6 +16,17 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      # Verifier source imports the generated client directly. Install its
+      # dependencies before verifier tests/typecheck resolve those imports.
+      - run: npm ci
+        working-directory: packages/onchain-client
+      - run: npm ci
+        working-directory: apps/demo-api
+      - name: Typecheck live-demo orchestration
+        run: npm run typecheck
+        working-directory: deploy/devnet-demo/scripts
+      - name: Exercise seed refusal, authority and idempotency contracts
+        run: node --test --experimental-transform-types deploy/devnet-demo/scripts/*.test.ts
       - run: cargo test --all
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo fmt --all -- --check
@@ -32,26 +43,31 @@ jobs:
         working-directory: apps/verifier
       - run: npm run typecheck
         working-directory: apps/verifier
-      - run: node --test --experimental-strip-types tests/e2e/*.test.ts
+      - run: sudo apt-get update && sudo apt-get install -y postgresql libpq-dev
+      - name: Require PostgreSQL tools for migration regressions
+        run: |
+          pg_test_bin=$(pg_config --bindir)
+          for tool in pg_ctl initdb psql pg_isready; do
+            test -x "$pg_test_bin/$tool"
+          done
+      - run: node --test --test-concurrency=1 --experimental-transform-types tests/e2e/*.test.ts
       - run: npm ci
         working-directory: packages/snapshot-ts
       - run: npm run typecheck
         working-directory: packages/snapshot-ts
       - run: npm test
         working-directory: packages/snapshot-ts
-      - run: npm ci
-        working-directory: packages/onchain-client
       - run: npm run check-drift
         working-directory: packages/onchain-client
       - run: npm run typecheck
         working-directory: packages/onchain-client
       - run: npm test
         working-directory: packages/onchain-client
-      - run: npm ci
-        working-directory: apps/demo-api
       - run: npm run typecheck
         working-directory: apps/demo-api
       - run: npm test
+        working-directory: apps/demo-api
+      - run: npm run test:integration
         working-directory: apps/demo-api
 
   browser:
@@ -87,4 +103,40 @@ jobs:
         with:
           name: browser-e2e-report
           path: tests/e2e-web/playwright-report
+          retention-days: 7
+
+  desktop:
+    runs-on: ubuntu-latest
+    env:
+      NO_AT_BRIDGE: "1"
+      GSETTINGS_BACKEND: memory
+      GIO_USE_VFS: local
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci
+        working-directory: packages/onchain-client
+      - run: npm ci
+        working-directory: apps/demo-api
+      - name: Install Linux desktop test runtime
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-gi gir1.2-gtk-3.0 gir1.2-secret-1 dbus-x11 xvfb xauth fonts-dejavu-core
+      - name: Exercise GTK interactions and launcher transport
+        run: dbus-run-session -- xvfb-run -a --server-args="-screen 0 1280x900x24" /usr/bin/python3 -m unittest discover -s apps/desktop/lab -v
+      - name: Exercise local launch readiness
+        run: /usr/bin/python3 -m unittest discover -s apps/desktop -p 'test_readiness.py' -v
+      - name: Exercise live-smoke gates and widget contracts without devnet
+        run: dbus-run-session -- xvfb-run -a --server-args="-screen 0 1280x900x24" /usr/bin/python3 -m unittest discover -s deploy/devnet-demo/scripts -p 'test_live_demo_smoke*.py' -v
+      - name: Exercise installed launcher
+        run: |
+          mkdir -p desktop-artifacts
+          dbus-run-session -- xvfb-run -a --server-args="-screen 0 1280x900x24" /usr/bin/python3 apps/desktop/lab/smoke.py --screenshot "$PWD/desktop-artifacts/launcher.png"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-native-smoke
+          path: desktop-artifacts/
           retention-days: 7

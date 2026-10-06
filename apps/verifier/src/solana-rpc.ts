@@ -71,6 +71,8 @@ export class SolanaRpcChainReader implements ChainReader {
       throw new TypeError("registry config is invalid");
     }
     return {
+      configPda: new Uint8Array(this.addressEncoder.encode(configAddress)),
+      programId: new Uint8Array(this.addressEncoder.encode(programAddress)),
       registryIdHash: new Uint8Array(config.registryIdHash),
       paused: config.paused,
     };
@@ -117,6 +119,7 @@ export class SolanaRpcChainReader implements ChainReader {
     }
 
     return {
+      registryConfigPda: segment.registry,
       programId: new Uint8Array(this.addressEncoder.encode(programAddress)),
       segmentPda: new Uint8Array(this.addressEncoder.encode(segmentAddress)),
       derivedSegmentPda: new Uint8Array(this.addressEncoder.encode(derivedAddress)),
@@ -128,6 +131,10 @@ export class SolanaRpcChainReader implements ChainReader {
       slot: BigInt(transaction.slot),
       commitment: "finalized",
     };
+  }
+
+  async getGenesisHash(): Promise<string> {
+    return await this.rpc.getGenesisHash().send();
   }
 
   async getFinalizedHeadSlot(): Promise<bigint> {

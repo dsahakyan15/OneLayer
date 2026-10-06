@@ -22,6 +22,12 @@ export interface IncidentRpc {
   /** Newest-first finalized signatures for the account, stopping at `until`. */
   getSignaturesForAddress(address: string, until: string | null): Promise<SignatureRecord[]>;
   getTransactionLogs(signature: string): Promise<TransactionLogs | null>;
+  getIncidentSnapshot(registry: RegistryBinding, minContextSlot: bigint): Promise<IncidentSnapshot>;
+}
+
+export interface IncidentSnapshot {
+  incidentCount: bigint;
+  notices: Array<Pick<IndexedNotice, "incidentSequence" | "firstSuspectBatch" | "lastSuspectBatch" | "incidentType" | "status">>;
 }
 
 export interface IndexedNotice {
@@ -29,7 +35,7 @@ export interface IndexedNotice {
   firstSuspectBatch: bigint;
   lastSuspectBatch: bigint;
   incidentType: number;
-  status: "OPEN" | "RESOLVED";
+  status: "OPEN" | "CONFIRMED" | "FALSE_POSITIVE" | "RESOLVED";
   openedSlot: bigint;
   resolvedSlot: bigint | null;
 }
@@ -40,11 +46,12 @@ export interface IndexState {
 }
 
 export interface IncidentStore {
+  transaction<T>(registryId: string, action: (store: IncidentStore) => Promise<T>): Promise<T>;
   loadState(registryId: string): Promise<IndexState>;
   applyOpened(registryId: string, notice: IndexedNotice): Promise<void>;
-  applyResolved(registryId: string, incidentSequence: bigint, slot: bigint): Promise<void>;
+  applyResolved(registryId: string, incidentSequence: bigint, slot: bigint, status: Exclude<IndexedNotice["status"], "OPEN">): Promise<void>;
   saveState(registryId: string, state: IndexState): Promise<void>;
-  listNotices(registryId: string, batchSequence: bigint): Promise<IndexedNotice[]>;
+  listNotices(registryId: string, batchSequence?: bigint): Promise<IndexedNotice[]>;
 }
 
 export interface RefreshResult {
@@ -55,6 +62,7 @@ export interface RefreshResult {
 
 export interface RegistryBinding {
   registryId: string;
+  programId: string;
   /** Registry config PDA, base58 for RPC and raw bytes for event matching. */
   configAddress: string;
   configBytes: Uint8Array;
@@ -78,7 +86,9 @@ async function applyEvent(
     });
     return;
   }
-  await store.applyResolved(registry.registryId, event.incidentSequence, slot);
+  const status = ({ 2: "CONFIRMED", 3: "FALSE_POSITIVE", 4: "RESOLVED" } as const)[event.status as 2 | 3 | 4];
+  if (!status) throw new Error("invalid incident resolution status");
+  await store.applyResolved(registry.registryId, event.incidentSequence, slot, status);
 }
 
 export async function refreshIncidentIndex(
@@ -86,30 +96,44 @@ export async function refreshIncidentIndex(
   rpc: IncidentRpc,
   store: IncidentStore,
 ): Promise<RefreshResult> {
-  const state = await store.loadState(registry.registryId);
-  const head = await rpc.getFinalizedHeadSlot();
-  const signatures = await rpc.getSignaturesForAddress(registry.configAddress, state.lastSignature);
-  // Oldest first, so a failure part-way through never records a newer
-  // `lastSignature` than the events actually applied.
-  const ordered = [...signatures].reverse();
-  let applied = 0;
-  let newest = state.lastSignature;
-  for (const record of ordered) {
-    const transaction = await rpc.getTransactionLogs(record.signature);
-    if (transaction === null) throw new Error(`finalized transaction ${record.signature} is unavailable`);
-    if (!transaction.failed) {
-      for (const event of incidentEventsFromLogs(transaction.logs, registry.configBytes)) {
-        await applyEvent(store, registry, event, transaction.slot);
-        applied += 1;
+  return store.transaction(registry.registryId, async (store) => {
+    const state = await store.loadState(registry.registryId);
+    const head = await rpc.getFinalizedHeadSlot();
+    const signatures = await rpc.getSignaturesForAddress(registry.configAddress, state.lastSignature);
+    // Oldest first, so a failure part-way through never records a newer
+    // `lastSignature` than the events actually applied.
+    const ordered = [...signatures].reverse();
+    let applied = 0;
+    let newest = state.lastSignature;
+    for (const record of ordered) {
+      const transaction = await rpc.getTransactionLogs(record.signature);
+      if (transaction === null) throw new Error(`finalized transaction ${record.signature} is unavailable`);
+      if (transaction.slot !== record.slot) throw new Error("incident transaction slot mismatch");
+      if (!transaction.failed) {
+        for (const event of incidentEventsFromLogs(transaction.logs, registry.configBytes, registry.programId)) {
+          await applyEvent(store, registry, event, transaction.slot);
+          applied += 1;
+        }
       }
+      newest = record.signature;
     }
-    newest = record.signature;
-    await store.saveState(registry.registryId, {
-      indexedThroughSlot: state.indexedThroughSlot,
-      lastSignature: newest,
-    });
-  }
-  const indexedThroughSlot = head > state.indexedThroughSlot ? head : state.indexedThroughSlot;
-  await store.saveState(registry.registryId, { indexedThroughSlot, lastSignature: newest });
-  return { indexedThroughSlot, scannedSignatures: ordered.length, appliedEvents: applied };
+    // RPC history can be pruned even on the very first scan (no saved cursor).
+    // Do not infer completeness from an empty history response: reconcile the
+    // whole projection with program-owned finalized incident accounts.
+    const snapshot = await rpc.getIncidentSnapshot(registry, head);
+    const notices = await store.listNotices(registry.registryId);
+    if (BigInt(notices.length) !== snapshot.incidentCount || BigInt(snapshot.notices.length) !== snapshot.incidentCount) {
+      throw new Error("incident count mismatch; history is incomplete");
+    }
+    const bySequence = new Map(notices.map(notice => [notice.incidentSequence, notice]));
+    for (const expected of snapshot.notices) {
+      const actual = bySequence.get(expected.incidentSequence);
+      if (!actual || actual.firstSuspectBatch !== expected.firstSuspectBatch ||
+          actual.lastSuspectBatch !== expected.lastSuspectBatch || actual.incidentType !== expected.incidentType ||
+          actual.status !== expected.status) throw new Error("incident state does not match finalized accounts");
+    }
+    const indexedThroughSlot = head > state.indexedThroughSlot ? head : state.indexedThroughSlot;
+    await store.saveState(registry.registryId, { indexedThroughSlot, lastSignature: newest });
+    return { indexedThroughSlot, scannedSignatures: ordered.length, appliedEvents: applied };
+  });
 }

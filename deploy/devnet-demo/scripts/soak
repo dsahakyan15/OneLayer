@@ -55,15 +55,36 @@ append_cycle() {
       ? "UNAVAILABLE"
       : watermark < Number(chain.anchor_slot) ? "STALE" : "CHECKED";
     const incidents = Array.isArray(index.incidents) ? index.incidents : [];
-    const incidentNumber = (incident) => Number(incident.incidentSequence ?? incident.incident_sequence ?? incident.firstBatchSequence ?? incident.first_suspect_batch ?? 0);
-    const open = incidents.filter((incident) => incident.status === "OPEN").map(incidentNumber).filter(Number.isSafeInteger);
-    const resolved = incidents.filter((incident) => incident.status === "RESOLVED").map(incidentNumber).filter(Number.isSafeInteger);
+    // u64 identifiers are always decimal strings (never Number). On-chain
+    // notices are identified by incidentSequence; local monitor findings live
+    // in a separate namespace and are prefixed so they cannot collide.
+    const incidentNumber = (incident) => {
+      const raw = incident.incidentSequence ?? incident.incident_sequence ?? incident.firstBatchSequence ?? incident.first_suspect_batch;
+      try { return raw === undefined || raw === null ? null : BigInt(String(raw)); } catch { return null; }
+    };
+    const incidentId = (incident) => {
+      if (incident.source === "LOCAL_MONITOR") {
+        const local = incident.incidentId ?? incidentNumber(incident);
+        return local === undefined || local === null ? "UNKNOWN" : `local:${local.toString()}`;
+      }
+      const value = incidentNumber(incident);
+      return value === null ? "UNKNOWN" : value.toString();
+    };
+    const order = (a, b) => {
+      const numeric = (value) => /^(?:0|[1-9][0-9]*)$/.test(value);
+      if (numeric(a) && numeric(b)) return BigInt(a) < BigInt(b) ? -1 : BigInt(a) > BigInt(b) ? 1 : 0;
+      if (numeric(a) !== numeric(b)) return numeric(a) ? -1 : 1;
+      return a === "UNKNOWN" ? 1 : b === "UNKNOWN" ? -1 : a < b ? -1 : a > b ? 1 : 0;
+    };
+    const incidentIds = (list) => [...new Set(list.map(incidentId))].sort(order);
+    const open = incidents.filter((incident) => incident.status === "OPEN");
+    const resolved = incidents.filter((incident) => incident.status === "RESOLVED");
     const record = {
       ...chain,
       indexed_through_slot: watermark ?? 0,
       incident_index_status: status,
-      open_incidents: [...new Set(open)].sort((a, b) => a - b),
-      resolved_incidents: [...new Set(resolved)].sort((a, b) => a - b),
+      open_incidents: incidentIds(open),
+      resolved_incidents: incidentIds(resolved),
       manual_intervention: process.argv[4] === "yes",
     };
     fs.appendFileSync(process.argv[3], `${JSON.stringify(record)}\n`, { encoding: "utf8", mode: 0o600 });

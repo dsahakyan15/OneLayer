@@ -1,3 +1,4 @@
+import { syntheticTrustPolicy, SYNTHETIC_CONFIG, SYNTHETIC_GENESIS } from "../support/trust-fixtures.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { test } from "node:test";
@@ -12,12 +13,15 @@ test("Rust synthetic pipeline certificate reaches VERIFIED in the TypeScript ver
     { cwd: new URL("../..", import.meta.url), encoding: "utf8" },
   ).trim();
   const signed = decodeCertificatePackageBase64url(encoded);
+  const trustPolicy = syntheticTrustPolicy({ programId: new Uint8Array(32).fill(5), issuerSeed: new Uint8Array(32).fill(9), issuerKeyId: "pilot-issuer-1" });
   const chain: ChainReader = {
+    async getGenesisHash() { return SYNTHETIC_GENESIS; },
     async getRegistryConfig(body) {
-      return { registryIdHash: registryIdHash(body.registryId), paused: false };
+      return { registryIdHash: registryIdHash(body.registryId), paused: false, configPda: SYNTHETIC_CONFIG, programId: body.anchor.solanaProgramId };
     },
     async getAnchor(body) {
       return {
+        registryConfigPda: SYNTHETIC_CONFIG,
         programId: body.anchor.solanaProgramId,
         segmentPda: body.anchor.segmentPda,
         derivedSegmentPda: body.anchor.segmentPda,
@@ -35,7 +39,7 @@ test("Rust synthetic pipeline certificate reaches VERIFIED in the TypeScript ver
   const incidents: IncidentIndex = {
     async query(registryId) { return { registryId, indexedThroughSlot: 1_040n, incidents: [] }; },
   };
-  const result = await verifyCertificate(signed, chain, incidents);
+  const result = await verifyCertificate(signed, chain, incidents, { trustPolicy });
   assert.equal(result.status, "VERIFIED");
   assert.equal(result.incidentIndexStatus, "CHECKED");
 });

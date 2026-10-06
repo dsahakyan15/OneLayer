@@ -1,0 +1,5 @@
+#!/bin/sh
+# Source launcher for the incremental Linux Demo UI; no runtime auto-start.
+set -eu
+launcher_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+exec /usr/bin/python3 "$launcher_dir/lab/native.py" "$@"

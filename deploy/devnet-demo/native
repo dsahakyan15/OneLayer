@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 command=${1:-start}
 demo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$demo_dir/../.." && pwd)
 scripts="$demo_dir/scripts"
-native_root="$demo_dir/.runtime/native"
+native_root="${ONELAYER_NATIVE_STATE_DIR:-$demo_dir/.runtime/native}"
 postgres_data="$native_root/postgres"
 logs_dir="$native_root/logs"
 pids_dir="$native_root/pids"
@@ -14,6 +15,9 @@ pg_port=${ONELAYER_NATIVE_PG_PORT:-55432}
 pg_user=onelayer_demo
 database=onelayer_demo
 database_url_file="$native_root/database-url"
+# Verifier anti-rollback watermark: durable, private (0700) and outside the
+# policy directory; the repository volume may be world-writable.
+verifier_trust_state="${XDG_STATE_HOME:-$HOME/.local/state}/onelayer-devnet-demo/verifier-trust/accepted.json"
 
 die() {
   echo "native demo: $*" >&2
@@ -23,6 +27,8 @@ die() {
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required"
 }
+
+[[ "$native_root" = /* ]] || die "ONELAYER_NATIVE_STATE_DIR must be an absolute path"
 
 require_command node
 require_command npm
@@ -74,6 +80,21 @@ port_in_use() {
   (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null
 }
 
+ensure_private_state() {
+  node - "$native_root" "$postgres_data" <<'NODE'
+const fs = require('node:fs');
+for (const [index, path] of process.argv.slice(2).entries()) {
+  let info;
+  try { info = fs.lstatSync(path); }
+  catch (error) { if (error.code === 'ENOENT' && index === 1) continue; throw error; }
+  if (!info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o077) !== 0) {
+    console.error('native demo: private Unix runtime directories are required; set ONELAYER_NATIVE_STATE_DIR outside the shared checkout and preserve the existing database');
+    process.exit(1);
+  }
+}
+NODE
+}
+
 ensure_runtime() {
   "$scripts/initialize-runtime" >/dev/null
   mkdir -p "$native_root"
@@ -111,22 +132,71 @@ ensure_postgres() {
   fi
 }
 
+# A migration that changed after it was applied must fail startup instead of
+# being skipped. A recorded row without a digest fails closed too: the applied
+# bytes are unknown, and the runner must not record the current file as if
+# those bytes had been verified.
+verify_migration_digests() {
+  local rows version digest file current
+  rows=$(psql_db "$database" -At -F '|' -c \
+    "SELECT version, coalesce(sha256, '') FROM schema_migration ORDER BY version")
+  while IFS='|' read -r version digest; do
+    [[ -n "$version" ]] || continue
+    file="$repo_root/db/migrations/$version"
+    [[ -f "$file" ]] || die "migration $version is recorded as applied but has no file in db/migrations; refusing to start"
+    current=$(sha256sum "$file" | cut -d' ' -f1)
+    [[ -n "$digest" ]] \
+      || die "migration $version has no recorded digest, so its applied bytes cannot be verified; refusing to start. Restore the file it was applied from, or recreate the demo database: recording the current file would claim a verification that never happened"
+    [[ "$digest" == "$current" ]] \
+      || die "migration $version was applied with digest $digest but the file now hashes to $current; restore the applied file or add a new migration instead of editing an applied one"
+  done <<< "$rows"
+}
+
 migrate_database() {
+  if service_pid demo-api >/dev/null 2>&1; then
+    die "stop demo-api before migrations; use native restart for a running stack"
+  fi
   psql_db "$database" -v ON_ERROR_STOP=1 <<'SQL'
 CREATE TABLE IF NOT EXISTS schema_migration (
   version TEXT PRIMARY KEY,
   sha256 TEXT NOT NULL,
   applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE schema_migration ADD COLUMN IF NOT EXISTS sha256 TEXT;
+SQL
+
+  # Verification runs before any pending migration or fixture is applied.
+  verify_migration_digests
+
+  # psql substitutes -v variables only while reading a file or stdin, never in
+  # -c, so the checksum row is recorded from a generated statement file. That
+  # file and the migration snapshots live in a private temp directory owned by
+  # this run, so concurrent runners cannot clobber each other's statements,
+  # and the digest always covers the exact bytes that are applied.
+  work_dir=$(mktemp -d "${TMPDIR:-/tmp}/onelayer-native-migrations.XXXXXX")
+  trap 'rm -rf -- "$work_dir"' EXIT
+  cat > "$work_dir/record.sql" <<'SQL'
+DO $$ BEGIN PERFORM pg_advisory_xact_lock(7710061); END $$;
+INSERT INTO schema_migration(version, sha256) VALUES (:'version', :'digest');
 SQL
 
   for migration in "$repo_root"/db/migrations/*.sql; do
     version=$(basename "$migration")
-    if [[ "$(psql_db "$database" -Atqc "SELECT count(*) FROM schema_migration WHERE version = '$version'")" == 0 ]]; then
-      digest=$(sha256sum "$migration" | cut -d' ' -f1)
-      psql_db "$database" -v ON_ERROR_STOP=1 -1 -f "$migration"
-      psql_db "$database" -v ON_ERROR_STOP=1 \
-        -c "INSERT INTO schema_migration(version, sha256) VALUES ('$version', '$digest')"
+    applied=$(psql_db "$database" -At -v version="$version" <<'SQL'
+SELECT count(*) FROM schema_migration WHERE version = :'version';
+SQL
+)
+    if [[ "$applied" == 0 ]]; then
+      snapshot="$work_dir/$version"
+      cp -- "$migration" "$snapshot"
+      digest=$(sha256sum "$snapshot" | cut -d' ' -f1)
+      # One transaction applies the snapshot and records its digest, so the
+      # journal covers the applied bytes and never exists without them. The advisory lock
+      # serializes concurrent runners; the primary key on version then turns a
+      # lost race into a loud failure instead of applying the file twice.
+      psql_db "$database" -v ON_ERROR_STOP=1 -1 \
+        -v version="$version" -v digest="$digest" \
+        -f "$work_dir/record.sql" -f "$snapshot"
     fi
   done
 
@@ -191,8 +261,11 @@ build_web() {
 }
 
 start_stack() {
+  ensure_private_state
   ensure_runtime
   ensure_node_dependencies
+  node --experimental-transform-types "$repo_root/apps/verifier/scripts/create-demo-trust-policy.ts" \
+    "$runtime/issuer-secret" "$native_root/verifier-trust-policy.json" "$verifier_trust_state"
   ensure_ports
   ensure_postgres
   migrate_database
@@ -200,6 +273,7 @@ start_stack() {
 
   start_process demo-api env \
     PORT=8090 \
+    ONELAYER_SESSION_BACKEND=postgres \
     ONELAYER_DATABASE_URL_FILE="$database_url_file" \
     ONELAYER_INTERNAL_TOKEN_FILE="$runtime/internal-token" \
     ONELAYER_RPC_URL=https://api.devnet.solana.com \
@@ -214,6 +288,10 @@ start_stack() {
 
   start_process verifier env \
     PORT=8080 \
+    ONELAYER_TRUST_POLICY_FILE="$native_root/verifier-trust-policy.json" \
+    ONELAYER_TRUST_POLICY_MIN_REVISION=1 \
+    ONELAYER_TRUST_POLICY_UNSIGNED=1 \
+    ONELAYER_TRUST_STATE_FILE="$verifier_trust_state" \
     ONELAYER_RPC_URL=https://api.devnet.solana.com \
     ONELAYER_INCIDENT_INDEX_URL=http://127.0.0.1:8090 \
     ONELAYER_LOOKUP_URL=http://127.0.0.1:8090 \
@@ -276,6 +354,7 @@ case "$command" in
     build_web
     ;;
   migrate)
+    ensure_private_state
     ensure_runtime
     ensure_postgres
     migrate_database

@@ -80,10 +80,26 @@ export function decodeIncidentEvent(data: Uint8Array): IncidentEvent | null {
 export function incidentEventsFromLogs(
   logs: readonly string[],
   registryConfig: Uint8Array,
+  programId: string,
 ): IncidentEvent[] {
   if (registryConfig.length !== 32) throw new RangeError("registryConfig must be 32 bytes");
+  if (!programId) throw new TypeError("trusted program ID is required");
+  const stack: string[] = [];
   const events: IncidentEvent[] = [];
   for (const line of logs) {
+    if (/log truncated/i.test(line)) throw new Error("transaction logs are truncated");
+    const invoke = /^Program (\S+) invoke \[(\d+)\]$/.exec(line);
+    if (invoke) {
+      if (Number(invoke[2]) !== stack.length + 1) throw new Error("invalid program invocation stack");
+      stack.push(invoke[1]);
+      continue;
+    }
+    const finish = /^Program (\S+) (?:success|failed:.*)$/.exec(line);
+    if (finish) {
+      if (stack.pop() !== finish[1]) throw new Error("invalid program invocation stack");
+      continue;
+    }
+    if (stack.at(-1) !== programId) continue;
     const payload = /^Program data: ([A-Za-z0-9+/=]+)$/.exec(line)?.[1];
     if (payload === undefined) continue;
     let data: Buffer;
@@ -94,9 +110,15 @@ export function incidentEventsFromLogs(
     }
     if (data.toString("base64") !== payload) continue;
     const event = decodeIncidentEvent(new Uint8Array(data));
-    if (event === null) continue;
+    if (event === null) {
+      if (startsWith(data, OPENED_DISCRIMINATOR) || startsWith(data, RESOLVED_DISCRIMINATOR)) {
+        throw new Error("malformed incident event");
+      }
+      continue;
+    }
     if (!registryConfig.every((byte, index) => event.registry[index] === byte)) continue;
     events.push(event);
   }
+  if (stack.length !== 0) throw new Error("incomplete program invocation logs");
   return events;
 }

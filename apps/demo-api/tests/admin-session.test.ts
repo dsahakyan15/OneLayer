@@ -102,3 +102,73 @@ test("cookie parsing tolerates unrelated cookies", () => {
   assert.equal(cookies.get(SESSION_COOKIE), "abc");
   assert.equal(parseCookies(undefined).size, 0);
 });
+
+test("revocation closes all user sessions and prevents reauthentication", () => {
+  const store = new SessionStore(credentials);
+  const first = loggedIn(store, "operator");
+  const second = loggedIn(store, "operator");
+  const auditor = loggedIn(store, "auditor");
+  store.revokeUser("operator");
+  assert.equal(store.get(first.sessionId), null);
+  assert.equal(store.get(second.sessionId), null);
+  assert.equal(store.login("operator", "operator-password-0123456789"), null);
+  assert.notEqual(store.get(auditor.sessionId), null);
+  store.updateAccess("operator", { role: "auditor" });
+  assert.equal(store.login("operator", "operator-password-0123456789"), null);
+});
+
+test("role and scope changes invalidate sessions and apply on the next login", () => {
+  const store = new SessionStore(credentials);
+  const session = loggedIn(store, "operator");
+  store.updateAccess("operator", { role: "auditor", permissions: ["records.read"], registryIds: ["other.registry"] });
+  assert.equal(store.get(session.sessionId), null);
+  const next = loggedIn(store, "operator");
+  assert.equal(next.role, "auditor");
+  assert.deepEqual(next.permissions, ["records.read"]);
+  assert.deepEqual(next.registryIds, ["other.registry"]);
+});
+
+test("invalid grants cannot elevate a role or partially change existing access", () => {
+  const store = new SessionStore(credentials);
+  const session = loggedIn(store, "auditor");
+  assert.throws(() => store.updateAccess("auditor", { role: "auditor", permissions: ["recovery.approve"] }), TypeError);
+  assert.equal(store.get(session.sessionId), session);
+  assert.throws(() => new SessionStore([{ ...credentials[0], registryIds: ["*"] }]), TypeError);
+  assert.throws(() => new SessionStore([credentials[0], credentials[0]]), TypeError);
+});
+
+test("caller-owned credentials and session objects cannot mutate stored authorization", () => {
+  const source = [{ ...credentials[1], permissions: ["records.read" as const], registryIds: ["gov.registry.land"] }];
+  const store = new SessionStore(source);
+  source[0].role = "operator";
+  source[0].registryIds.push("other.registry");
+  source[0].permissions.length = 0;
+  const session = loggedIn(store, "auditor");
+  assert.equal(session.role, "auditor");
+  assert.deepEqual(session.permissions, ["records.read"]);
+  assert.deepEqual(session.registryIds, ["gov.registry.land"]);
+  assert.throws(() => { session.role = "operator"; }, TypeError);
+  assert.throws(() => { (session.registryIds as string[]).push("other.registry"); }, TypeError);
+});
+
+test("deployment credentials can narrow access and reject malformed or elevated grants", () => {
+  const config = {
+    operator: { password: "operator-password-0123456789", permissions: ["records.read"], registryIds: [] },
+    auditor: "auditor-password-0123456789",
+  };
+  const store = new SessionStore(parseCredentials(JSON.stringify(config)));
+  const session = loggedIn(store, "operator");
+  assert.deepEqual(session.permissions, ["records.read"]);
+  assert.deepEqual(session.registryIds, []);
+  store.updateAccess("operator", { role: "operator", registryIds: ["gov.registry.land"] });
+  assert.deepEqual(loggedIn(store, "operator").permissions, ["records.read"]);
+  for (const entry of [
+    { password: "x".repeat(20), role: "chief_admin" },
+    { password: "x".repeat(20), permissions: ["recovery.approve"] },
+    { password: "x".repeat(20), permissions: "records.read" },
+    { password: "x".repeat(20), registryIds: "gov.registry.land" },
+    { password: "x".repeat(20), registryIds: null },
+  ]) {
+    assert.throws(() => parseCredentials(JSON.stringify({ ...config, operator: entry })), TypeError);
+  }
+});

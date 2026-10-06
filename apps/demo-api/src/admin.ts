@@ -3,6 +3,7 @@
 // A thin HTTP adapter over the pilot data: it owns sessions, the publish intent
 // lifecycle and certificate issuance. Every route resolves the role from the
 // server session; nothing here trusts client state.
+import { ledgerDay } from "./ledger-day.ts";
 import { createHash, createPublicKey, generateKeyPairSync, randomBytes, randomUUID, sign, verify } from "node:crypto";
 import type { KeyObject } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
@@ -39,13 +40,16 @@ import {
   validateSignedTransaction,
 } from "./admin-transaction.ts";
 import {
-  authorize,
+  authorizeRequest,
+  IdentityUnavailableError,
   AuthorizationError,
   clearedCookie,
   requireChiefAdmin,
   requireOperator,
+  requirePermission,
   sessionCookie,
-  SessionStore,
+  type SessionBackend,
+  type AdminAccess,
   type AdminSession,
 } from "./admin-session.ts";
 import {
@@ -78,32 +82,55 @@ import {
   type SnapshotStateV1,
 } from "./backup.ts";
 import { workingRegistryStatus } from "./registry-status.ts";
+import { routeOidc, type OidcRoutes } from "./oidc-routes.ts";
+import { routeWorkflow } from "./registry-workflow.ts";
+import { requireUnrestrictedResourceAccess } from "./resource-access.ts";
+import type { WorkflowPublicationRuntime } from "./workflow-runtime.ts";
+import { WorkflowRuntimeError } from "./workflow-runtime.ts";
+import { issueWorkflowCertificate, WorkflowCertificateError } from "./workflow-certificate.ts";
+import type { PublicationKeys } from "./publication-intent.ts";
+import { SNAPSHOT_STATE_SCHEMA_VERSION, encryptSnapshotStateV2, type SnapshotStateV2 } from "./backup.ts";
 
 const SEGMENTS_PER_DAY = 3;
 const OPERATOR_KEY_ID = "browser-test-operator-1";
 const ISSUER_KEY_ID = "synthetic-demo-issuer-1";
 
 export interface AdminContext {
+  oidc?: OidcRoutes;
   pool: Pool;
-  sessions: SessionStore;
+  sessions: SessionBackend;
   rpc: SolanaPublisherRpc;
   registryId: string;
   programId: Address;
   configPda: Address;
   issuerSecretKey: Uint8Array;
-  /** Process-memory KEK for the bounded MVP snapshot writer. It is never persisted or returned. */
+  /**
+   * Process-memory KEK for the bounded MVP snapshot writer, loaded from the
+   * explicit ONELAYER_SNAPSHOT_KEK_FILE configuration. There is no fallback:
+   * an absent or invalid key makes snapshot creation fail closed.
+   */
   snapshotKek?: Uint8Array;
-  /** Recovery shares are injected by the out-of-band bounded demo setup. */
+  /** Configured stable version identifier this writer commits; explicit fixtures may keep the frozen memory label. */
+  snapshotKeyEncryptionVersion?: string;
+  /** Recovery shares are injected by the out-of-band bounded demo setup. The ordinary API never generates or holds them. */
   recoveryShares?: readonly KeyShare[];
   /** Process-memory signing key for Restore Approval. */
   restoreApprovalPrivateKey?: KeyObject;
   /** Recovered KEKs keyed by operation ID; values are zeroed after use. */
   recoveryKeys?: Map<string, Uint8Array>;
+  /** Workflow publication runtime + deployment keys for certificate issuance.
+   * Absent means the publication/certificate routes are unavailable. */
+  publication?: {
+    runtime: WorkflowPublicationRuntime;
+    keys: PublicationKeys;
+    operatorKeyId: string;
+  };
   publicWebBaseUrl: string;
   now: () => Date;
 }
 
 export interface AdminRequest {
+  originHeader?: string;
   method: string;
   path: string;
   query: URLSearchParams;
@@ -114,6 +141,7 @@ export interface AdminRequest {
 }
 
 export interface AdminResponse {
+  location?: string;
   status: number;
   body: unknown;
   setCookie?: string;
@@ -240,10 +268,10 @@ const INTENT_COLUMNS = `intent_id, batch_sequence::text, state, encode(intent_ha
   message_base64, intent_json, recent_blockhash, last_valid_block_height::text, expires_at,
   transaction_signature, anchor_slot::text, certificate_id, failure_code, simulation_logs`;
 
-async function loadIntent(pool: Pool, intentId: string): Promise<IntentRow> {
+async function loadIntent(pool: Pool, intentId: string, registryId: string): Promise<IntentRow> {
   const result = await pool.query(
-    `SELECT ${INTENT_COLUMNS} FROM demo_publish_intent WHERE intent_id = $1`,
-    [intentId],
+    `SELECT ${INTENT_COLUMNS} FROM demo_publish_intent WHERE intent_id = $1 AND registry_id = $2`,
+    [intentId, registryId],
   );
   if (result.rows.length === 0) throw new ApiError(404, "INTENT_NOT_FOUND");
   return intentRow(result.rows[0]);
@@ -354,7 +382,7 @@ async function prepareIntent(
     operatorKeyId: OPERATOR_KEY_ID,
   });
 
-  const dayUtc = Math.floor(context.now().getTime() / 86_400_000);
+  const dayUtc = ledgerDay(context.now());
   const segment = await findOpenSegment(context, dayUtc);
   const [rolePda] = await findRolePda(
     { config: context.configPda, operator },
@@ -454,7 +482,7 @@ async function prepareIntent(
     merkleRoot: toHex(batch.merkleRoot),
     manifestHash: toHex(batch.manifestHash),
   });
-  const stored = await loadIntent(context.pool, intentId);
+  const stored = await loadIntent(context.pool, intentId, context.registryId);
   return { ...intentResponse(stored), status: simulation.ok ? 201 : 422 };
 }
 
@@ -490,7 +518,7 @@ async function submitSignature(
   intentId: string,
   body: Record<string, unknown> | null,
 ): Promise<AdminResponse> {
-  const intent = await loadIntent(context.pool, intentId);
+  const intent = await loadIntent(context.pool, intentId, context.registryId);
   // Re-submitting after finalization answers from storage instead of sending a
   // second transaction.
   if (intent.state === "SUBMITTED" || intent.state === "FINALIZED" || intent.state === "ISSUED") {
@@ -533,7 +561,7 @@ async function reconcile(
   session: AdminSession,
   intentId: string,
 ): Promise<AdminResponse> {
-  const intent = await loadIntent(context.pool, intentId);
+  const intent = await loadIntent(context.pool, intentId, context.registryId);
   if (intent.state !== "SUBMITTED" && intent.state !== "UNKNOWN") return intentResponse(intent);
   if (intent.signature === null) throw new ApiError(500, "SIGNATURE_MISSING");
   const finalized = await context.rpc.getFinalizedTransaction(intent.signature);
@@ -551,7 +579,7 @@ async function reconcile(
     signature: intent.signature,
     slot: finalized.slot.toString(),
   });
-  return intentResponse(await loadIntent(context.pool, intentId));
+  return intentResponse(await loadIntent(context.pool, intentId, context.registryId));
 }
 
 async function issueForIntent(
@@ -561,7 +589,7 @@ async function issueForIntent(
   body: Record<string, unknown> | null,
 ): Promise<AdminResponse> {
   await ensureWorkingRegistry(context);
-  const intent = await loadIntent(context.pool, intentId);
+  const intent = await loadIntent(context.pool, intentId, context.registryId);
   if (intent.state === "ISSUED") return intentResponse(intent, { replayed: true });
   if (intent.state !== "FINALIZED") throw new ApiError(409, "ANCHOR_NOT_FINALIZED");
   if (intent.signature === null || intent.anchorSlot === null) throw new ApiError(500, "ANCHOR_INCOMPLETE");
@@ -1380,21 +1408,34 @@ async function snapshotState(executor: Pool | PoolClient, context: AdminContext)
   };
 }
 
-async function latestSnapshotAnchor(
+export async function latestSnapshotAnchor(
   executor: Pool | PoolClient,
   registryId: string,
 ): Promise<{ merkleRoot: string; finalized: boolean }> {
   const [anchor, incident] = await Promise.all([
+    // The snapshot root may be FINALIZED only when the on-chain incident index
+    // is complete through the anchor slot, recently refreshed, and shows no
+    // OPEN/CONFIRMED/RESOLVED notice covering the batch (same rule as selectRecoveryAnchor).
     executor.query(
-      `SELECT encode(merkle_root,'hex') AS merkle_root
-         FROM demo_anchor WHERE registry_id = $1 AND commitment = 'finalized'
-        ORDER BY batch_sequence DESC LIMIT 1`,
+      `SELECT encode(a.merkle_root,'hex') AS merkle_root,
+              (EXISTS (
+                 SELECT 1 FROM incident_index_state s
+                  WHERE s.registry_id = a.registry_id
+                    AND s.indexed_through_slot >= a.anchor_slot
+                    AND s.updated_at >= now() - interval '2 minutes')
+               AND NOT EXISTS (
+                 SELECT 1 FROM incident_index_notice n
+                  WHERE n.registry_id = a.registry_id AND n.status IN ('OPEN', 'CONFIRMED', 'RESOLVED')
+                    AND n.first_suspect_batch <= a.batch_sequence AND n.last_suspect_batch >= a.batch_sequence)
+              ) AS index_clear
+         FROM demo_anchor a WHERE a.registry_id = $1 AND a.commitment = 'finalized'
+        ORDER BY a.batch_sequence DESC LIMIT 1`,
       [registryId],
     ),
     executor.query(
       `SELECT count(*)::text AS open_incidents
          FROM integrity_incident
-        WHERE registry_id = $1 AND status = 'OPEN'`,
+        WHERE registry_id = $1 AND status IN ('OPEN', 'RESOLVED')`,
       [registryId],
     ),
   ]);
@@ -1402,14 +1443,22 @@ async function latestSnapshotAnchor(
   const noOpenIncident = Number(incident.rows[0]?.open_incidents ?? 0) === 0;
   return {
     merkleRoot: hasAnchor ? anchor.rows[0].merkle_root : ZERO_ROOT,
-    finalized: hasAnchor && noOpenIncident,
+    finalized: hasAnchor && noOpenIncident && anchor.rows[0].index_clear === true,
   };
 }
 
 function snapshotKek(context: AdminContext): Uint8Array {
-  const key = context.snapshotKek ?? context.issuerSecretKey;
+  // Only the explicitly provisioned writer key is accepted: the issuer signing
+  // secret and process-random material are never snapshot keys.
+  const key = context.snapshotKek;
   if (!(key instanceof Uint8Array) || key.length !== 32) throw new ApiError(503, "SNAPSHOT_KEY_UNAVAILABLE");
   return key;
+}
+
+function snapshotKeyEncryptionVersion(context: AdminContext): string {
+  // The configured API always injects its provisioned version; explicit
+  // in-memory fixture contexts keep the frozen memory label.
+  return context.snapshotKeyEncryptionVersion ?? SNAPSHOT_KEY_ENCRYPTION_VERSION;
 }
 
 function uuidBytes(uuid: string): Uint8Array {
@@ -1518,6 +1567,10 @@ async function refreshBackups(
   session: AdminSession,
   request: AdminRequest,
 ): Promise<AdminResponse> {
+  // Preflight the explicit writer key before any fixture, center or state work:
+  // an unconfigured writer refuses backup creation without touching the database.
+  const keyEncryptionVersion = snapshotKeyEncryptionVersion(context);
+  const kek = snapshotKek(context);
   await ensureFixture(context.pool);
   const idempotencyKey = request.idempotencyKey === undefined
     ? null
@@ -1570,8 +1623,8 @@ async function refreshBackups(
       snapshotId: uuidBytes(snapshotId),
       snapshotVersion,
       state,
-      kek: snapshotKek(context),
-      keyEncryptionVersion: SNAPSHOT_KEY_ENCRYPTION_VERSION,
+      kek,
+      keyEncryptionVersion,
     });
     const packageBytes = Buffer.from(encrypted.encoded);
     await client.query(
@@ -1812,25 +1865,35 @@ function recoveryShares(value: unknown): KeyShare[] {
   return parsed;
 }
 
-async function selectRecoveryAnchor(
+export async function selectRecoveryAnchor(
   executor: Pool | PoolClient,
   registryId: string,
 ): Promise<RecoveryAnchor> {
+  // The absence of an on-chain notice only counts when the incident index is
+  // complete through the anchor slot AND was refreshed recently: a stuck
+  // watermark cannot see a notice opened later for an old batch. Otherwise no
+  // anchor qualifies (409 RECOVERY_ANCHOR_UNAVAILABLE, fail closed).
   const result = await executor.query(
     `SELECT a.batch_sequence::text, a.anchor_slot::text, a.transaction_signature,
             encode(a.merkle_root,'hex') AS merkle_root, a.finalized_at
        FROM demo_anchor a
       WHERE a.registry_id = $1
         AND a.commitment = 'finalized'
+        AND EXISTS (
+          SELECT 1 FROM incident_index_state s
+           WHERE s.registry_id = a.registry_id
+             AND s.indexed_through_slot >= a.anchor_slot
+             AND s.updated_at >= now() - interval '2 minutes'
+        )
         AND NOT EXISTS (
           SELECT 1 FROM integrity_incident i
-           WHERE i.registry_id = a.registry_id AND i.status = 'OPEN'
-             AND (i.first_suspect_batch IS NULL
+           WHERE i.registry_id = a.registry_id AND i.status IN ('OPEN', 'RESOLVED')
+             AND (i.first_suspect_batch IS NULL OR i.last_suspect_batch IS NULL
                OR (i.first_suspect_batch <= a.batch_sequence AND i.last_suspect_batch >= a.batch_sequence))
         )
         AND NOT EXISTS (
           SELECT 1 FROM incident_index_notice n
-           WHERE n.registry_id = a.registry_id AND n.status = 'OPEN'
+           WHERE n.registry_id = a.registry_id AND n.status IN ('OPEN', 'CONFIRMED', 'RESOLVED')
              AND n.first_suspect_batch <= a.batch_sequence AND n.last_suspect_batch >= a.batch_sequence
         )
       ORDER BY a.batch_sequence DESC
@@ -2521,7 +2584,7 @@ async function dashboard(context: AdminContext): Promise<AdminResponse> {
     ),
     context.pool.query(
       `SELECT count(*)::text AS open_onchain FROM incident_index_notice
-        WHERE registry_id = $1 AND status = 'OPEN'`,
+        WHERE registry_id = $1 AND status IN ('OPEN', 'CONFIRMED', 'RESOLVED')`,
       [context.registryId],
     ),
     context.pool.query(
@@ -2562,10 +2625,79 @@ async function dashboard(context: AdminContext): Promise<AdminResponse> {
   };
 }
 
+/**
+ * Workflow publication runtime routes. Review is mandatory before a new
+ * payload is signed: `run` without a matching `approvedIntentHash` is refused
+ * unless an already-journaled signed attempt is being reconciled. Certificate
+ * issuance requires `certificates.issue` AND an explicit allowed record/field
+ * scope (omitted fields resolve to FULL_RECORD, never an implicit pass).
+ */
+async function routePublications(
+  context: AdminContext,
+  request: AdminRequest,
+  session: AdminSession,
+): Promise<AdminResponse | null> {
+  if (!request.path.startsWith('/v2/admin/workflow/publications')) return null;
+  if (context.publication === undefined) return { status: 503, body: { code: 'PUBLICATION_UNAVAILABLE' } };
+  const { runtime, keys } = context.publication;
+  const worker = session.username;
+  const optionalOperationId = (value: unknown): string | undefined => {
+    if (value === undefined || value === null) return undefined;
+    return text(value, 'operationId', /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+  };
+  try {
+    if (request.path === '/v2/admin/workflow/publications' && request.method === 'GET') {
+      requirePermission(session, context.registryId, 'publication.read');
+      return { status: 200, body: await runtime.status(context.registryId) };
+    }
+    if (request.path === '/v2/admin/workflow/publications/review' && request.method === 'POST') {
+      requirePermission(session, context.registryId, 'publication.prepare');
+      return { status: 200, body: await runtime.review(context.registryId, worker, optionalOperationId(request.body?.operationId)) };
+    }
+    if (request.path === '/v2/admin/workflow/publications/run' && request.method === 'POST') {
+      requirePermission(session, context.registryId, 'publication.submit');
+      const approvedIntentHash = request.body?.approvedIntentHash === undefined
+        ? undefined
+        : text(request.body.approvedIntentHash, 'approvedIntentHash', /^[0-9a-f]{64}$/);
+      return { status: 200, body: await runtime.run(context.registryId, worker, approvedIntentHash, optionalOperationId(request.body?.operationId)) };
+    }
+    const certificate = /^\/v2\/admin\/workflow\/publications\/([0-9a-f-]{36})\/certificate$/.exec(request.path);
+    if (certificate !== null && request.method === 'POST') {
+      requirePermission(session, context.registryId, 'certificates.issue');
+      const body = request.body ?? {};
+      const recordId = text(body.recordId, 'recordId', /^[a-zA-Z0-9_.:-]{1,128}$/);
+      if (!Number.isSafeInteger(body.version) || Number(body.version) < 1 || Number(body.version) > 2147483647) {
+        throw new ApiError(400, 'VERSION_INVALID');
+      }
+      const disclosedPaths = disclosureRequest(body.disclosedPaths);
+      // Scope is enforced on both axes: the object/record and every disclosed
+      // field path. An omitted disclosure resolves to FULL_RECORD and is only
+      // allowed when the session is unrestricted for the whole record.
+      requireResourceAccessObjectAndFields(session, context.registryId, recordId, disclosedPaths);
+      const issued = await issueWorkflowCertificate(
+        {
+          pool: context.pool, registryId: context.registryId, programId: context.programId, keys,
+          issuerSecretKey: context.issuerSecretKey, issuerKeyId: ISSUER_KEY_ID,
+          publicBaseUrl: context.publicWebBaseUrl, now: context.now,
+        },
+        { operationId: certificate[1], recordId, version: Number(body.version), disclosedPaths },
+      );
+      return { status: issued.replayed ? 200 : 201, body: issued };
+    }
+    return { status: 404, body: { code: 'NOT_FOUND' } };
+  } catch (error) {
+    if (error instanceof WorkflowCertificateError) return { status: error.status, body: { code: error.code } };
+    if (error instanceof WorkflowRuntimeError) return { status: error.status, body: { code: error.code } };
+    if (error instanceof ApiError) return { status: error.status, body: { code: error.code } };
+    throw error;
+  }
+}
+
 export async function routeAdmin(context: AdminContext, request: AdminRequest): Promise<AdminResponse> {
   try {
     return await dispatch(context, request);
   } catch (error) {
+    if (error instanceof IdentityUnavailableError) return { status: 503, body: { code: "IDENTITY_UNAVAILABLE" } };
     if (error instanceof ApiError) return { status: error.status, body: { code: error.code } };
     if (error instanceof AuthorizationError) return { status: error.status, body: { code: error.code } };
     if (error instanceof TransitionError) return { status: 409, body: { code: error.code } };
@@ -2577,40 +2709,109 @@ export async function routeAdmin(context: AdminContext, request: AdminRequest): 
 }
 
 async function dispatch(context: AdminContext, request: AdminRequest): Promise<AdminResponse> {
+  if (request.path === '/v2/admin/oidc/config' && request.method === 'GET') return { status: 200, body: { enabled: Boolean(context.oidc) } };
+  if (request.path.startsWith('/v2/admin/oidc/')) {
+    if (!context.oidc) return { status: 404, body: { code: 'NOT_FOUND' } };
+    return routeOidc(context.oidc, request);
+  }
   if (request.path === "/v1/admin/session" && request.method === "POST") {
-    const session = context.sessions.login(request.body?.username, request.body?.password);
+    if (context.oidc) return { status: 403, body: { code: 'OIDC_REQUIRED' } };
+    const session = await context.sessions.login(request.body?.username, request.body?.password);
     if (session === null) return { status: 401, body: { code: "INVALID_CREDENTIALS" } };
+    // The session DTO carries the server session's own permission metadata so a
+    // client can shape navigation. It grants nothing: every route below still
+    // re-authorizes the session, and no resource policy or secret is exposed.
     return {
       status: 201,
       setCookie: sessionCookie(session),
-      body: { role: session.role, username: session.username, csrfToken: session.csrfToken, expiresAt: new Date(session.expiresAt).toISOString() },
+      body: {
+        role: session.role, username: session.username, csrfToken: session.csrfToken,
+        expiresAt: new Date(session.expiresAt).toISOString(),
+        permissions: [...session.permissions], registryIds: [...session.registryIds],
+        deploymentRegistryId: context.registryId,
+      },
     };
   }
 
   if (request.path === "/v1/admin/session" && request.method === "DELETE") {
-    const session = authorize(context.sessions, request);
-    context.sessions.destroy(session.sessionId);
+    const session = await authorizeRequest(context.sessions, request);
+    await context.sessions.destroy(session.sessionId);
     return { status: 204, body: null, setCookie: clearedCookie() };
   }
 
-  const session = authorize(context.sessions, request);
+  const session = await authorizeRequest(context.sessions, request);
+
+  // Malformed percent-encoding is a client error (400), not a server fault.
+  const pathSegment = (value: string): string => {
+    try { return decodeURIComponent(value); } catch { throw new TypeError('invalid path segment'); }
+  };
+  const accessPath = /^\/v2\/admin\/accounts\/([^/]+)\/access$/.exec(request.path);
+  if (accessPath && request.method === 'PATCH') {
+    if (!context.oidc || request.originHeader !== context.oidc.browserOrigin) throw new AuthorizationError(403, 'ORIGIN_FORBIDDEN');
+    if (!context.sessions.changeAccessAsSession || session.authMethod !== 'oidc') throw new AuthorizationError(403, 'PERMISSION_FORBIDDEN');
+    const body = request.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body) ||
+        Object.keys(body).some(key => !['role', 'permissions', 'registryIds', 'expectedRevision'].includes(key)) ||
+        typeof body.role !== 'string' || typeof body.expectedRevision !== 'string') throw new TypeError('invalid access request');
+    await context.sessions.changeAccessAsSession(session.sessionId, pathSegment(accessPath[1]), body as unknown as AdminAccess, body.expectedRevision);
+    return { status: 204, body: null };
+  }
+
+  const revokePath = /^\/v2\/admin\/accounts\/([^/]+)(?:\/devices\/([^/]+))?\/revoke$/.exec(request.path);
+  if (revokePath && request.method === 'POST') {
+    if (!context.oidc || request.originHeader !== context.oidc.browserOrigin) throw new AuthorizationError(403, 'ORIGIN_FORBIDDEN');
+    if (!context.sessions.revokeAsSession || session.authMethod !== 'oidc') throw new AuthorizationError(403, 'PERMISSION_FORBIDDEN');
+    const body = request.body;
+    if (!body || typeof body !== 'object' || Array.isArray(body) ||
+        Object.keys(body).some(key => key !== 'expectedRevision') || typeof body.expectedRevision !== 'string') {
+      throw new TypeError('invalid revocation request');
+    }
+    await context.sessions.revokeAsSession(session.sessionId, pathSegment(revokePath[1]), body.expectedRevision,
+      revokePath[2] === undefined ? undefined : pathSegment(revokePath[2]));
+    return { status: 204, body: null };
+  }
+
+  if (request.path.startsWith('/v2/admin/workflow/')) return routeWorkflow(context, request, session);
+
+  // Legacy routes operate on whole-registry projections. Until scoped queries
+  // exist, narrowed OIDC identities cannot read aggregate counts or artifacts.
+  if (session.authMethod === 'oidc' && request.path !== '/v1/admin/session') {
+    requireUnrestrictedResourceAccess(session.resourcePolicy, context.registryId, 'records.read');
+    requireUnrestrictedResourceAccess(session.resourcePolicy, context.registryId, 'certificates.read');
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      requireUnrestrictedResourceAccess(session.resourcePolicy, context.registryId, 'records.write');
+      requireUnrestrictedResourceAccess(session.resourcePolicy, context.registryId, 'certificates.export');
+    }
+  }
 
   if (request.path === "/v1/admin/session" && request.method === "GET") {
     return {
       status: 200,
-      body: { role: session.role, username: session.username, csrfToken: session.csrfToken },
+      body: {
+        role: session.role, username: session.username, csrfToken: session.csrfToken,
+        permissions: [...session.permissions], registryIds: [...session.registryIds],
+        deploymentRegistryId: context.registryId,
+      },
     };
   }
 
   if (request.path === "/v1/admin/schema" && request.method === "GET") {
+    requirePermission(session, context.registryId, "records.read");
     return { status: 200, body: describeSchema() };
   }
 
   if (request.path === "/v1/admin/dashboard" && request.method === "GET") {
+    requirePermission(session, context.registryId, "records.read");
+    requirePermission(session, context.registryId, "publication.read");
+    requirePermission(session, context.registryId, "certificates.read");
+    requirePermission(session, context.registryId, "backups.read");
+    requirePermission(session, context.registryId, "recovery.read");
+    requirePermission(session, context.registryId, "audit.read");
     return dashboard(context);
   }
 
   if (request.path === "/v1/admin/backup-centers" && request.method === "GET") {
+    requirePermission(session, context.registryId, "backups.read");
     return backupOverview(context);
   }
 
@@ -2619,6 +2820,7 @@ async function dispatch(context: AdminContext, request: AdminRequest): Promise<A
       request.path === "/v1/admin/backup-centers/refresh") &&
     request.method === "GET"
   ) {
+    requirePermission(session, context.registryId, "backups.read");
     return backupOverview(context);
   }
 
@@ -2627,52 +2829,57 @@ async function dispatch(context: AdminContext, request: AdminRequest): Promise<A
       request.path === "/v1/admin/backup-centers/refresh") &&
     request.method === "POST"
   ) {
-    return refreshBackups(context, requireOperator(session), request);
+    return refreshBackups(context, requirePermission(requireOperator(session), context.registryId, "backups.create"), request);
   }
 
   if (request.path === "/v1/admin/backup-centers" && request.method === "POST") {
-    return createBackupCenter(context, requireOperator(session), request.body);
+    return createBackupCenter(context, requirePermission(requireOperator(session), context.registryId, "backups.create"), request.body);
   }
 
   const backupCenterHealth = /^\/v1\/admin\/backup-centers\/([A-Za-z0-9-]+)\/(?:health|availability)$/.exec(request.path);
   if (backupCenterHealth !== null && request.method === "POST") {
-    return setBackupCenterHealth(context, requireOperator(session), backupCenterHealth[1], request.body);
+    return setBackupCenterHealth(context, requirePermission(requireOperator(session), context.registryId, "backups.create"), backupCenterHealth[1], request.body);
   }
 
   if (
     (request.path === "/v1/admin/recovery/operations" || request.path === "/v1/admin/recovery") &&
     request.method === "GET"
   ) {
+    requirePermission(session, context.registryId, "recovery.read");
     return recoveryOperationList(context);
   }
   if (
     (request.path === "/v1/admin/recovery/prepare" || request.path === "/v1/admin/recovery/operations") &&
     request.method === "POST"
   ) {
-    return prepareRecovery(context, requireOperator(session), request);
+    return prepareRecovery(context, requirePermission(requireOperator(session), context.registryId, "recovery.initiate"), request);
   }
   const recoveryPath = /^\/v1\/admin\/recovery\/(?:operations\/)?([0-9a-f-]{36})(?:\/(approve|approval|restore))?$/.exec(request.path);
   if (recoveryPath !== null) {
     const [, operationId, action] = recoveryPath;
-    if (request.method === "GET" && action === undefined) return recoveryOperationResponse(context, operationId);
+    if (request.method === "GET" && action === undefined) {
+      requirePermission(session, context.registryId, "recovery.read");
+      return recoveryOperationResponse(context, operationId);
+    }
     if (request.method === "POST" && (action === "approve" || action === "approval")) {
-      return approveRecovery(context, requireChiefAdmin(session), operationId, request.body);
+      return approveRecovery(context, requirePermission(requireChiefAdmin(session), context.registryId, "recovery.approve"), operationId, request.body);
     }
     if (request.method === "POST" && action === "restore") {
-      return restoreRecovery(context, requireOperator(session), operationId);
+      return restoreRecovery(context, requirePermission(requireOperator(session), context.registryId, "recovery.cutover"), operationId);
     }
   }
 
   const snapshotPath = /^\/v1\/admin\/snapshots\/([0-9a-f-]{36})(?:\/(retry))?$/.exec(request.path);
   if (snapshotPath !== null) {
     if (request.method === "GET") {
+      requirePermission(session, context.registryId, "backups.read");
       const overview = await backupOverview(context);
       const snapshot = (overview.body as any).snapshots.find((entry: any) => entry.snapshotId === snapshotPath[1]);
       if (snapshot === undefined) throw new ApiError(404, "SNAPSHOT_NOT_FOUND");
       return { status: 200, body: snapshot };
     }
     if (request.method === "POST" && snapshotPath[2] === "retry") {
-      return retryBackup(context, requireOperator(session), snapshotPath[1]);
+      return retryBackup(context, requirePermission(requireOperator(session), context.registryId, "backups.create"), snapshotPath[1]);
     }
   }
 
@@ -2684,6 +2891,7 @@ async function dispatch(context: AdminContext, request: AdminRequest): Promise<A
   }
 
   if (request.path === "/v1/admin/records" && request.method === "GET") {
+    requirePermission(session, context.registryId, "records.read");
     const result = await context.pool.query(`${RECORD_QUERY} ORDER BY r.source_cursor`);
     return {
       status: 200,
@@ -2703,44 +2911,52 @@ async function dispatch(context: AdminContext, request: AdminRequest): Promise<A
   }
 
   if (request.path === "/v1/admin/records" && request.method === "POST") {
-    return createRecord(context, requireOperator(session), request.body);
+    return createRecord(context, requirePermission(requireOperator(session), context.registryId, "records.draft"), request.body);
   }
 
   if (request.path === "/v1/admin/records/import" && request.method === "POST") {
-    return importRecords(context, requireOperator(session), request.body);
+    return importRecords(context, requirePermission(requireOperator(session), context.registryId, "records.draft"), request.body);
   }
 
   const recordPath = /^\/v1\/admin\/records\/(SYNTHETIC-[1-9][0-9]*)$/.exec(request.path);
   if (recordPath !== null && request.method === "GET") {
+    requirePermission(session, context.registryId, "records.read");
     return recordDetail(context, recordPath[1]);
   }
 
   if (request.path === "/v1/admin/preview" && request.method === "GET") {
+    requirePermission(session, context.registryId, "records.read");
+    requirePermission(session, context.registryId, "publication.read");
     return preview(context);
   }
 
   if (request.path === "/v1/admin/publish-intents" && request.method === "POST") {
-    return prepareIntent(context, requireOperator(session), request);
+    return prepareIntent(context, requirePermission(requireOperator(session), context.registryId, "publication.prepare"), request);
   }
 
   const intentPath = /^\/v1\/admin\/publish-intents\/([0-9a-f-]{36})(\/[a-z]+)?$/.exec(request.path);
   if (intentPath !== null) {
     const [, intentId, action] = intentPath;
     if (request.method === "GET" && action === undefined) {
-      return intentResponse(await loadIntent(context.pool, intentId));
+      requirePermission(session, context.registryId, "publication.read");
+      return intentResponse(await loadIntent(context.pool, intentId, context.registryId));
     }
     requireOperator(session);
     if (request.method === "POST" && action === "/signature") {
+      requirePermission(session, context.registryId, "publication.submit");
       return submitSignature(context, session, intentId, request.body);
     }
     if (request.method === "POST" && action === "/reconciliation") {
+      requirePermission(session, context.registryId, "publication.submit");
       return reconcile(context, session, intentId);
     }
     if (request.method === "POST" && action === "/certificate") {
+      requirePermission(session, context.registryId, "certificates.issue");
       return issueForIntent(context, session, intentId, request.body);
     }
     if (request.method === "POST" && action === "/rejection") {
-      const intent = await loadIntent(context.pool, intentId);
+      requirePermission(session, context.registryId, "publication.submit");
+      const intent = await loadIntent(context.pool, intentId, context.registryId);
       await setState(context.pool, intent, "SIGNING_REJECTED", { failureCode: "WALLET_REJECTED" });
       await appendEvent(context.pool, context, session, intentId, "SIGNING_REJECTED", {});
       return intentResponse(intent);
@@ -2748,6 +2964,7 @@ async function dispatch(context: AdminContext, request: AdminRequest): Promise<A
   }
 
   if (request.path === "/v1/admin/certificates" && request.method === "GET") {
+    requirePermission(session, context.registryId, "certificates.read");
     const result = await context.pool.query(
       `SELECT certificate_id, batch_sequence::text, status, issued_at, qr_url,
               internal_record_id, record_version::text, encode(certificate_hash,'hex') AS certificate_hash,
@@ -2775,6 +2992,7 @@ async function dispatch(context: AdminContext, request: AdminRequest): Promise<A
   }
 
   if (request.path === "/v1/admin/timeline" && request.method === "GET") {
+    requirePermission(session, context.registryId, "audit.read");
     const result = await context.pool.query(
       `SELECT operation_sequence::text, intent_id, event_type, actor, actor_role, payload, created_at
          FROM demo_operation_event WHERE registry_id = $1
