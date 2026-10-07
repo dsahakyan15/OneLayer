@@ -46,13 +46,23 @@ import { prepareAnchorTransaction, SignedTransactionError, validateSignedTransac
 import { ledgerDay } from "./ledger-day.ts";
 import {
   anchorEntryMismatch,
+  attemptPlanHash,
   buildPublicationIntent,
   PublicationIntentError,
   verifyStoredIntent,
   workflowFields,
+  type AttemptPlanCommitment,
   type PublicationIntent,
   type PublicationKeys,
 } from "./publication-intent.ts";
+import {
+  PublicationApprovalError,
+  publicationApprovalReceiptHash,
+  verifyPublicationApproval,
+  type PublicationApprovalReceipt,
+  type PublicationApprovalVerifierPolicy,
+} from "./publication-approval.ts";
+import { assertClusterLabel, expectedGenesisHash, PublicationIdentityError } from "./publication-identity.ts";
 import type { ArchivalChain, PublicationChain, SignatureStatus } from "./publication-rpc.ts";
 import { canonicalWorkflow, workflowTransaction } from "./registry-workflow.ts";
 import type { SimulationResult } from "./solana-rpc.ts";
@@ -78,8 +88,33 @@ export interface SignRequest {
   transactionBase64: string;
   messageBase64: string;
   intentHash: string;
+  /** Operation whose reserved attempt is being signed (bound by the receipt). */
+  operationId: string;
   intent: PublicationIntent;
   simulation: SimulationResult;
+  /** Reserved ledger destination; the signer re-derives both PDAs and checks
+   * that the message accounts equal them before signing. */
+  segmentPda: string;
+  segmentIndex: number;
+  dayUtc: number;
+  /** Reserved lifetime blockhash (last_valid_block_height is enforced by the
+   * publisher before it ever asks for a signature). */
+  blockhash: string;
+  lastValidBlockHeight: string;
+  /** Attempt/plan identity the operator approved (H3). */
+  attemptNo: number;
+  cluster: string;
+  /** Quoted fee and its bounded constraint, both committed by the plan hash. */
+  feeLamports: string;
+  feeLimitLamports: string;
+  /** The operator-approved per-attempt approval commitment. The signer must
+   * independently recompute it from the decoded message bytes plus these fields
+   * and refuse a mismatch; it is not merely the publisher's own request. */
+  attemptPlanHash: string;
+  /** Independently issued approval receipt (H5). The signer verifies it against
+   * its separately pinned approval public key; a publisher-self-minted receipt
+   * or a missing one is refused before the key is touched. */
+  approvalReceipt: PublicationApprovalReceipt;
 }
 
 /** Signs exactly the reserved message and returns the signed wire transaction
@@ -101,9 +136,24 @@ export interface PublisherConfig {
   maxFailedAttempts?: number;
   /** No new attempt this close (seconds) to UTC midnight by chain block time. */
   dayBoundaryGuardSeconds?: number;
+  /** Explicit deployment cluster label. REQUIRED at runtime: the constructor
+   * refuses to build a publisher without one (M4). There is no default. */
+  cluster?: string;
+  /** Pinned expected genesis hash. Required for local/unknown clusters; the
+   * public clusters are pinned from `KNOWN_GENESIS_HASHES`. */
+  genesisHash?: string;
+  /** Pinned approval-verifier capability (public key + identity). Built by the
+   * runtime from the approval service. When absent, every signing path refuses
+   * `PUBLICATION_APPROVAL_UNCONFIGURED`; the issuer private key is never here. */
+  approvalVerifier?: PublicationApprovalVerifierPolicy;
+  /** Upper bound on the quoted fee of a reserved attempt; a higher quote fails
+   * closed. Defaults to 100_000 lamports (20x the base fee of a 1-signature tx). */
+  maxFeeLamports?: bigint;
   /** Test seam: runs after signed bytes are durable and before any send. */
   afterAttemptStored?: (attemptId: string) => Promise<void>;
 }
+
+const DEFAULT_MAX_FEE_LAMPORTS = 100_000n;
 
 export interface MaintenanceRequest {
   requestedBy: string;
@@ -168,11 +218,30 @@ export interface PublicationReview {
   blockedReason: string | null;
   attemptStates: Array<{ attemptNo: number; state: AttemptState }>;
   hasSignedAttempt: boolean;
+  /** A signed attempt in a non-terminal state: it can be reconciled or its
+   * stored bytes re-sent without producing a new signature. */
+  hasLiveSignedAttempt: boolean;
   segmentPda: string | null;
   segmentIndex: number | null;
   blockhash: string | null;
   lastValidBlockHeight: string | null;
   simulation: SimulationResult | null;
+  /** Cluster the attempt plan is bound to. */
+  cluster: string;
+  /** Pinned genesis hash the connected chain must report (M4). */
+  genesisHash: string;
+  /** Durable per-attempt approval commitment over the exact reserved unsigned
+   * bytes + lifetime + fee quote + attempt/day/segment/cluster (H3). Null when
+   * no new signature could be produced (a live signed attempt is reconciled, or
+   * the operation is blocked). Pass this verbatim to `run`. */
+  attemptPlanHash: string | null;
+  attemptNo: number | null;
+  /** Quoted fee of the reserved attempt and its bound (null when no plan). */
+  feeLamports: string | null;
+  feeLimitLamports: string;
+  /** Base64 of the exact reserved unsigned message the plan hash commits to
+   * (null when no plan). `run` signs exactly these bytes. */
+  messageBase64: string | null;
 }
 
 type AttemptState = "PREPARED" | "SIGNED" | "CANCELLED" | "SUBMITTED" | "UNKNOWN" | "EXPIRED" | "FAILED" | "FINALIZED" | "ANCHOR_MISMATCH";
@@ -190,9 +259,12 @@ const LIVE: readonly AttemptState[] = ["PREPARED", "SIGNED", "SUBMITTED", "UNKNO
 
 interface Attempt {
   attemptId: string;
+  operationId: string;
   attemptNo: number;
   intentHash: string;
   segmentPda: string;
+  segmentIndex: number;
+  dayUtc: number;
   recentBlockhash: string;
   lastValidBlockHeight: bigint;
   /** Finalized slot at reservation; the transaction cannot have landed before it. */
@@ -202,6 +274,11 @@ interface Attempt {
   signedBytes: Buffer | null;
   signature: string | null;
   state: AttemptState;
+  /** Per-attempt approval plan (H3); null on pre-approval rows only. */
+  cluster: string | null;
+  feeLamports: bigint | null;
+  feeLimitLamports: bigint | null;
+  planHash: string | null;
 }
 
 type LandingProof =
@@ -214,13 +291,15 @@ type Landing =
   | { kind: "unproven" }
   | { kind: "foreign"; reason: string; error: string; contextSlot: bigint };
 
-const ATTEMPTS_SQL = `SELECT t.attempt_id,t.attempt_no,t.intent_hash,t.segment_pda,t.recent_blockhash,t.last_valid_block_height::text AS lvbh,t.context_slot::text AS cslot,
-    t.message_bytes,t.simulation,s.signed_bytes,s.signature,wf_publication_tx_state(t.attempt_id) AS state
+const ATTEMPTS_SQL = `SELECT t.attempt_id,t.operation_id,t.attempt_no,t.intent_hash,t.segment_pda,t.segment_index,t.day_utc,t.recent_blockhash,t.last_valid_block_height::text AS lvbh,t.context_slot::text AS cslot,
+    t.message_bytes,t.simulation,t.cluster,t.fee_lamports::text AS fee,t.fee_limit_lamports::text AS feelimit,t.plan_hash,
+    s.signed_bytes,s.signature,wf_publication_tx_state(t.attempt_id) AS state
   FROM wf_publication_tx t LEFT JOIN wf_publication_tx_signed s USING(attempt_id) WHERE t.operation_id=$1`;
 const attemptOf = (r: any): Attempt => ({
-  attemptId: r.attempt_id, attemptNo: r.attempt_no, intentHash: r.intent_hash, segmentPda: r.segment_pda,
+  attemptId: r.attempt_id, operationId: r.operation_id, attemptNo: r.attempt_no, intentHash: r.intent_hash, segmentPda: r.segment_pda, segmentIndex: r.segment_index, dayUtc: r.day_utc,
   recentBlockhash: r.recent_blockhash, lastValidBlockHeight: BigInt(r.lvbh), contextSlot: BigInt(r.cslot), messageBytes: r.message_bytes,
   simulation: r.simulation, signedBytes: r.signed_bytes, signature: r.signature, state: r.state,
+  cluster: r.cluster, feeLamports: r.fee === null ? null : BigInt(r.fee), feeLimitLamports: r.feelimit === null ? null : BigInt(r.feelimit), planHash: r.plan_hash,
 });
 const hexOf = (value: ArrayLike<number>) => toHex(Uint8Array.from(value));
 const max = (a: bigint, b: bigint) => (a > b ? a : b);
@@ -254,15 +333,28 @@ export class WorkflowPublisher {
     private readonly signer: PublicationSigner,
     private readonly config: PublisherConfig,
   ) {
+    try {
+      const cluster = assertClusterLabel(config.cluster);
+      expectedGenesisHash(cluster, config.genesisHash);
+    } catch (error) {
+      if (error instanceof PublicationIdentityError) throw new PublicationError(error.code);
+      throw error;
+    }
     this.store = new WorkflowPublicationStore(pool);
   }
 
   /** Advances the leased operation by one durable step. Repeating it (double
-   * click, restart, second worker after reclaim) resumes from the journal. */
-  async step(lease: PublicationLease): Promise<PublicationStepResult> {
+   * click, restart, second worker after reclaim) resumes from the journal.
+   *
+   * There is no unguarded path: any step that would mint a NEW signature
+   * requires an independently issued approval receipt whose `attemptPlanHash`
+   * equals the exact reserved (PREPARED) attempt. Reconciliation and re-send of
+   * an already signed attempt need no approval and never sign. A fresh attempt
+   * is only ever reserved by `review()`; `step` never reserves one. */
+  async step(lease: PublicationLease, options: { approval?: PublicationApprovalReceipt } = {}): Promise<PublicationStepResult> {
     lease = { ...lease };
     if (lease.registryId !== this.config.registryId) throw new PublicationError("PUBLICATION_LEASE_LOST");
-    return this.exclusive(lease.operationId, () => this.stepLocked(lease));
+    return this.exclusive(lease.operationId, () => this.stepLocked(lease, options.approval));
   }
 
   private validateRequest(request: MaintenanceRequest, needIncident: boolean) {
@@ -424,7 +516,7 @@ export class WorkflowPublisher {
     const archiveId = maintenancePerson(archive.archiveId);
     if (lease.registryId !== this.config.registryId) throw new PublicationError("PUBLICATION_LEASE_LOST");
     return this.exclusive(lease.operationId, async () => {
-      await this.checkBinding();
+      await this.checkChainIdentity();
       const op = await this.operation(lease);
       const stored = await this.storedIntent(lease.operationId);
       if (!stored) throw new PublicationError("PUBLICATION_ARCHIVAL_NOT_APPLICABLE");
@@ -569,8 +661,8 @@ export class WorkflowPublisher {
     }
   }
 
-  private async stepLocked(lease: PublicationLease): Promise<PublicationStepResult> {
-    await this.checkBinding();
+  private async stepLocked(lease: PublicationLease, approval?: PublicationApprovalReceipt): Promise<PublicationStepResult> {
+    await this.checkChainIdentity();
     const op = await this.operation(lease);
     const items = await this.store.items(lease);
     // Effective exclusions (ADR-0009 B) are honoured before any intent work.
@@ -597,19 +689,27 @@ export class WorkflowPublisher {
     const live = attempts.filter((a) => LIVE.includes(a.state));
     if (live.length > 1) throw new PublicationError("PUBLICATION_JOURNAL_INVALID");
     if (live.length === 1) {
-      const outcome = await this.reconcile(lease, intent, hash, live[0], slot);
+      const outcome = await this.reconcile(lease, intent, hash, live[0], slot, approval);
       if (typeof outcome !== "bigint") return outcome;
       // Later reads must be at least as new as the view that justified EXPIRED/CANCELLED.
       slot = max(slot, outcome);
     }
-    return this.advance(lease, intent, hash, await this.attempts(lease), slot);
+    return this.advance(lease, intent, hash, await this.attempts(lease), slot, approval);
   }
 
-  private async checkBinding(): Promise<void> {
-    if (this.bindingChecked) return;
-    const [expected] = await findRegistryConfigPda(registryIdHash(this.config.registryId), { programAddress: this.config.programId });
-    if (expected !== this.config.configPda) throw new PublicationError("PUBLICATION_CONFIG_BINDING");
-    this.bindingChecked = true;
+  /** Derives the config/registry PDA binding once and re-checks the connected
+   * node's genesis hash on every call: a wrong or unreachable chain fails closed
+   * before any reservation or signature (M4). */
+  private async checkChainIdentity(): Promise<void> {
+    if (!this.bindingChecked) {
+      const [expected] = await findRegistryConfigPda(registryIdHash(this.config.registryId), { programAddress: this.config.programId });
+      if (expected !== this.config.configPda) throw new PublicationError("PUBLICATION_CONFIG_BINDING");
+      this.bindingChecked = true;
+    }
+    let actual: string;
+    try { actual = await this.chain.genesisHash(); }
+    catch { throw new PublicationError("PUBLICATION_CHAIN_IDENTITY_UNAVAILABLE"); }
+    if (actual !== this.genesis()) throw new PublicationError("PUBLICATION_CHAIN_IDENTITY_MISMATCH");
   }
 
   private checkConfig(config: RegistryConfig | null, intent?: PublicationIntent): RegistryConfig {
@@ -722,6 +822,12 @@ export class WorkflowPublisher {
           && anchorEntryMismatch(intent, { ...decoded, operator: keys[0], pad0: new Uint8Array(0), publishedAt: 0n } as unknown as AnchorEntryV1) === null;
       } catch { ok = false; }
       if (!ok) throw new PublicationError("PUBLICATION_JOURNAL_INVALID");
+      // The reserved attempt's approval commitment must still cover exactly this
+      // message bytes, lifetime, fee, attempt/day/segment and cluster (H3).
+      if (attempt.planHash !== null) {
+        const recomputed = this.planHashFor(intent, hash, attempt);
+        if (recomputed !== attempt.planHash) throw new PublicationError("PUBLICATION_JOURNAL_INVALID");
+      }
       if (attempt.signedBytes !== null) {
         let signature: string;
         try { signature = validateSignedTransaction(attempt.signedBytes.toString("base64"), attempt.messageBytes.toString("base64"), intent.operator as Address); }
@@ -729,6 +835,56 @@ export class WorkflowPublisher {
         if (signature !== attempt.signature) throw new PublicationError("PUBLICATION_JOURNAL_INVALID");
       }
     }
+  }
+
+  private cluster(): string { return assertClusterLabel(this.config.cluster); }
+  private genesis(): string { return expectedGenesisHash(this.cluster(), this.config.genesisHash); }
+  private feeLimit(): bigint { return this.config.maxFeeLamports ?? DEFAULT_MAX_FEE_LAMPORTS; }
+
+  /** Commitment over a reserved attempt's exact bytes + lifetime + fee + plan. */
+  private planHashFor(intent: PublicationIntent, hash: string, attempt: {
+    attemptNo: number; segmentPda: string; segmentIndex: number; dayUtc: number;
+    recentBlockhash: string; lastValidBlockHeight: bigint; messageBytes: Buffer;
+    feeLamports: bigint | null; feeLimitLamports: bigint | null; cluster: string | null;
+  }): string {
+    const commitment: AttemptPlanCommitment = {
+      intentHash: hash, attemptNo: attempt.attemptNo, cluster: attempt.cluster ?? this.cluster(),
+      programId: intent.programId, configPda: intent.configPda, operator: intent.operator, registryId: intent.registryId,
+      segmentPda: attempt.segmentPda, segmentIndex: attempt.segmentIndex, dayUtc: attempt.dayUtc,
+      recentBlockhash: attempt.recentBlockhash, lastValidBlockHeight: attempt.lastValidBlockHeight.toString(),
+      feeLamports: (attempt.feeLamports ?? 0n).toString(), feeLimitLamports: (attempt.feeLimitLamports ?? this.feeLimit()).toString(),
+      messageBase64: attempt.messageBytes.toString("base64"),
+    };
+    return attemptPlanHash(commitment);
+  }
+
+  /**
+   * A new signature may target only the reserved attempt whose plan hash the
+   * independently issued approval receipt binds. There is no unguarded path:
+   * a missing receipt is refused, a receipt whose binding/identity/signature/
+   * expiry does not verify is refused, and a consumed receipt (already recorded
+   * on a signed attempt) is refused. The issuer private key is never available
+   * here; the publisher holds only the pinned verifier public key.
+   */
+  private requireApproval(attempt: Attempt, approval: PublicationApprovalReceipt | undefined): PublicationApprovalReceipt {
+    const verifier = this.config.approvalVerifier;
+    if (verifier === undefined) throw new PublicationError("PUBLICATION_APPROVAL_UNCONFIGURED");
+    if (approval === undefined) throw new PublicationError("PUBLICATION_INTENT_APPROVAL_REQUIRED");
+    if (attempt.planHash === null) throw new PublicationError("PUBLICATION_ATTEMPT_PLAN_MISMATCH");
+    try {
+      verifyPublicationApproval(approval, {
+        operationId: attempt.operationId,
+        intentHash: attempt.intentHash,
+        attemptPlanHash: attempt.planHash,
+        ...verifier,
+        cluster: attempt.cluster ?? this.cluster(),
+        genesisHash: this.genesis(),
+      });
+    } catch (error) {
+      if (error instanceof PublicationApprovalError) throw new PublicationError(error.code);
+      throw error;
+    }
+    return approval;
   }
 
   /** Compare-and-set state event under the current fence; optionally blocks the operation in the same transaction. */
@@ -772,7 +928,7 @@ export class WorkflowPublisher {
 
   /** Returns a result, or the context slot of the view that ended the attempt
    * (EXPIRED/CANCELLED) when a landing search / new attempt is needed. */
-  private async reconcile(lease: PublicationLease, intent: PublicationIntent, hash: string, attempt: Attempt, slot: bigint): Promise<PublicationStepResult | bigint> {
+  private async reconcile(lease: PublicationLease, intent: PublicationIntent, hash: string, attempt: Attempt, slot: bigint, approval?: PublicationApprovalReceipt): Promise<PublicationStepResult | bigint> {
     const x = await this.chain.finalizedSlot(slot);
     const block = await this.chain.finalizedBlock(x);
     if (attempt.state === "PREPARED") {
@@ -781,7 +937,9 @@ export class WorkflowPublisher {
         await this.transition(lease, attempt, "CANCELLED", { code: "RESERVATION_EXPIRED" }, x);
         return x;
       }
-      return this.signAndSend(lease, intent, hash, attempt);
+      // A reserved-but-unsigned attempt is still an unseen signature: without a
+      // valid receipt for exactly this reserved plan the publisher never signs.
+      return this.signAndSend(lease, intent, hash, attempt, this.requireApproval(attempt, approval));
     }
     // Height is taken from the block at exactly slot x; the status answer must
     // be at least as new, so an inclusion at or before x would be visible
@@ -861,7 +1019,7 @@ export class WorkflowPublisher {
     return { kind: "foreign", reason: "CHAIN_CONFLICT", error: "PUBLICATION_CHAIN_CONFLICT", contextSlot: read.contextSlot };
   }
 
-  private async advance(lease: PublicationLease, intent: PublicationIntent, hash: string, attempts: Attempt[], slot: bigint): Promise<PublicationStepResult> {
+  private async advance(lease: PublicationLease, intent: PublicationIntent, hash: string, attempts: Attempt[], slot: bigint, approval?: PublicationApprovalReceipt): Promise<PublicationStepResult> {
     const landing = await this.findLanding(intent, attempts, slot);
     if (landing.kind === "ours") return this.complete(lease, intent, landing.attempt, landing.proof);
     if (landing.kind === "unproven") throw new PublicationError("PUBLICATION_LANDING_UNPROVEN");
@@ -881,7 +1039,10 @@ export class WorkflowPublisher {
     }
     // A changed operator key cannot sign this intent; the exit is maintenance.
     if (this.signer.address !== intent.operator) throw new PublicationError("PUBLICATION_SIGNER_MISMATCH");
-    return this.newAttempt(lease, intent, hash, attempts.length + 1, landing.contextSlot);
+    // There is no live attempt here, so any approval is stale: a new attempt is
+    // reserved only by `review` and signed only from a live PREPARED attempt in
+    // `reconcile`. Nothing reserves or signs from `advance` any more.
+    throw new PublicationError(approval === undefined ? "PUBLICATION_INTENT_APPROVAL_REQUIRED" : "PUBLICATION_ATTEMPT_PLAN_MISMATCH");
   }
 
   private async findOpenSegment(dayUtc: number, slot: bigint): Promise<{ address: Address; index: number }> {
@@ -898,42 +1059,56 @@ export class WorkflowPublisher {
     throw new PublicationError("LEDGER_SEGMENT_FULL");
   }
 
-  private async newAttempt(lease: PublicationLease, intent: PublicationIntent, hash: string, attemptNo: number, slot: bigint): Promise<PublicationStepResult> {
-    const { segment, blockhash, prepared, simulation } = await this.buildAttempt(intent, slot);
+  /**
+   * Reserves the exact next unsigned attempt (PREPARED) durably, with a plan
+   * hash over its bytes, lifetime, fee, attempt/day/segment and cluster. It
+   * never signs or sends. The signer only ever sees bytes read back from here.
+   */
+  private async reserveAttempt(lease: PublicationLease, intent: PublicationIntent, hash: string, slot: bigint): Promise<Attempt> {
+    const { segment, blockhash, prepared, simulation, feeLamports, feeLimitLamports, cluster } = await this.buildAttempt(intent, slot);
     if (!simulation.ok) throw new PublicationError("SIMULATION_FAILED");
     const attemptId = randomUUID();
-    // Reserve (PREPARED) before the signer is asked: at most one reservation
-    // exists, and the signer only ever sees bytes read back from here.
     await workflowTransaction(this.pool, async (c) => {
       await assertPublicationLease(c, lease);
       const existing = (await c.query(ATTEMPTS_SQL, [lease.operationId])).rows.map(attemptOf);
-      if (existing.length !== attemptNo - 1 || existing.some((a) => a.state !== "EXPIRED" && a.state !== "FAILED" && a.state !== "CANCELLED")) {
+      if (existing.some((a) => a.state !== "EXPIRED" && a.state !== "FAILED" && a.state !== "CANCELLED")) {
         throw new PublicationError("PUBLICATION_ATTEMPT_IN_FLIGHT");
       }
+      const attemptNo = existing.length + 1;
+      const planHash = attemptPlanHash({
+        intentHash: hash, attemptNo, cluster, programId: intent.programId, configPda: intent.configPda,
+        operator: intent.operator, registryId: intent.registryId, segmentPda: segment.address, segmentIndex: segment.index,
+        dayUtc: blockhash.dayUtc, recentBlockhash: blockhash.blockhash,
+        lastValidBlockHeight: blockhash.lastValidBlockHeight.toString(),
+        feeLamports: feeLamports.toString(), feeLimitLamports: feeLimitLamports.toString(), messageBase64: prepared.messageBase64,
+      });
       await c.query(`INSERT INTO wf_publication_tx(attempt_id,operation_id,attempt_no,intent_hash,fence,worker,segment_pda,segment_index,day_utc,
-          recent_blockhash,last_valid_block_height,context_slot,message_bytes,simulation)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+          recent_blockhash,last_valid_block_height,context_slot,message_bytes,simulation,cluster,fee_lamports,fee_limit_lamports,plan_hash)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
       [attemptId, lease.operationId, attemptNo, hash, lease.fence, lease.worker, segment.address, segment.index, blockhash.dayUtc,
         blockhash.blockhash, blockhash.lastValidBlockHeight.toString(), blockhash.contextSlot.toString(), Buffer.from(prepared.messageBase64, "base64"),
-        JSON.stringify(simulation)]);
-      await c.query("INSERT INTO wf_publication_tx_event(attempt_id,state,fence,worker) VALUES($1,'PREPARED',$2,$3)", [attemptId, lease.fence, lease.worker]);
+        JSON.stringify(simulation), cluster, feeLamports.toString(), feeLimitLamports.toString(), planHash]);
+      await c.query("INSERT INTO wf_publication_tx_event(attempt_id,state,fence,worker,detail) VALUES($1,'PREPARED',$2,$3,$4)",
+        [attemptId, lease.fence, lease.worker, JSON.stringify({ planHash, feeLamports: feeLamports.toString(), feeLimitLamports: feeLimitLamports.toString(), cluster })]);
       await this.bump(c, lease, blockhash.contextSlot);
     });
-    const reserved = (await this.attempts(lease)).find((a) => a.attemptId === attemptId)!;
-    return this.signAndSend(lease, intent, hash, reserved);
+    return (await this.attempts(lease)).find((a) => a.attemptId === attemptId)!;
   }
 
   /**
    * Builds the next unsigned publish-anchor attempt for `slot` without
-   * reserving or signing it. Used by review so an operator can inspect the
-   * exact bytes, program/config/operator, membership and simulation before any
-   * signature is produced.
+   * reserving or signing it. Quotes the fee and enforces the bound; a missing
+   * quote fails closed. Used by review/reserve so an operator approves the exact
+   * bytes, lifetime, fee and plan.
    */
   private async buildAttempt(intent: PublicationIntent, slot: bigint): Promise<{
     segment: { address: Address; index: number };
     blockhash: { blockhash: string; lastValidBlockHeight: bigint; contextSlot: bigint; dayUtc: number };
     prepared: ReturnType<typeof prepareAnchorTransaction>;
     simulation: SimulationResult;
+    feeLamports: bigint;
+    feeLimitLamports: bigint;
+    cluster: string;
   }> {
     const x = await this.chain.finalizedSlot(slot);
     const block = await this.chain.finalizedBlock(x);
@@ -953,20 +1128,30 @@ export class WorkflowPublisher {
       previousAnchorHash: Buffer.from(intent.previousAnchorHash, "hex"), leafCount: intent.leafCount,
       schemaVersion: intent.schemaVersion, hashAlgorithm: intent.hashAlgorithm, treeAlgorithm: intent.treeAlgorithm,
     });
+    // Fail closed: no signature is ever produced without a bounded fee quote.
+    let feeLamports: bigint;
+    try { feeLamports = await this.chain.feeForMessage(prepared.messageBase64); }
+    catch { throw new PublicationError("PUBLICATION_FEE_QUOTE_UNAVAILABLE"); }
+    if (feeLamports < 0n) throw new PublicationError("PUBLICATION_FEE_QUOTE_UNAVAILABLE");
+    const feeLimitLamports = this.feeLimit();
+    if (feeLamports > feeLimitLamports) throw new PublicationError("PUBLICATION_FEE_EXCEEDS_LIMIT");
     const simulation = await this.chain.simulate(prepared.transactionBase64);
-    return { segment, blockhash: { ...blockhash, contextSlot: x, dayUtc }, prepared, simulation };
+    return { segment, blockhash: { ...blockhash, contextSlot: x, dayUtc }, prepared, simulation, feeLamports, feeLimitLamports, cluster: this.cluster() };
   }
 
   /**
-   * No-send review of the durable intent this operation would sign next. Ensures
-   * the intent is built and stored, then previews the next attempt and its
-   * simulation. It never reserves, signs or sends anything.
+   * No-send review that RESERVES the exact next unsigned attempt (PREPARED) and
+   * returns the durable `attemptPlanHash` the operator must approve. It never
+   * signs or sends. When a live signed attempt exists there is nothing new to
+   * approve (reconcile via `run` without a plan); when a valid reservation
+   * already exists the same plan is returned; a reservation whose blockhash
+   * expired is cancelled and replaced.
    */
   async review(lease: PublicationLease): Promise<PublicationReview> {
     lease = { ...lease };
     if (lease.registryId !== this.config.registryId) throw new PublicationError("PUBLICATION_LEASE_LOST");
     return this.exclusive(lease.operationId, async () => {
-      await this.checkBinding();
+      await this.checkChainIdentity();
       const op = await this.operation(lease);
       const items = await this.store.items(lease);
       const excluded = (await this.pool.query(`SELECT 1 FROM wf_publication_item i JOIN wf_version_excluded x USING(event_id)
@@ -974,7 +1159,26 @@ export class WorkflowPublisher {
       if (excluded) throw new PublicationError("PUBLICATION_VERSION_EXCLUDED");
       const slot = await this.chain.finalizedSlot(op.contextSlot);
       const { intent, hash } = await this.ensureIntent(lease, items, slot);
-      const attempts = await this.attempts(lease);
+      let attempts = await this.attempts(lease);
+      // Decide whether a plan must be (re)reserved. A live signed attempt is
+      // reconciled without any approval; a valid reservation is reused; an
+      // expired reservation is cancelled first.
+      let reserved: Attempt | null = null;
+      if (op.blockedReason === null && !attempts.some((a) => a.signature !== null && LIVE.includes(a.state))) {
+        let prepared = attempts.find((a) => a.state === "PREPARED");
+        if (prepared !== undefined) {
+          const x = await this.chain.finalizedSlot(slot);
+          const block = await this.chain.finalizedBlock(x);
+          if (prepared.planHash !== null && block.blockHeight <= prepared.lastValidBlockHeight) {
+            reserved = prepared;
+          } else {
+            await this.transition(lease, prepared, "CANCELLED", { code: "RESERVATION_EXPIRED" }, x);
+            attempts = await this.attempts(lease);
+          }
+        }
+        if (reserved === null) reserved = await this.reserveAttempt(lease, intent, hash, slot);
+        attempts = await this.attempts(lease);
+      }
       const base: PublicationReview = {
         operationId: lease.operationId, intentHash: hash, registryId: intent.registryId, programId: intent.programId,
         configPda: intent.configPda, operator: intent.operator, operatorKeyId: intent.operatorKeyId,
@@ -985,29 +1189,86 @@ export class WorkflowPublisher {
         blockedReason: op.blockedReason,
         attemptStates: attempts.map((attempt) => ({ attemptNo: attempt.attemptNo, state: attempt.state })),
         hasSignedAttempt: attempts.some((attempt) => attempt.signature !== null),
+        hasLiveSignedAttempt: attempts.some((attempt) => attempt.signature !== null && LIVE.includes(attempt.state)),
         segmentPda: null, segmentIndex: null, blockhash: null, lastValidBlockHeight: null, simulation: null,
+        cluster: this.cluster(), genesisHash: this.genesis(), attemptPlanHash: null, attemptNo: null,
+        feeLamports: null, feeLimitLamports: this.feeLimit().toString(),
+        messageBase64: null,
       };
-      if (op.blockedReason !== null) return base;
-      const preview = await this.buildAttempt(intent, slot);
-      return { ...base, segmentPda: preview.segment.address, segmentIndex: preview.segment.index,
-        blockhash: preview.blockhash.blockhash, lastValidBlockHeight: preview.blockhash.lastValidBlockHeight.toString(),
-        simulation: preview.simulation };
+      if (reserved === null) return base;
+      return {
+        ...base,
+        segmentPda: reserved.segmentPda, segmentIndex: reserved.segmentIndex,
+        blockhash: reserved.recentBlockhash, lastValidBlockHeight: reserved.lastValidBlockHeight.toString(),
+        simulation: reserved.simulation, attemptPlanHash: reserved.planHash, attemptNo: reserved.attemptNo,
+        feeLamports: reserved.feeLamports === null ? null : reserved.feeLamports.toString(),
+        messageBase64: reserved.messageBytes.toString("base64"),
+      };
     });
   }
 
-  private async signAndSend(lease: PublicationLease, intent: PublicationIntent, hash: string, attempt: Attempt): Promise<PublicationStepResult> {
+  /**
+   * Non-reserving read used by the runtime's `run` pre-check: the semantic
+   * intent hash, whether a live signed attempt exists, and the plan hash of an
+   * already-reserved (still valid) attempt if one exists. It never reserves.
+   */
+  async inspect(lease: PublicationLease): Promise<{ intentHash: string; hasLiveSignedAttempt: boolean; attemptPlanHash: string | null }> {
+    lease = { ...lease };
+    if (lease.registryId !== this.config.registryId) throw new PublicationError("PUBLICATION_LEASE_LOST");
+    return this.exclusive(lease.operationId, async () => {
+      await this.checkChainIdentity();
+      const op = await this.operation(lease);
+      const items = await this.store.items(lease);
+      const excluded = (await this.pool.query(`SELECT 1 FROM wf_publication_item i JOIN wf_version_excluded x USING(event_id)
+        WHERE i.operation_id=$1 LIMIT 1`, [lease.operationId])).rowCount;
+      if (excluded) throw new PublicationError("PUBLICATION_VERSION_EXCLUDED");
+      const slot = await this.chain.finalizedSlot(op.contextSlot);
+      const { hash } = await this.ensureIntent(lease, items, slot);
+      const attempts = await this.attempts(lease);
+      const hasLiveSignedAttempt = attempts.some((a) => a.signature !== null && LIVE.includes(a.state));
+      let attemptPlanHash: string | null = null;
+      if (op.blockedReason === null && !hasLiveSignedAttempt) {
+        const prepared = attempts.find((a) => a.state === "PREPARED");
+        if (prepared && prepared.planHash !== null) {
+          const x = await this.chain.finalizedSlot(slot);
+          const block = await this.chain.finalizedBlock(x);
+          if (block.blockHeight <= prepared.lastValidBlockHeight) attemptPlanHash = prepared.planHash;
+        }
+      }
+      return { intentHash: hash, hasLiveSignedAttempt, attemptPlanHash };
+    });
+  }
+
+  private async signAndSend(lease: PublicationLease, intent: PublicationIntent, hash: string, attempt: Attempt, approval: PublicationApprovalReceipt): Promise<PublicationStepResult> {
     const operator = intent.operator as Address;
     const messageBase64 = attempt.messageBytes.toString("base64");
     const transactionBase64 = Buffer.from(getTransactionEncoder().encode({ messageBytes: attempt.messageBytes, signatures: { [operator]: null } } as any)).toString("base64");
     if (!Buffer.from(getTransactionDecoder().decode(Buffer.from(transactionBase64, "base64")).messageBytes).equals(attempt.messageBytes)) {
       throw new PublicationError("PUBLICATION_JOURNAL_INVALID");
     }
+    if (attempt.planHash === null) throw new PublicationError("PUBLICATION_JOURNAL_INVALID");
+    // A receipt is a one-shot capability for exactly one reserved plan: if it
+    // was already consumed by a recorded signature, it cannot arm another one.
+    const receiptHash = publicationApprovalReceiptHash(approval);
+    const consumed = await this.pool.query(
+      "SELECT 1 FROM wf_publication_tx_event WHERE state='SIGNED' AND detail->>'approvalReceiptHash'=$1 LIMIT 1",
+      [receiptHash],
+    );
+    if (consumed.rowCount) throw new PublicationError("PUBLICATION_APPROVAL_CONSUMED");
     // The signer may wait for a human; the caller must keep renewing the lease
     // meanwhile. If the lease is lost, the SIGNED write below fails and the
     // PREPARED reservation is resumed (or cancelled after expiry) by the holder.
     let signed: string;
     try {
-      signed = await this.signer.signTransaction({ transactionBase64, messageBase64, intentHash: hash, intent, simulation: attempt.simulation });
+      signed = await this.signer.signTransaction({
+        transactionBase64, messageBase64, intentHash: hash, intent, simulation: attempt.simulation,
+        operationId: attempt.operationId,
+        segmentPda: attempt.segmentPda, segmentIndex: attempt.segmentIndex, dayUtc: attempt.dayUtc,
+        blockhash: attempt.recentBlockhash, lastValidBlockHeight: attempt.lastValidBlockHeight.toString(),
+        attemptNo: attempt.attemptNo, cluster: attempt.cluster ?? this.cluster(),
+        feeLamports: (attempt.feeLamports ?? 0n).toString(), feeLimitLamports: (attempt.feeLimitLamports ?? this.feeLimit()).toString(),
+        attemptPlanHash: attempt.planHash, approvalReceipt: approval,
+      });
     } catch {
       await this.transition(lease, attempt, "CANCELLED", { code: "SIGNING_REJECTED" });
       throw new PublicationError("SIGNING_REJECTED");
@@ -1023,7 +1284,8 @@ export class WorkflowPublisher {
       await assertPublicationLease(c, lease);
       if ((await c.query("SELECT wf_publication_tx_state($1) AS s", [attempt.attemptId])).rows[0].s !== "PREPARED") throw new PublicationError("PUBLICATION_STEP_RACE");
       await c.query("INSERT INTO wf_publication_tx_signed(attempt_id,signed_bytes,signature) VALUES($1,$2,$3)", [attempt.attemptId, Buffer.from(signed, "base64"), signature]);
-      await c.query("INSERT INTO wf_publication_tx_event(attempt_id,state,fence,worker) VALUES($1,'SIGNED',$2,$3)", [attempt.attemptId, lease.fence, lease.worker]);
+      await c.query("INSERT INTO wf_publication_tx_event(attempt_id,state,fence,worker,detail) VALUES($1,'SIGNED',$2,$3,$4)",
+        [attempt.attemptId, lease.fence, lease.worker, JSON.stringify({ attemptPlanHash: attempt.planHash, approvalReceiptId: approval.claims.receiptId, approvalReceiptHash: receiptHash, approvalActor: approval.claims.actor, approvalDevice: approval.claims.device })]);
     });
     await this.config.afterAttemptStored?.(attempt.attemptId);
     const stored = (await this.attempts(lease)).find((a) => a.attemptId === attempt.attemptId)!;

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
-import { FakeChain, TestSigner, publisher } from './support/publication-fake-chain.ts';
+import { FakeChain, TestSigner, publisher, stepReviewed } from './support/publication-fake-chain.ts';
 import { isolatedPostgres } from './support/postgres.ts';
 import { routeWorkflow, workflowHash, appendWorkflowVersion, workflowTransaction } from '../src/registry-workflow.ts';
 import { versionExclusion } from '../src/publication-maintenance.ts';
@@ -21,7 +21,7 @@ for (const alreadyClaimed of [false,true]) test(`legacy exclusion preserves immu
   const store=new WorkflowPublicationStore(pool);
   const original=alreadyClaimed ? (await store.claim('synthetic','worker'))! : null;
   const chain=new FakeChain(), signer=new TestSigner(), worker=publisher(pool,chain,signer);
-  if(original) await assert.rejects(worker.step(original),/PUBLICATION_UNPUBLISHABLE_VERSION/);
+  if(original) await assert.rejects(stepReviewed(worker, original),/PUBLICATION_UNPUBLISHABLE_VERSION/);
   const body={recordId:'legacy',version:1,payloadHash,correctedByVersion:2,correctedPayloadHash:correction.payloadHash,reason:'Legacy number cannot be published; corrected with tombstone.'};
   const call=async (who:AdminSession,path:string,body:Record<string,unknown>,key=randomUUID())=>{ const result=await routeWorkflow({pool,registryId:'synthetic'},{method:'POST',path:'/v2/admin/workflow/exclusions'+path,body,idempotencyKey:key},who); if(result.status>=400) throw new Error((result.body as {error:string}).error); return result; };
   await assert.rejects(call({...session('unauthorized'),permissions:['records.read']},'',body),/FORBIDDEN/);
@@ -45,7 +45,7 @@ for (const alreadyClaimed of [false,true]) test(`legacy exclusion preserves immu
   assert.equal(concurrent.filter(r=>r.status==='rejected').length,1);
   assert.deepEqual(await versionExclusion(pool,'synthetic','legacy',1),{state:'EXCLUDED_FROM_PUBLICATION',exclusionId:id,correctedByVersion:2,reason:body.reason,published:false,certificateEligible:false,current:false});
   if(original) {
-    const result=await worker.step(original);
+    const result=await stepReviewed(worker, original);
     assert.equal(result.status,'SUPERSEDED');
     assert.equal((await pool.query('SELECT state FROM wf_publication WHERE operation_id=$1',[original.operationId])).rows[0].state,'ABANDONED');
     assert.equal((await pool.query('SELECT count(*) FROM wf_publication_item WHERE operation_id=$1',[original.operationId])).rows[0].count,'2');

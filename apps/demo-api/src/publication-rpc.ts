@@ -26,6 +26,10 @@ export interface FinalizedBlock { slot: bigint; blockHeight: bigint; blockTime: 
 
 /** What the publisher needs from the chain; tests inject a fake. */
 export interface PublicationChain {
+  /** Genesis hash of the connected node. The publisher compares it with the
+   * pinned expected identity before reserving or signing anything (M4); a
+   * failure or mismatch fails closed. */
+  genesisHash(): Promise<string>;
   /** Finalized slot of a node that has reached at least `minContextSlot`. */
   finalizedSlot(minContextSlot: bigint): Promise<bigint>;
   /** Height and block time of the finalized block at exactly `slot`. */
@@ -33,6 +37,10 @@ export interface PublicationChain {
   registryConfig(address: string, minContextSlot: bigint): Promise<ChainRead<RegistryConfig | null>>;
   ledgerSegment(address: string, minContextSlot: bigint): Promise<ChainRead<DailyAnchorLedgerSegment | null>>;
   latestBlockhash(minContextSlot: bigint): Promise<LatestBlockhash>;
+  /** Quoted fee (lamports) for an unsigned compiled message. A quote is
+   * mandatory before reserving an attempt: the publisher fails closed when the
+   * chain cannot provide one. */
+  feeForMessage(messageBase64: string): Promise<bigint>;
   /** Statuses with `searchTransactionHistory: true`; context slot of the answer. */
   signatureStatuses(signatures: readonly string[]): Promise<ChainRead<Array<SignatureStatus | null>>>;
   simulate(transactionBase64: string): Promise<SimulationResult>;
@@ -56,6 +64,14 @@ export class PublicationRpc extends SolanaPublisherRpc implements PublicationCha
     if (!Number.isSafeInteger(slot) || slot < 0) throw new ChainReadError("RPC_RESPONSE_INVALID");
     if (BigInt(slot) < minimum) throw new ChainReadError("RPC_CONTEXT_STALE");
     return BigInt(slot);
+  }
+
+  /** `getGenesisHash` of the configured RPC. The caller compares it with the
+   * out-of-band expected identity; this adapter never trusts its own URL. */
+  async genesisHash(): Promise<string> {
+    const value = await this.rpc("getGenesisHash", []);
+    if (typeof value !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(value)) throw new ChainReadError("RPC_RESPONSE_INVALID");
+    return value;
   }
 
   private async account(address: string, minContextSlot: bigint, discriminator: ArrayLike<number>, size: number): Promise<ChainRead<Uint8Array | null>> {
@@ -98,6 +114,17 @@ export class PublicationRpc extends SolanaPublisherRpc implements PublicationCha
     this.contextOf(response, minContextSlot);
     if (typeof response?.value?.blockhash !== "string" || !Number.isSafeInteger(response?.value?.lastValidBlockHeight)) throw new ChainReadError("RPC_RESPONSE_INVALID");
     return { blockhash: response.value.blockhash, lastValidBlockHeight: BigInt(response.value.lastValidBlockHeight) };
+  }
+
+  /** `getFeeForMessage` on the reserved unsigned message. A null result (e.g. an
+   * unknown blockhash) or an invalid shape is unavailability, not a fee of 0:
+   * the publisher must fail closed rather than reserve an unbounded attempt. */
+  async feeForMessage(messageBase64: string): Promise<bigint> {
+    const response = await this.rpc("getFeeForMessage", [messageBase64, { commitment: "finalized" }]) as any;
+    const value = response?.value;
+    if (value === null || value === undefined) throw new ChainReadError("FEE_QUOTE_UNAVAILABLE");
+    if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new ChainReadError("RPC_RESPONSE_INVALID");
+    return BigInt(value);
   }
 
   async signatureStatuses(signatures: readonly string[]): Promise<ChainRead<Array<SignatureStatus | null>>> {

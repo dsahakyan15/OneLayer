@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createHash, randomUUID } from 'node:crypto';
 import { isolatedPostgres } from './support/postgres.ts';
-import { append, count, FakeChain, opState, publisher, REGISTRY, TestSigner } from './support/publication-fake-chain.ts';
+import { append, count, FakeChain, opState, publisher, REGISTRY, stepReviewed, TestSigner } from './support/publication-fake-chain.ts';
 import { WorkflowPublicationStore } from '../src/workflow-publication.ts';
 import { ARCHIVAL_CHECK_DOMAIN, type ArchivalChain } from '../src/publication-worker.ts';
 import { canonicalWorkflow } from '../src/registry-workflow.ts';
@@ -22,7 +22,7 @@ for (const mismatch of [false, true]) test(`archival own landing with pruned sta
   const chain = new FakeChain(); chain.tamperRoot = mismatch;
   const worker = publisher(pool, chain, new TestSigner());
   const lease = (await new WorkflowPublicationStore(pool).claim(REGISTRY, 'worker', 300000))!;
-  await worker.step(lease);
+  await stepReviewed(worker, lease);
   for (const signature of chain.landed.keys()) chain.pruned.add(signature);
   chain.advance(200n);
   const rawRpc = new ArchivalRpc('https://synthetic.invalid', 'synthetic-program', 'ordinary-rpc', async (_url, init) => {
@@ -34,7 +34,7 @@ for (const mismatch of [false, true]) test(`archival own landing with pruned sta
   assert.equal(incomplete.outcome, 'INCONCLUSIVE', 'ordinary RPC cannot attest gap-free history even with an old first block and current tip');
   if (incomplete.outcome === 'INCONCLUSIVE') assert.deepEqual(incomplete.unresolved, ['1:UNRESOLVED:HISTORY_COMPLETENESS_UNKNOWN']);
   if (mismatch) {
-    await assert.rejects(worker.step(lease), /ANCHOR_COMMITMENT_MISMATCH|PUBLICATION_CHAIN_CONFLICT/);
+    await assert.rejects(stepReviewed(worker, lease), /ANCHOR_COMMITMENT_MISMATCH|PUBLICATION_CHAIN_CONFLICT/);
     await assert.rejects(worker.abandonForMaintenance(lease, force), /PUBLICATION_ARCHIVAL_RECONCILIATION_REQUIRED/);
     await assert.rejects(pool.query(`INSERT INTO wf_publication_abandonment(operation_id,successor_operation_id,requested_by,approved_by,reason,blocked_reason,force_reason,fence,worker)
       SELECT operation_id,$2,'carol','dave','investigate conflicting anchor',blocked_reason,'force cancellation',fence,owner FROM wf_publication WHERE operation_id=$1`, [lease.operationId, randomUUID()]), /unknown origin needs archival evidence/);
@@ -56,7 +56,7 @@ test('foreign cancellation needs complete archival evidence and two distinct app
   const chain = new FakeChain(); chain.mode = 'drop';
   const worker = publisher(pool, chain, new TestSigner());
   const lease = (await new WorkflowPublicationStore(pool).claim(REGISTRY, 'worker', 300000))!;
-  await worker.step(lease);
+  await stepReviewed(worker, lease);
   // Occupy the sequence with a different anchor while our signed bytes never land.
   chain.mutate(s => { s.config.currentBatchSequence = 1n; s.config.lastAnchorHash = new Uint8Array(32).fill(9); });
   const source = archive(chain, async () => null);
@@ -76,7 +76,7 @@ test('foreign cancellation needs complete archival evidence and two distinct app
   await assert.rejects(approve('carol', proof.checkId, '0'.repeat(64)), /EVIDENCE_BINDING_MISMATCH/);
   await approve('carol');
   await assert.rejects(approve('CAROL'), /APPROVER_NOT_INDEPENDENT/);
-  await assert.rejects(worker.step(lease), /PUBLICATION_MAINTENANCE_REQUIRED/);
+  await assert.rejects(stepReviewed(worker, lease), /PUBLICATION_MAINTENANCE_REQUIRED/);
   // SQL must reject a well-hashed forged FOREIGN_PROVEN record with no proof.
   const row = (await pool.query('SELECT * FROM wf_publication_archival_check WHERE check_id=$1', [proof.checkId])).rows[0];
   const detail = JSON.parse(row.detail_bytes.toString()); delete detail.attempts[0].proof;
@@ -90,7 +90,7 @@ test('foreign cancellation needs complete archival evidence and two distinct app
   await assert.rejects(approve('dave'), /ARCHIVAL_CHECK_SUPERSEDED/);
   await approve('carol', newer.checkId, newer.evidenceHash);
   await approve('dave', newer.checkId, newer.evidenceHash);
-  const done = await worker.step(lease);
+  const done = await stepReviewed(worker, lease);
   assert.equal(done.status, 'ABANDONED');
   assert.equal((await opState(pool, lease.operationId)).state, 'ABANDONED');
   assert.equal(await count(pool, 'SELECT count(*) FROM wf_publication'), 2);

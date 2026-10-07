@@ -592,12 +592,23 @@ async function issueForIntent(
   body: Record<string, unknown> | null,
 ): Promise<AdminResponse> {
   await ensureWorkingRegistry(context);
+  const internalRecordId = text(body?.internalRecordId, "internalRecordId", /^SYNTHETIC-[1-9][0-9]*$/);
+  const disclosedPaths = disclosureRequest(body?.disclosedPaths);
+  // M7: the legacy issuance path enforces the same record + field scope as the
+  // durable one, before any intent SQL. A session that carries a resource policy
+  // (OIDC identities) must cover the record and every disclosed field; an omitted
+  // disclosure is FULL_RECORD and requires unrestricted records.read +
+  // certificates.read, never certificates.issue alone. Password demo sessions
+  // carry no per-object policy and are governed by their role/permission/registry
+  // triple plus the whole-registry OIDC guard in `dispatch`, which is preserved
+  // unchanged.
+  if (session.resourcePolicy !== undefined) {
+    requireResourceAccessObjectAndFields(session, context.registryId, internalRecordId, disclosedPaths);
+  }
   const intent = await loadIntent(context.pool, intentId, context.registryId);
   if (intent.state === "ISSUED") return intentResponse(intent, { replayed: true });
   if (intent.state !== "FINALIZED") throw new ApiError(409, "ANCHOR_NOT_FINALIZED");
   if (intent.signature === null || intent.anchorSlot === null) throw new ApiError(500, "ANCHOR_INCOMPLETE");
-  const internalRecordId = text(body?.internalRecordId, "internalRecordId", /^SYNTHETIC-[1-9][0-9]*$/);
-  const disclosedPaths = disclosureRequest(body?.disclosedPaths);
   const batch = await rebuildBatch(context, intent);
   const review = intent.review as any;
   // `operator` and `published_at` are written by the program, so the anchor hash
@@ -733,10 +744,10 @@ async function issueForIntent(
 }
 
 /** Optional disclosure selection: absent means the whole record. */
-function disclosureRequest(value: unknown): string[] | undefined {
+function disclosureRequest(value: unknown, pattern = /^[A-Za-z][A-Za-z0-9]{0,62}$/): string[] | undefined {
   if (value === undefined || value === null) return undefined;
   if (!Array.isArray(value) || value.length === 0) throw new ApiError(400, "DISCLOSED_PATHS_INVALID");
-  return value.map((path) => text(path, "disclosedPath", /^[A-Za-z][A-Za-z0-9]{0,62}$/));
+  return value.map((path) => text(path, "disclosedPath", pattern));
 }
 
 /**
@@ -745,6 +756,8 @@ function disclosureRequest(value: unknown): string[] | undefined {
  * FULL_RECORD, which is only allowed when the session is unrestricted for both
  * records and certificates; `certificates.issue` alone never passes.
  */
+const WORKFLOW_DISCLOSURE_PATH = /^(?:operation|payload\.[^.\u0000\uD800-\uDFFF]{1,256})$/;
+
 function requireResourceAccessObjectAndFields(
   session: AdminSession,
   registryId: string,
@@ -2766,9 +2779,14 @@ async function routePublications(
   if (context.publication === undefined) return { status: 503, body: { code: 'PUBLICATION_UNAVAILABLE' } };
   const { runtime, keys } = context.publication;
   const worker = session.username;
+  const OPERATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+  const operationId = (value: unknown): string => {
+    if (typeof value !== 'string' || !OPERATION_ID.test(value)) throw new ApiError(400, 'OPERATION_ID_INVALID');
+    return value;
+  };
   const optionalOperationId = (value: unknown): string | undefined => {
     if (value === undefined || value === null) return undefined;
-    return text(value, 'operationId', /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+    return operationId(value);
   };
   try {
     if (request.path === '/v2/admin/workflow/publications' && request.method === 'GET') {
@@ -2781,20 +2799,37 @@ async function routePublications(
     }
     if (request.path === '/v2/admin/workflow/publications/run' && request.method === 'POST') {
       requirePermission(session, context.registryId, 'publication.submit');
+      // H3/H5: a new signature requires the per-attempt approval commitment
+      // returned by review (exact reserved bytes + lifetime + fee + plan). The
+      // approval receipt is minted by the runtime for exactly that reserved plan,
+      // bound to the authenticated session actor and device (never the body).
+      const attemptPlanHash = request.body?.approvedAttemptPlanHash === undefined
+        ? undefined
+        : text(request.body.approvedAttemptPlanHash, 'approvedAttemptPlanHash', /^[0-9a-f]{64}$/);
       const approvedIntentHash = request.body?.approvedIntentHash === undefined
         ? undefined
         : text(request.body.approvedIntentHash, 'approvedIntentHash', /^[0-9a-f]{64}$/);
-      return { status: 200, body: await runtime.run(context.registryId, worker, approvedIntentHash, optionalOperationId(request.body?.operationId)) };
+      const approval = attemptPlanHash === undefined && approvedIntentHash === undefined
+        ? undefined
+        : {
+            ...(attemptPlanHash === undefined ? {} : { attemptPlanHash }),
+            ...(approvedIntentHash === undefined ? {} : { intentHash: approvedIntentHash }),
+            actor: session.username,
+            device: session.deviceId ?? session.sessionId,
+          };
+      return { status: 200, body: await runtime.run(context.registryId, worker, approval, optionalOperationId(request.body?.operationId)) };
     }
-    const certificate = /^\/v2\/admin\/workflow\/publications\/([0-9a-f-]{36})\/certificate$/.exec(request.path);
+    const certificate = /^\/v2\/admin\/workflow\/publications\/([^/]+)\/certificate$/.exec(request.path);
     if (certificate !== null && request.method === 'POST') {
       requirePermission(session, context.registryId, 'certificates.issue');
+      // A malformed operation UUID is a client error here, before any pg work.
+      const targetOperationId = operationId(certificate[1]);
       const body = request.body ?? {};
       const recordId = text(body.recordId, 'recordId', /^[a-zA-Z0-9_.:-]{1,128}$/);
       if (!Number.isSafeInteger(body.version) || Number(body.version) < 1 || Number(body.version) > 2147483647) {
         throw new ApiError(400, 'VERSION_INVALID');
       }
-      const disclosedPaths = disclosureRequest(body.disclosedPaths);
+      const disclosedPaths = disclosureRequest(body.disclosedPaths, WORKFLOW_DISCLOSURE_PATH);
       // Scope is enforced on both axes: the object/record and every disclosed
       // field path. An omitted disclosure resolves to FULL_RECORD and is only
       // allowed when the session is unrestricted for the whole record.
@@ -2805,7 +2840,7 @@ async function routePublications(
           issuerSecretKey: context.issuerSecretKey, issuerKeyId: ISSUER_KEY_ID,
           publicBaseUrl: context.publicWebBaseUrl, now: context.now,
         },
-        { operationId: certificate[1], recordId, version: Number(body.version), disclosedPaths },
+        { operationId: targetOperationId, recordId, version: Number(body.version), disclosedPaths },
       );
       return { status: issued.replayed ? 200 : 201, body: issued };
     }

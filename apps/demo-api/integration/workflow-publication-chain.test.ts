@@ -12,7 +12,7 @@ import { isolatedPostgres } from './support/postgres.ts';
 import { workflowHash } from '../src/registry-workflow.ts';
 import { WorkflowPublicationStore } from '../src/workflow-publication.ts';
 import { intentBytesHash } from '../src/publication-intent.ts';
-import { append, count, expire, FakeChain, NOON, opState, publisher, REGISTRY, states, TestSigner } from './support/publication-fake-chain.ts';
+import { append, count, expire, FakeChain, NOON, opState, publisher, REGISTRY, states, stepReviewed, TestSigner } from './support/publication-fake-chain.ts';
 
 test('timeout-after-send reconciles the landed transaction; FINALIZED unblocks the next operation', { timeout: 60000 }, async t => {
   const { pool } = await isolatedPostgres(t);
@@ -21,14 +21,14 @@ test('timeout-after-send reconciles the landed transaction; FINALIZED unblocks t
   const store = new WorkflowPublicationStore(pool);
   const lease = (await store.claim(REGISTRY, 'worker-a'))!;
   chain.mode = 'land-then-throw';
-  const first = await worker.step(lease);
+  const first = await stepReviewed(worker, lease);
   assert.equal(first.status, 'UNKNOWN');
   chain.mode = 'land';
   // Entry not (yet) visible to the node answering the segment read: retryable, not a mismatch.
   chain.blankSegmentReads = 1;
-  await assert.rejects(worker.step(lease), { message: 'PUBLICATION_ANCHOR_NOT_VISIBLE' });
+  await assert.rejects(stepReviewed(worker, lease), { message: 'PUBLICATION_ANCHOR_NOT_VISIBLE' });
   assert.equal((await opState(pool, lease.operationId)).blocked_reason, null);
-  const done = await worker.step(lease);
+  const done = await stepReviewed(worker, lease);
   assert.equal(done.status, 'FINALIZED');
   assert.equal(done.signature, first.signature);
   assert.equal(chain.sent.length, 1, 'reconciliation found the landed signature instead of resending');
@@ -46,7 +46,7 @@ test('timeout-after-send reconciles the landed transaction; FINALIZED unblocks t
   assert.equal(anchor.batch_sequence, '1'); assert.equal(anchor.merkle_root, intent.merkleRoot);
   assert.equal(anchor.anchor_hash, Buffer.from(chain.config.lastAnchorHash).toString('hex'));
   assert.equal((await opState(pool, lease.operationId)).state, 'FINALIZED');
-  await assert.rejects(worker.step(lease), { message: 'PUBLICATION_LEASE_LOST' });
+  await assert.rejects(stepReviewed(worker, lease), { message: 'PUBLICATION_LEASE_LOST' });
   await assert.rejects(pool.query("UPDATE wf_publication SET state='OPEN'"), /terminal publication is immutable/);
 
   assert.equal(await store.claim(REGISTRY, 'worker-a'), null, 'nothing new to publish');
@@ -54,8 +54,8 @@ test('timeout-after-send reconciles the landed transaction; FINALIZED unblocks t
   const next = (await store.claim(REGISTRY, 'worker-a'))!;
   assert.notEqual(next.operationId, lease.operationId);
   assert.deepEqual((await store.items(next)).map(i => i.recordId), ['third']);
-  assert.equal((await worker.step(next)).status, 'SUBMITTED');
-  assert.equal((await worker.step(next)).status, 'FINALIZED');
+  assert.equal((await stepReviewed(worker, next)).status, 'SUBMITTED');
+  assert.equal((await stepReviewed(worker, next)).status, 'FINALIZED');
   const nextIntent = JSON.parse((await pool.query('SELECT intent_bytes FROM wf_publication_intent WHERE operation_id=$1', [next.operationId])).rows[0].intent_bytes.toString());
   assert.deepEqual([nextIntent.batchSequence, nextIntent.cursorStart, nextIntent.cursorEnd, nextIntent.previousAnchorHash], ['2', '3', '3', anchor.anchor_hash]);
   assert.equal(chain.config.currentBatchSequence, 2n);
@@ -68,7 +68,7 @@ test('crash between journal and send, stale fence, two workers and database guar
   let crash = true;
   const workerA = publisher(pool, chain, signer, { afterAttemptStored: async () => { if (crash) { crash = false; throw new Error('synthetic crash before send'); } } });
   const leaseA = (await new WorkflowPublicationStore(pool).claim(REGISTRY, 'worker-a'))!;
-  await assert.rejects(workerA.step(leaseA), /synthetic crash before send/);
+  await assert.rejects(stepReviewed(workerA, leaseA), /synthetic crash before send/);
   assert.equal(chain.sent.length, 0);
   assert.deepEqual(await states(pool), ['1:PREPARED', '1:SIGNED']);
   const journaled = (await pool.query('SELECT signature FROM wf_publication_tx_signed')).rows[0].signature;
@@ -79,7 +79,7 @@ test('crash between journal and send, stale fence, two workers and database guar
   const leaseB = (await new WorkflowPublicationStore(poolB).claim(REGISTRY, 'worker-b'))!;
   assert.equal(leaseB.operationId, leaseA.operationId);
   const workerB = publisher(poolB, chain, signer);
-  await assert.rejects(workerA.step(leaseA), { message: 'PUBLICATION_LEASE_LOST' });
+  await assert.rejects(stepReviewed(workerA, leaseA), { message: 'PUBLICATION_LEASE_LOST' });
   assert.equal(chain.sent.length, 0);
   // Direct journal writes under a stale fence, or out of sequence, are refused by the database.
   const attemptId = (await pool.query('SELECT attempt_id FROM wf_publication_tx')).rows[0].attempt_id;
@@ -88,11 +88,11 @@ test('crash between journal and send, stale fence, two workers and database guar
   await assert.rejects(pool.query("UPDATE wf_publication SET fence=fence-1"), /fence is monotonic/);
   for (const table of ['wf_publication_tx_event', 'wf_publication_item', 'wf_publication_attempt', 'wf_publication']) await assert.rejects(pool.query(`TRUNCATE ${table} CASCADE`), /immutable/);
 
-  const resumed = await workerB.step(leaseB);
+  const resumed = await stepReviewed(workerB, leaseB);
   assert.equal(resumed.status, 'SUBMITTED');
   assert.equal(resumed.signature, journaled, 'the journaled bytes are sent, not a re-signed transaction');
   assert.equal(signer.requests.length, 1);
-  assert.equal((await workerB.step(leaseB)).status, 'FINALIZED');
+  assert.equal((await stepReviewed(workerB, leaseB)).status, 'FINALIZED');
   assert.equal(await count(pool, 'SELECT count(*) FROM wf_publication_tx'), 1);
   assert.equal(chain.segment.entryCount, 1);
   const events = (await pool.query('SELECT worker,state FROM wf_publication_tx_event ORDER BY event_id')).rows;
@@ -114,20 +114,20 @@ test('expired blockhash starts a new attempt of the same operation; concurrent s
   const other = publisher(pool, chain, signer);
   const lease = (await new WorkflowPublicationStore(pool).claim(REGISTRY, 'worker-a'))!;
   chain.mode = 'drop';
-  const racing = await Promise.allSettled([worker.step(lease), other.step(lease)]);
+  const racing = await Promise.allSettled([stepReviewed(worker, lease), stepReviewed(other, lease)]);
   assert.equal(racing.filter(r => r.status === 'fulfilled').length, 1);
   assert.match(String((racing.find(r => r.status === 'rejected') as PromiseRejectedResult).reason), /PUBLICATION_STEP_BUSY/);
   assert.equal(await count(pool, 'SELECT count(*) FROM wf_publication_tx'), 1);
   assert.equal(signer.requests.length, 1);
   const firstSig = (await pool.query('SELECT signature FROM wf_publication_tx_signed')).rows[0].signature;
-  assert.equal((await worker.step(lease)).status, 'PENDING', 'still valid: wait, do not re-sign');
+  assert.equal((await stepReviewed(worker, lease)).status, 'PENDING', 'still valid: wait, do not re-sign');
 
   chain.advance(151n); chain.mode = 'land';
-  const retry = await worker.step(lease);
+  const retry = await stepReviewed(worker, lease);
   assert.equal(retry.status, 'SUBMITTED');
   assert.equal(retry.attemptNo, 2);
   assert.notEqual(retry.signature, firstSig);
-  assert.equal((await worker.step(lease)).status, 'FINALIZED');
+  assert.equal((await stepReviewed(worker, lease)).status, 'FINALIZED');
   assert.equal(chain.segment.entryCount, 1, 'one logical anchor');
   const attempts = (await pool.query('SELECT operation_id,intent_hash FROM wf_publication_tx ORDER BY attempt_no')).rows;
   assert.equal(new Set(attempts.map(a => a.operation_id + a.intent_hash)).size, 1);
@@ -142,14 +142,14 @@ test('RPC lag and pruned history never produce a second attempt; pruned status c
   const chain = new FakeChain(); const signer = new TestSigner(); const worker = publisher(pool, chain, signer);
   const lease = (await new WorkflowPublicationStore(pool).claim(REGISTRY, 'worker-a', 300000))!;
   chain.mode = 'land-then-throw';
-  const first = await worker.step(lease);
+  const first = await stepReviewed(worker, lease);
   assert.equal(first.status, 'UNKNOWN');
   const landedAt = chain.landed.get(first.signature!)!.slot;
   chain.mode = 'land';
   chain.advance(200n);
   // A lagging status node (behind the height we observed) is rejected, not trusted.
   chain.statusLag = 50n;
-  await assert.rejects(worker.step(lease), { message: 'RPC_CONTEXT_STALE' });
+  await assert.rejects(stepReviewed(worker, lease), { message: 'RPC_CONTEXT_STALE' });
   assert.deepEqual(await states(pool), ['1:PREPARED', '1:SIGNED', '1:UNKNOWN']);
   chain.statusLag = null;
   // Pruned status history -> EXPIRED at slot X. The landing search that follows
@@ -159,7 +159,7 @@ test('RPC lag and pruned history never produce a second attempt; pruned status c
   // Call 1 (step start) and calls >= 3 (landing search) hit the lagging node; call 2
   // (reconcile, which decides EXPIRED at slot X) hits a fresh one.
   chain.slotCalls = 0; chain.nodeLag = landedAt - 1n; chain.lagWhen = call => call !== 2;
-  await assert.rejects(worker.step(lease), { message: 'RPC_CONTEXT_STALE' });
+  await assert.rejects(stepReviewed(worker, lease), { message: 'RPC_CONTEXT_STALE' });
   assert.deepEqual(await states(pool), ['1:PREPARED', '1:SIGNED', '1:UNKNOWN', '1:EXPIRED']);
   assert.equal(await count(pool, 'SELECT count(*) FROM wf_publication_tx'), 1);
   chain.lagWhen = null; chain.nodeLag = null;
@@ -168,7 +168,7 @@ test('RPC lag and pruned history never produce a second attempt; pruned status c
   await assert.rejects(worker.abandonForMaintenance(lease, { requestedBy: 'carol', approvedBy: 'dave', reason: 'try to abandon a landed operation', forceReason: 'operator insists on forcing this' }), { message: 'PUBLICATION_FINALIZED_LANDING' });
   // One inconsistent (empty) segment read is re-read, not taken as a foreign anchor.
   chain.blankSegmentReads = 1;
-  const done = await worker.step(lease);
+  const done = await stepReviewed(worker, lease);
   assert.equal(done.status, 'FINALIZED');
   assert.equal(done.status === 'FINALIZED' && done.proof, 'LEDGER_ENTRY');
   assert.deepEqual(await states(pool), ['1:PREPARED', '1:SIGNED', '1:UNKNOWN', '1:EXPIRED', '1:FINALIZED']);
@@ -186,12 +186,12 @@ test('our landed transaction with a discrepancy is terminal: no completion loop,
   const store = new WorkflowPublicationStore(pool);
   const lease = (await store.claim(REGISTRY, 'worker-a', 300000))!;
   chain.tamperRoot = true;
-  assert.equal((await worker.step(lease)).status, 'SUBMITTED');
+  assert.equal((await stepReviewed(worker, lease)).status, 'SUBMITTED');
   chain.tamperRoot = false;
-  await assert.rejects(worker.step(lease), { message: 'ANCHOR_COMMITMENT_MISMATCH' });
+  await assert.rejects(stepReviewed(worker, lease), { message: 'ANCHOR_COMMITMENT_MISMATCH' });
   assert.deepEqual(await states(pool), ['1:PREPARED', '1:SIGNED', '1:SUBMITTED', '1:ANCHOR_MISMATCH']);
   assert.deepEqual(await opState(pool, lease.operationId), { state: 'OPEN', blocked_reason: 'ANCHOR_MISMATCH:merkleRoot' });
-  await assert.rejects(worker.step(lease), { message: 'PUBLICATION_MAINTENANCE_REQUIRED' });
+  await assert.rejects(stepReviewed(worker, lease), { message: 'PUBLICATION_MAINTENANCE_REQUIRED' });
   // Our signature finalized successfully: never "foreign", never abandoned (a successor would anchor twice).
   await assert.rejects(worker.abandonForMaintenance(lease, { requestedBy: 'carol', approvedBy: 'dave', reason: 'mismatched anchor, incident INC-1' }), { message: 'PUBLICATION_FINALIZED_LANDING' });
   await assert.rejects(worker.recordLandedDiscrepancy(lease, { requestedBy: 'dave', approvedBy: 'Da​ve', reason: 'root differs on chain', incidentRef: 'INC-1' }), { message: 'MAINTENANCE_SELF_APPROVAL' });
@@ -207,18 +207,18 @@ test('our landed transaction with a discrepancy is terminal: no completion loop,
   await append(pool, 'later', { value: 2 });
   const second = (await store.claim(REGISTRY, 'worker-a', 300000))!;
   chain.tamperAnchorHash = true;
-  assert.equal((await worker.step(second)).status, 'SUBMITTED');
+  assert.equal((await stepReviewed(worker, second)).status, 'SUBMITTED');
   chain.tamperAnchorHash = false;
-  await assert.rejects(worker.step(second), { message: 'ANCHOR_COMMITMENT_MISMATCH' });
+  await assert.rejects(stepReviewed(worker, second), { message: 'ANCHOR_COMMITMENT_MISMATCH' });
   assert.equal((await opState(pool, second.operationId)).blocked_reason, 'ANCHOR_MISMATCH:anchorHash');
-  for (let i = 0; i < 2; i += 1) await assert.rejects(worker.step(second), { message: 'PUBLICATION_MAINTENANCE_REQUIRED' });
+  for (let i = 0; i < 2; i += 1) await assert.rejects(stepReviewed(worker, second), { message: 'PUBLICATION_MAINTENANCE_REQUIRED' });
   await assert.rejects(worker.abandonForMaintenance(second, { requestedBy: 'carol', approvedBy: 'dave', reason: 'anchor hash differs on chain' }), { message: 'PUBLICATION_FINALIZED_LANDING' });
   await worker.recordLandedDiscrepancy(second, { requestedBy: 'carol', approvedBy: 'dave', reason: 'anchor hash differs on chain', incidentRef: 'INC-2' });
 
   await append(pool, 'third', { value: 3 });
   const third = (await store.claim(REGISTRY, 'worker-a', 300000))!;
-  assert.equal((await worker.step(third)).status, 'SUBMITTED');
-  assert.equal((await worker.step(third)).status, 'FINALIZED');
+  assert.equal((await stepReviewed(worker, third)).status, 'SUBMITTED');
+  assert.equal((await stepReviewed(worker, third)).status, 'FINALIZED');
   const intent = JSON.parse((await pool.query('SELECT intent_bytes FROM wf_publication_intent WHERE operation_id=$1', [third.operationId])).rows[0].intent_bytes.toString());
   assert.deepEqual([intent.batchSequence, intent.cursorStart], ['3', '3'], 'cursor continues after landed discrepancies');
 });
@@ -231,14 +231,14 @@ test('paused registry, signing rejection, substituted bytes, corrupted intent, f
   const lease = (await store.claim(REGISTRY, 'worker-a', 300000))!;
 
   chain.mutate(s => { s.config.paused = true; });
-  await assert.rejects(worker.step(lease), { message: 'REGISTRY_PAUSED' });
+  await assert.rejects(stepReviewed(worker, lease), { message: 'REGISTRY_PAUSED' });
   assert.equal(await count(pool, 'SELECT count(*) FROM wf_publication_intent'), 0);
   chain.mutate(s => { s.config.paused = false; });
 
   signer.reject = true;
-  await assert.rejects(worker.step(lease), { message: 'SIGNING_REJECTED' });
+  await assert.rejects(stepReviewed(worker, lease), { message: 'SIGNING_REJECTED' });
   signer.reject = false; signer.substitute = true;
-  await assert.rejects(worker.step(lease), { message: 'SIGNED_TRANSACTION_MESSAGE_MISMATCH' });
+  await assert.rejects(stepReviewed(worker, lease), { message: 'SIGNED_TRANSACTION_MESSAGE_MISMATCH' });
   signer.substitute = false;
   assert.deepEqual(await states(pool), ['1:PREPARED', '1:CANCELLED', '2:PREPARED', '2:CANCELLED']);
   assert.equal(await count(pool, 'SELECT count(*) FROM wf_publication_tx_signed'), 0);
@@ -248,50 +248,50 @@ test('paused registry, signing rejection, substituted bytes, corrupted intent, f
   const forged = Buffer.from(original.intent_bytes.toString().replace(/"merkleRoot":"[0-9a-f]{64}"/, `"merkleRoot":"${'ab'.repeat(32)}"`));
   await pool.query('ALTER TABLE wf_publication_intent DISABLE TRIGGER immutable');
   await pool.query('UPDATE wf_publication_intent SET intent_bytes=$1', [forged]);
-  await assert.rejects(worker.step(lease), { message: 'PUBLICATION_INTENT_MISMATCH' });
+  await assert.rejects(stepReviewed(worker, lease), { message: 'PUBLICATION_INTENT_MISMATCH' });
   await pool.query('UPDATE wf_publication_intent SET intent_hash=$1', [intentBytesHash(forged)]);
-  await assert.rejects(worker.step(lease), { message: 'PUBLICATION_INTENT_MISMATCH' });
+  await assert.rejects(stepReviewed(worker, lease), { message: 'PUBLICATION_INTENT_MISMATCH' });
   await pool.query('UPDATE wf_publication_intent SET intent_bytes=$1,intent_hash=$2', [original.intent_bytes, original.intent_hash]);
   await pool.query('ALTER TABLE wf_publication_intent ENABLE TRIGGER immutable');
 
   await assert.rejects(worker.abandonForMaintenance(lease, { requestedBy: 'carol', approvedBy: 'dave', reason: 'nothing is blocked here' }), { message: 'MAINTENANCE_NOT_BLOCKED' });
   chain.time = BigInt(Date.parse('2026-09-24T23:58:30Z') / 1000);
-  await assert.rejects(worker.step(lease), { message: 'PUBLICATION_LEDGER_DAY_BOUNDARY' });
+  await assert.rejects(stepReviewed(worker, lease), { message: 'PUBLICATION_LEDGER_DAY_BOUNDARY' });
   chain.time = NOON;
 
   // If the journal write fails, nothing is signed or sent.
   await pool.query("CREATE FUNCTION synthetic_fail() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic journal failure'; END $$; CREATE TRIGGER synthetic_fail BEFORE INSERT ON wf_publication_tx FOR EACH ROW EXECUTE FUNCTION synthetic_fail()");
   const asked = signer.requests.length;
-  await assert.rejects(worker.step(lease), /synthetic journal failure/);
+  await assert.rejects(stepReviewed(worker, lease), /synthetic journal failure/);
   assert.equal(signer.requests.length, asked); assert.equal(chain.sent.length, 0);
   await pool.query('DROP TRIGGER synthetic_fail ON wf_publication_tx');
 
   chain.mode = 'fail';
-  assert.equal((await worker.step(lease)).status, 'SUBMITTED');
-  assert.equal((await worker.step(lease)).status, 'FAILED');
-  assert.equal((await worker.step(lease)).status, 'SUBMITTED');
-  assert.equal((await worker.step(lease)).status, 'FAILED');
+  assert.equal((await stepReviewed(worker, lease)).status, 'SUBMITTED');
+  assert.equal((await stepReviewed(worker, lease)).status, 'FAILED');
+  assert.equal((await stepReviewed(worker, lease)).status, 'SUBMITTED');
+  assert.equal((await stepReviewed(worker, lease)).status, 'FAILED');
   assert.equal((await opState(pool, lease.operationId)).blocked_reason, 'FAILED_ATTEMPT_LIMIT');
-  await assert.rejects(worker.step(lease), { message: 'PUBLICATION_MAINTENANCE_REQUIRED' });
+  await assert.rejects(stepReviewed(worker, lease), { message: 'PUBLICATION_MAINTENANCE_REQUIRED' });
   await worker.abandonForMaintenance(lease, { requestedBy: 'carol', approvedBy: 'dave', reason: 'repeated program failures under investigation' });
 
   // Foreign publisher takes the successor's sequence before any attempt of ours.
   chain.mode = 'land';
   const successor = (await store.claim(REGISTRY, 'worker-a', 300000))!;
   signer.reject = true;
-  await assert.rejects(worker.step(successor), { message: 'SIGNING_REJECTED' });
+  await assert.rejects(stepReviewed(worker, successor), { message: 'SIGNING_REJECTED' });
   signer.reject = false;
   const intent = JSON.parse((await pool.query('SELECT intent_bytes FROM wf_publication_intent WHERE operation_id=$1', [successor.operationId])).rows[0].intent_bytes.toString());
   chain.execute({ batchSequence: BigInt(intent.batchSequence), registryVersion: 3n, sourceCursorStart: 1n, sourceCursorEnd: 1n, merkleRoot: new Uint8Array(32).fill(9), manifestHash: new Uint8Array(32), snapshotHash: new Uint8Array(32), previousAnchorHash: chain.config.lastAnchorHash, leafCount: 1, schemaVersion: 1, flags: 0, hashAlgorithm: 1, treeAlgorithm: 1 }, signer.address);
-  await assert.rejects(worker.step(successor), { message: 'PUBLICATION_CHAIN_CONFLICT' });
+  await assert.rejects(stepReviewed(worker, successor), { message: 'PUBLICATION_CHAIN_CONFLICT' });
   assert.equal((await opState(pool, successor.operationId)).blocked_reason, 'CHAIN_CONFLICT');
   assert.equal(chain.sent.length, 2);
   // Foreign anchor, none of ours landed: abandonment moves the membership on.
   const moved = await worker.abandonForMaintenance(successor, { requestedBy: 'carol', approvedBy: 'dave', reason: 'foreign anchor occupies our sequence', incidentRef: 'INC-3' });
   const third = (await store.claim(REGISTRY, 'worker-b', 300000))!;
   assert.equal(third.operationId, moved.successorOperationId);
-  assert.equal((await worker.step(third)).status, 'SUBMITTED');
-  assert.equal((await worker.step(third)).status, 'FINALIZED');
+  assert.equal((await stepReviewed(worker, third)).status, 'SUBMITTED');
+  assert.equal((await stepReviewed(worker, third)).status, 'FINALIZED');
   assert.equal((await pool.query('SELECT batch_sequence FROM wf_publication_anchor')).rows[0].batch_sequence, '2');
 });
 
@@ -306,7 +306,7 @@ test('unpublishable V1 version stops the queue with a typed error; abandon marks
   const store = new WorkflowPublicationStore(pool);
   const lease = (await store.claim(REGISTRY, 'worker-a', 300000))!;
   const eventId = (await pool.query("SELECT event_id FROM wf_outbox WHERE record_id='price'")).rows[0].event_id;
-  await assert.rejects(worker.step(lease), (error: any) => error.code === 'PUBLICATION_UNPUBLISHABLE_VERSION'
+  await assert.rejects(stepReviewed(worker, lease), (error: any) => error.code === 'PUBLICATION_UNPUBLISHABLE_VERSION'
     && error.detail.eventId === eventId && error.detail.recordId === 'price' && error.detail.version === 1);
   // Membership cannot be edited after creation, and operations are born OPEN.
   await assert.rejects(pool.query('INSERT INTO wf_publication_item VALUES($1,99,$2)', [lease.operationId, eventId]), /membership is fixed/);
@@ -323,7 +323,7 @@ test('unpublishable V1 version stops the queue with a typed error; abandon marks
     throw new Error('synthetic crash after an out-of-band send');
   } });
   const lease2 = (await new WorkflowPublicationStore(fresh.pool).claim(REGISTRY, 'worker-a', 300000))!;
-  await assert.rejects(crashing.step(lease2), /synthetic crash/);
+  await assert.rejects(stepReviewed(crashing, lease2), /synthetic crash/);
   const plain = publisher(fresh.pool, chain2, signer);
   await plain.abandonForMaintenance(lease2, { requestedBy: 'carol', approvedBy: 'dave', reason: 'retire the failed attempt', forceReason: 'failed transaction, operator requests retry' });
   assert.deepEqual(await states(fresh.pool), ['1:PREPARED', '1:SIGNED', '1:UNKNOWN', '1:FAILED']);

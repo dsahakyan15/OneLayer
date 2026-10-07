@@ -6,6 +6,9 @@
 // the live-validator test covers the real program.
 import assert from 'node:assert/strict';
 import { createPrivateKey, createPublicKey, randomBytes, sign as ed25519Sign } from 'node:crypto';
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Pool } from 'pg';
 import {
   getAddressDecoder, getAddressEncoder, getBase58Decoder, getCompiledTransactionMessageDecoder,
@@ -17,8 +20,11 @@ import {
   type AnchorEntryV1, type DailyAnchorLedgerSegment, type RegistryConfig,
 } from '../../../../packages/onchain-client/src/index.ts';
 import { appendWorkflowVersion, workflowHash, workflowTransaction } from '../../src/registry-workflow.ts';
-import { ledgerDay, WorkflowPublisher, type PublicationSigner, type PublisherConfig, type SignRequest } from '../../src/publication-worker.ts';
+import { ledgerDay, WorkflowPublisher, type PublicationSigner, type PublicationStepResult, type PublisherConfig, type SignRequest } from '../../src/publication-worker.ts';
+import type { PublicationLease } from '../../src/workflow-publication.ts';
+import { PublicationApprovalIssuer, type PublicationApprovalService } from '../../src/publication-approval.ts';
 import { ChainReadError, type ChainRead, type PublicationChain, type SignatureStatus } from '../../src/publication-rpc.ts';
+import { ensureKeyPair } from '../../scripts/live-demo-key-store.ts';
 
 export const PROGRAM_ID = '6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo' as Address;
 export const REGISTRY = 'synthetic';
@@ -26,6 +32,28 @@ export const NOON = BigInt(Date.parse('2026-09-24T12:00:00Z') / 1000);
 export const [CONFIG_PDA] = await findRegistryConfigPda(registryIdHash(REGISTRY), { programAddress: PROGRAM_ID });
 export const [SEGMENT_PDA] = await findLedgerSegmentPda({ config: CONFIG_PDA, dayUtc: 20260924, segmentIndex: 0 }, { programAddress: PROGRAM_ID });
 export const KEYS = { idKey: new Uint8Array(32).fill(7), fieldKeyMaster: new Uint8Array(32).fill(8) };
+// Explicit synthetic chain identity: the publisher and signer only accept this
+// exact genesis hash. Tests that probe a mismatch override `chain.genesis`.
+export const TEST_CLUSTER = 'solana:synthetic';
+export const TEST_GENESIS = '1'.repeat(32);
+export const APPROVAL_ACTOR = 'synthetic-approver';
+export const APPROVAL_DEVICE = 'synthetic-device';
+// A real, hardened-store approval issuer for the synthetic flow. Tests sign
+// with this key and pin its public key in the publisher/signer; there is no
+// in-process bypass that mints approvals without a key.
+const approvalHome = await mkdtemp(join(tmpdir(), 'onelayer-test-approval-'));
+const approvalKeyFile = join(approvalHome, '.local', 'state', 'onelayer-devnet-demo', 'keys', 'approval-issuer.json');
+await ensureKeyPair({ home: approvalHome, keyFile: approvalKeyFile });
+export const TEST_APPROVAL = await PublicationApprovalIssuer.create(
+  approvalKeyFile, { cluster: TEST_CLUSTER, genesisHash: TEST_GENESIS }, { home: approvalHome },
+);
+export const TEST_APPROVAL_PUBLIC_KEY = TEST_APPROVAL.publicKey;
+export const TEST_APPROVAL_HOME = approvalHome;
+export const TEST_APPROVAL_KEY_FILE = approvalKeyFile;
+export const approvalService = (): PublicationApprovalService => TEST_APPROVAL;
+/** Mints a receipt for the exact reviewed binding (the explicit test approval). */
+export const approve = (operationId: string, intentHash: string, attemptPlanHash: string) =>
+  TEST_APPROVAL.issue({ operationId, intentHash, attemptPlanHash }, APPROVAL_ACTOR, APPROVAL_DEVICE);
 const b58 = getBase58Decoder();
 
 export class TestSigner implements PublicationSigner {
@@ -55,8 +83,14 @@ export class FakeChain implements PublicationChain {
   blockhashes = new Map<string, bigint>();
   landed = new Map<string, { slot: bigint; failed: boolean }>();
   sent: string[] = [];
+  /** Genesis identity this fake reports; override to probe a mismatch. */
+  genesis = TEST_GENESIS;
+  /** When set, genesisHash() throws (unavailable node). */
+  genesisUnavailable = false;
   mode: 'land' | 'drop' | 'land-then-throw' | 'fail' = 'land';
   tamperRoot = false;
+  /** Quoted fee for a reserved message; null simulates an unavailable quote. */
+  feeQuote: bigint | null = 5_000n;
   /** Status answers come from a node stuck at this slot. */
   statusLag: bigint | null = null;
   pruned = new Set<string>();
@@ -86,6 +120,10 @@ export class FakeChain implements PublicationChain {
     if (minContextSlot > view) throw new ChainReadError('RPC_CONTEXT_STALE');
     return structuredClone([...this.snapshots].reverse().find(s => s.slot <= view)!);
   }
+  async genesisHash(): Promise<string> {
+    if (this.genesisUnavailable) throw new ChainReadError('RPC_RESPONSE_INVALID');
+    return this.genesis;
+  }
   async finalizedSlot(min: bigint) {
     this.slotCalls += 1;
     const view = this.view();
@@ -104,6 +142,10 @@ export class FakeChain implements PublicationChain {
     if (min > this.view()) throw new ChainReadError('RPC_CONTEXT_STALE');
     const blockhash = b58.decode(randomBytes(32)); const lastValidBlockHeight = this.height(this.slot) + 150n;
     this.blockhashes.set(blockhash, lastValidBlockHeight); return { blockhash, lastValidBlockHeight };
+  }
+  async feeForMessage(_messageBase64: string): Promise<bigint> {
+    if (this.feeQuote === null) throw new ChainReadError('FEE_QUOTE_UNAVAILABLE');
+    return this.feeQuote;
   }
   async signatureStatuses(signatures: readonly string[]): Promise<ChainRead<Array<SignatureStatus | null>>> {
     const view = this.statusLag ?? this.slot;
@@ -157,7 +199,34 @@ export class FakeChain implements PublicationChain {
 export const append = (pool: Pool, recordId: string, payload: Record<string, unknown>, baseVersion = 0) =>
   workflowTransaction(pool, c => appendWorkflowVersion(c, { registryId: REGISTRY, recordId, baseVersion, operation: 'upsert', payload, payloadHash: workflowHash({ operation: 'upsert', payload }), creator: 'alice', approver: 'bob', evidence: { synthetic: true } }));
 export const publisher = (pool: Pool, chain: FakeChain, signer: PublicationSigner, extra: Partial<PublisherConfig> = {}) =>
-  new WorkflowPublisher(pool, chain, signer, { registryId: REGISTRY, programId: PROGRAM_ID, configPda: CONFIG_PDA, operatorKeyId: 'synthetic-operator', keys: KEYS, ...extra });
+  new WorkflowPublisher(pool, chain, signer, {
+    registryId: REGISTRY, programId: PROGRAM_ID, configPda: CONFIG_PDA, operatorKeyId: 'synthetic-operator', keys: KEYS,
+    cluster: TEST_CLUSTER, genesisHash: TEST_GENESIS,
+    approvalVerifier: { approvalPublicKey: TEST_APPROVAL_PUBLIC_KEY, cluster: TEST_CLUSTER, genesisHash: TEST_GENESIS },
+    ...extra,
+  });
+
+const isApprovalRequired = (error: unknown) => (error as { code?: string }).code === 'PUBLICATION_INTENT_APPROVAL_REQUIRED';
+
+/**
+ * Explicit reviewed-and-approved test step. It first runs an unapproved
+ * `step()`, which may reconcile / expire an existing attempt but can never mint
+ * a signature; if (and only if) the publisher demands an approval, the helper
+ * calls `review()` to reserve/reuse the exact next unsigned attempt and has the
+ * approval issuer sign a receipt for exactly that reserved plan, then consumes
+ * it. There is no implicit autoconfirm: a new signature is only produced for a
+ * plan this helper actually reviewed and the issuer actually signed.
+ */
+export async function stepReviewed(worker: WorkflowPublisher, lease: PublicationLease): Promise<PublicationStepResult> {
+  try {
+    return await worker.step(lease);
+  } catch (error) {
+    if (!isApprovalRequired(error)) throw error;
+  }
+  const review = await worker.review(lease);
+  if (review.attemptPlanHash === null) return worker.step(lease);
+  return worker.step(lease, { approval: approve(lease.operationId, review.intentHash, review.attemptPlanHash) });
+}
 export const count = async (pool: Pool, sql: string) => Number((await pool.query(sql)).rows[0].count);
 export const expire = (pool: Pool) => pool.query("UPDATE wf_publication SET lease_until=clock_timestamp()-interval '1 second' WHERE state='OPEN'");
 export const states = async (pool: Pool) => (await pool.query('SELECT t.attempt_no,e.state FROM wf_publication_tx_event e JOIN wf_publication_tx t USING(attempt_id) ORDER BY e.event_id')).rows.map(r => `${r.attempt_no}:${r.state}`);

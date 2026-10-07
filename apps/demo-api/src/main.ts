@@ -27,6 +27,7 @@ import { loadSnapshotKeyConfig } from "./snapshot-key-config.ts";
 import { bindSnapshotKeyVersion } from "./snapshot-key-store.ts";
 import { PublicationRpc } from "./publication-rpc.ts";
 import { loadPublicationConfig } from "./publication-config.ts";
+import { loadPublicationApproval } from "./publication-approval.ts";
 import { LocalKeyPublicationSigner } from "./publication-signer.ts";
 import { WorkflowPublicationRuntime } from "./workflow-runtime.ts";
 
@@ -37,6 +38,7 @@ const REGISTRY_ID = process.env.ONELAYER_REGISTRY_ID ?? "gov.registry.land";
 if (!/^[A-Za-z0-9._:-]{1,128}$/.test(REGISTRY_ID)) throw new Error("ONELAYER_REGISTRY_ID is invalid");
 const REGISTRY_ID_PATTERN = new RegExp(`^${REGISTRY_ID.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
 const MARKER = "ONELAYER_SYNTHETIC_DEVNET_DEMO_V1";
+const MAX_PUBLISH_FEE_LAMPORTS = 1_000_000n;
 /** Verifier batch sequences are u64; the demo stores them in a BIGINT column. */
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
 const INT8_MAX = 0x7fff_ffff_ffff_ffffn;
@@ -122,14 +124,27 @@ const serviceGate = new ServiceRequestGate();
 const publicationConfig = await loadPublicationConfig();
 let publication: AdminContext["publication"];
 if (publicationConfig !== undefined) {
+  // Load the distinct approval issuer key from the hardened key store. It is
+  // used only to mint signed approval receipts for the exact reserved plan at
+  // the authorized HTTP boundary; the private key never reaches the publisher
+  // or the signer, which only receive the pinned public key.
+  const approvals = await loadPublicationApproval(publicationConfig);
   const signer = await LocalKeyPublicationSigner.create(publicationConfig.signerKeyFile, {
     registryId: REGISTRY_ID, programId, configPda: configAddress,
+    // Explicit deployment cluster + pinned genesis identity, never a default.
+    cluster: publicationConfig.cluster,
+    ...(publicationConfig.genesisHash === undefined ? {} : { genesisHash: publicationConfig.genesisHash }),
+    // The signer verifies the approval receipt against this pinned key (H5).
+    approvalPublicKey: approvals.publicKey,
   });
   publication = {
     runtime: new WorkflowPublicationRuntime(pool, new PublicationRpc(rpcUrl, programId), signer, {
       registryId: REGISTRY_ID, programId: programId as Address, configPda: configAddress,
       operatorKeyId: publicationConfig.operatorKeyId, keys: publicationConfig.keys,
-    }),
+      cluster: publicationConfig.cluster,
+      ...(publicationConfig.genesisHash === undefined ? {} : { genesisHash: publicationConfig.genesisHash }),
+      maxFeeLamports: MAX_PUBLISH_FEE_LAMPORTS,
+    }, approvals.service),
     keys: publicationConfig.keys,
     operatorKeyId: publicationConfig.operatorKeyId,
   };

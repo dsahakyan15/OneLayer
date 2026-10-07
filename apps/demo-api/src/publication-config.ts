@@ -11,6 +11,7 @@ import * as path from "node:path";
 import type { KeyStoreOptions } from "../scripts/live-demo-key-store.ts";
 import { assertKeyFilePolicy } from "../scripts/live-demo-key-store.ts";
 import type { PublicationKeys } from "./publication-intent.ts";
+import { assertClusterLabel, assertGenesisHash } from "./publication-identity.ts";
 
 const HEX32 = /^[0-9a-f]{64}$/;
 const KEY_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -28,6 +29,13 @@ export interface PublicationConfig {
   operatorKeyId: string;
   /** Solana CLI keypair in the hardened demo key store; loaded only to sign. */
   signerKeyFile: string;
+  /** Explicit deployment cluster label, e.g. `solana:devnet`. Never defaulted. */
+  cluster: string;
+  /** Pinned expected genesis hash; required for local/unknown clusters. */
+  genesisHash?: string;
+  /** Distinct approval-issuer keypair in the hardened store (H5). Never the
+   * operator/chain key, never the renderer key or journal material. */
+  approvalKeyFile: string;
 }
 
 /**
@@ -85,7 +93,10 @@ export function parsePublicationKeys(raw: string): PublicationKeys {
 /**
  * Returns the configuration, or `undefined` when no publication variable is
  * set (publication routes are then unavailable, and the API still starts).
- * Throws for a partial or invalid configuration.
+ * Throws for a partial or invalid configuration. The approval-issuer key file
+ * and the explicit cluster are required with the other three: a runtime that
+ * could sign without an independent approval key or a pinned chain identity is
+ * never configured (H5/M4).
  */
 export async function loadPublicationConfig(
   env: NodeJS.ProcessEnv = process.env,
@@ -94,15 +105,26 @@ export async function loadPublicationConfig(
   const keysFile = env.ONELAYER_PUBLICATION_KEYS_FILE;
   const operatorKeyId = env.ONELAYER_PUBLICATION_OPERATOR_KEY_ID;
   const signerKeyFile = env.ONELAYER_PUBLICATION_SIGNER_FILE;
-  const configured = [keysFile, operatorKeyId, signerKeyFile].filter((value) => value !== undefined && value !== "");
+  const approvalKeyFile = env.ONELAYER_PUBLICATION_APPROVAL_KEY_FILE;
+  const cluster = env.ONELAYER_PUBLICATION_CLUSTER;
+  const configured = [keysFile, operatorKeyId, signerKeyFile, approvalKeyFile, cluster].filter((value) => value !== undefined && value !== "");
   if (configured.length === 0) return undefined;
-  if (configured.length !== 3) throw new PublicationConfigError("PUBLICATION_CONFIG_INCOMPLETE");
+  if (configured.length !== 5) throw new PublicationConfigError("PUBLICATION_CONFIG_INCOMPLETE");
   if (typeof operatorKeyId !== "string" || !KEY_ID.test(operatorKeyId)) throw new PublicationConfigError("PUBLICATION_OPERATOR_KEY_ID_INVALID");
-  // The signer path must be inside the hardened demo key store allow-list. The
-  // key is read lazily at sign time, but an arbitrary path is refused now.
+  try { assertClusterLabel(cluster); } catch { throw new PublicationConfigError("PUBLICATION_CLUSTER_INVALID"); }
+  let genesisHash: string | undefined;
+  if (env.ONELAYER_RPC_GENESIS_HASH !== undefined && env.ONELAYER_RPC_GENESIS_HASH !== "") {
+    try { genesisHash = assertGenesisHash(env.ONELAYER_RPC_GENESIS_HASH); } catch { throw new PublicationConfigError("PUBLICATION_GENESIS_HASH_INVALID"); }
+  }
+  // Both key paths must be inside the hardened demo key store allow-list. The
+  // keys are read lazily, but an arbitrary path is refused now.
   let signerKeyFileResolved: string;
   try { signerKeyFileResolved = assertKeyFilePolicy(signerKeyFile as string, keyStore).resolved; }
   catch { throw new PublicationConfigError("PUBLICATION_SIGNER_FILE_REJECTED"); }
+  let approvalKeyFileResolved: string;
+  try { approvalKeyFileResolved = assertKeyFilePolicy(approvalKeyFile as string, keyStore).resolved; }
+  catch { throw new PublicationConfigError("PUBLICATION_APPROVAL_FILE_REJECTED"); }
+  if (approvalKeyFileResolved === signerKeyFileResolved) throw new PublicationConfigError("PUBLICATION_APPROVAL_KEY_REUSED");
   let keys: PublicationKeys;
   try {
     const bytes = await readPrivateKeysFile(keysFile as string);
@@ -111,5 +133,5 @@ export async function loadPublicationConfig(
     if (error instanceof PublicationConfigError) throw error;
     throw new PublicationConfigError("PUBLICATION_KEYS_FILE_UNREADABLE");
   }
-  return { keys, operatorKeyId, signerKeyFile: signerKeyFileResolved };
+  return { keys, operatorKeyId, signerKeyFile: signerKeyFileResolved, approvalKeyFile: approvalKeyFileResolved, cluster: cluster as string, ...(genesisHash === undefined ? {} : { genesisHash }) };
 }

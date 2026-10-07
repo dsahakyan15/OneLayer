@@ -10,7 +10,9 @@
 //   faulty-anchor --state <file> --skip <n>   // неисправный Builder: anchor с разрывом cursor
 import { createRequire } from 'node:module';
 import { randomBytes } from 'node:crypto';
-import { readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const demoApi = new URL('../../../demo-api/', import.meta.url);
@@ -23,6 +25,8 @@ const workflow: any = await import(new URL('src/registry-workflow.ts', demoApi).
 const publicationRpc: any = await import(new URL('src/publication-rpc.ts', demoApi).href);
 const publicationStore: any = await import(new URL('src/workflow-publication.ts', demoApi).href);
 const publicationWorker: any = await import(new URL('src/publication-worker.ts', demoApi).href);
+const publicationApproval: any = await import(new URL('src/publication-approval.ts', demoApi).href);
+const keyStore: any = await import(new URL('scripts/live-demo-key-store.ts', demoApi).href);
 
 const REGISTRY_PROGRAM = '6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo';
 const PERM_PUBLISH_ANCHOR = 1 << 0;
@@ -147,9 +151,20 @@ async function publish() {
   const operator = await signerOf(state.operatorSeed);
   return withPool(state.pg, async pool => {
     const rpc = new publicationRpc.PublicationRpc(state.rpc, state.programId);
+    // Test-only explicit identity + approval issuer for the local validator. The
+    // issuer key is ephemeral in this harness; the publisher/signer pin its
+    // public key, so the harness approves the exact reserved plan it reviewed.
+    const genesisHash = await rpcCall(state.rpc, 'getGenesisHash', []);
+    const cluster = 'solana:local';
+    const home = await mkdtemp(join(tmpdir(), 'onelayer-monitor-approval-'));
+    const approvalKeyFile = join(home, '.local', 'state', 'onelayer-devnet-demo', 'keys', 'approval-issuer.json');
+    await keyStore.ensureKeyPair({ home, keyFile: approvalKeyFile });
+    const approvals = await publicationApproval.PublicationApprovalIssuer.create(approvalKeyFile, { cluster, genesisHash }, { home });
     const worker = new publicationWorker.WorkflowPublisher(pool, rpc, new KitSigner(operator), {
       registryId: state.registryId, programId: kit.address(state.programId), configPda: kit.address(state.configPda), operatorKeyId: 'synthetic-operator',
       keys: { idKey: Buffer.from(state.idKey, 'hex'), fieldKeyMaster: Buffer.from(state.fieldKeyMaster, 'hex') },
+      cluster, genesisHash,
+      approvalVerifier: { approvalPublicKey: approvals.publicKey, cluster, genesisHash },
     });
     const store = new publicationStore.WorkflowPublicationStore(pool);
     const lease = await store.claim(state.registryId, 'harness-builder', 300_000);
@@ -157,7 +172,16 @@ async function publish() {
     const seen: string[] = [];
     const deadline = Date.now() + 180_000;
     for (;;) {
-      const result = await worker.step(lease);
+      let result: any;
+      try {
+        result = await worker.step(lease);
+      } catch (error: any) {
+        if (error?.code !== 'PUBLICATION_INTENT_APPROVAL_REQUIRED') throw error;
+        const review = await worker.review(lease);
+        result = review.attemptPlanHash === null ? await worker.step(lease) : await worker.step(lease, {
+          approval: approvals.issue({ operationId: lease.operationId, intentHash: review.intentHash, attemptPlanHash: review.attemptPlanHash }, 'monitor-harness', 'local-validator'),
+        });
+      }
       seen.push(result.status);
       if (result.status === 'FINALIZED') {
         const anchor = (await pool.query('SELECT batch_sequence::text AS seq, merkle_root FROM wf_publication_anchor WHERE operation_id=$1', [lease.operationId])).rows[0];

@@ -3,6 +3,9 @@
 // Synthetic keys only; nothing leaves localhost.
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
@@ -20,8 +23,10 @@ import { isolatedPostgres } from './support/postgres.ts';
 import { buildSbfProgram, rpcCall, startLocalValidator } from './support/solana-validator.ts';
 import { appendWorkflowVersion, workflowHash, workflowTransaction } from '../src/registry-workflow.ts';
 import { PublicationRpc } from '../src/publication-rpc.ts';
+import { PublicationApprovalIssuer } from '../src/publication-approval.ts';
 import { WorkflowPublicationStore, type PublicationLease } from '../src/workflow-publication.ts';
 import { ledgerDay, WorkflowPublisher, type PublicationSigner, type PublicationStepResult, type SignRequest } from '../src/publication-worker.ts';
+import { ensureKeyPair } from '../scripts/live-demo-key-store.ts';
 
 const REGISTRY_PROGRAM = '6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo';
 const PERM_PUBLISH_ANCHOR = 1 << 0;
@@ -74,10 +79,10 @@ class TimeoutAfterSendRpc extends PublicationRpc {
   }
 }
 
-async function untilFinalized(worker: WorkflowPublisher, lease: PublicationLease, seen: string[]): Promise<Extract<PublicationStepResult, { status: 'FINALIZED' }>> {
+async function untilFinalized(step: () => Promise<PublicationStepResult>, seen: string[]): Promise<Extract<PublicationStepResult, { status: 'FINALIZED' }>> {
   const deadline = Date.now() + 180_000;
   for (;;) {
-    const result = await worker.step(lease);
+    const result = await step();
     seen.push(result.status);
     if (result.status === 'FINALIZED') return result;
     if (Date.now() > deadline) throw new Error(`publication did not finalize: ${seen.join(',')}`);
@@ -119,20 +124,41 @@ test('workflow publication finalizes on a live local validator, reconciling a ti
   await append('parcel-1', { owner: 'Synthetic A', area: 120 });
   await append('parcel-2', { owner: 'Synthetic B', tags: ['x'] });
 
+  // Explicit chain identity for the local validator: the publisher verifies the
+  // node's getGenesisHash against this pinned value before reserving/signing.
+  const genesisHash = await rpcCall(validator.rpcUrl, 'getGenesisHash', []) as string;
+  const cluster = 'solana:local';
+  const home = await mkdtemp(join(tmpdir(), 'onelayer-validator-approval-'));
+  context.after(() => rm(home, { recursive: true, force: true }));
+  const approvalKeyFile = join(home, '.local', 'state', 'onelayer-devnet-demo', 'keys', 'approval-issuer.json');
+  await ensureKeyPair({ home, keyFile: approvalKeyFile });
+  const approvals = await PublicationApprovalIssuer.create(approvalKeyFile, { cluster, genesisHash }, { home });
+
   const rpc = new TimeoutAfterSendRpc(validator.rpcUrl, REGISTRY_PROGRAM);
   const worker = new WorkflowPublisher(pool, rpc, new KitSigner(operator), {
     registryId, programId: programAddress, configPda: config, operatorKeyId: 'synthetic-operator',
     keys: { idKey: randomBytes(32), fieldKeyMaster: randomBytes(32) },
+    cluster, genesisHash,
+    approvalVerifier: { approvalPublicKey: approvals.publicKey, cluster, genesisHash },
   });
   const store = new WorkflowPublicationStore(pool);
   const lease = (await store.claim(registryId, 'worker-a', 300_000))!;
+  const stepApproved = async (target: PublicationLease): Promise<PublicationStepResult> => {
+    try { return await worker.step(target); }
+    catch (error) { if ((error as { code?: string }).code !== 'PUBLICATION_INTENT_APPROVAL_REQUIRED') throw error; }
+    const review = await worker.review(target);
+    if (review.attemptPlanHash === null) return worker.step(target);
+    return worker.step(target, {
+      approval: approvals.issue({ operationId: target.operationId, intentHash: review.intentHash, attemptPlanHash: review.attemptPlanHash }, 'validator-harness', 'local-validator'),
+    });
+  };
   rpc.timeoutAfterSend = true;
   const seen: string[] = [];
-  const first = await worker.step(lease);
+  const first = await stepApproved(lease);
   seen.push(first.status);
   assert.equal(first.status, 'UNKNOWN');
   rpc.timeoutAfterSend = false;
-  const done = await untilFinalized(worker, lease, seen);
+  const done = await untilFinalized(() => stepApproved(lease), seen);
   context.diagnostic(`first operation steps: ${seen.join(' -> ')}`);
   assert.equal(done.signature, 'signature' in first ? first.signature : undefined);
   assert.equal(rpc.sends, 1, 'no resend after a timeout whose transaction landed');
@@ -146,7 +172,7 @@ test('workflow publication finalizes on a live local validator, reconciling a ti
   await append('parcel-3', { owner: 'Synthetic C' });
   const next = (await store.claim(registryId, 'worker-a', 300_000))!;
   assert.notEqual(next.operationId, lease.operationId);
-  const second = await untilFinalized(worker, next, []);
+  const second = await untilFinalized(() => stepApproved(next), []);
   assert.equal(second.status, 'FINALIZED');
   assert.equal((await rpc.registryConfig(config, 0n)).value!.currentBatchSequence, 2n);
   assert.equal(await store.claim(registryId, 'worker-a'), null);

@@ -4,12 +4,14 @@
 // on-chain anchor. It exposes exactly two operator-driven actions:
 //
 //   review(worker)  — ensures the deterministic intent is built and stored,
-//                     then returns the exact bytes an operator must approve
-//                     (program/config/operator, membership, root, simulation).
-//                     It reserves, signs and sends nothing.
-//   run(worker, approvedIntentHash) — advances the durable journal by one step.
-//                     A NEW signature is produced only when the caller presents
-//                     the intent hash returned by review; reconciliation of an
+//                     then RESERVES the exact next unsigned attempt and returns
+//                     the per-attempt approval commitment (program/config/
+//                     operator, membership, root, reserved blockhash/lifetime,
+//                     fee quote and bound, attempt/day/segment, simulation).
+//                     It signs and sends nothing.
+//   run(worker, { attemptPlanHash }) — advances the durable journal by one step.
+//                     A NEW signature is produced only for the reserved attempt
+//                     whose plan hash the caller presents; reconciliation of an
 //                     already journaled signed attempt needs no fresh approval.
 //
 // The signer is a lab software adapter behind that explicit reviewed submit;
@@ -23,6 +25,8 @@ import {
   type PublicationStepResult,
   type PublisherConfig,
 } from "./publication-worker.ts";
+import type { PublicationApprovalService } from "./publication-approval.ts";
+import { expectedGenesisHash } from "./publication-identity.ts";
 import type { PublicationChain } from "./publication-rpc.ts";
 import { PublicationError, WorkflowPublicationStore, type PublicationLease } from "./workflow-publication.ts";
 
@@ -43,14 +47,26 @@ export type PublicationRunResult =
 export class WorkflowPublicationRuntime {
   readonly publisher: WorkflowPublisher;
   private readonly store: WorkflowPublicationStore;
+  /** Issuer capability; deliberately NOT passed to the publisher, which only
+   * receives the pinned verifier public key. */
+  readonly #approvals: PublicationApprovalService | undefined;
 
   constructor(
     private readonly pool: Pool,
     chain: PublicationChain,
     signer: PublicationSigner,
     config: PublisherConfig,
+    approvals?: PublicationApprovalService,
   ) {
-    this.publisher = new WorkflowPublisher(pool, chain, signer, config);
+    this.#approvals = approvals;
+    const verifier = approvals === undefined || config.cluster === undefined ? {} : {
+      approvalVerifier: {
+        approvalPublicKey: approvals.publicKey,
+        cluster: config.cluster,
+        genesisHash: expectedGenesisHash(config.cluster, config.genesisHash),
+      },
+    };
+    this.publisher = new WorkflowPublisher(pool, chain, signer, { ...config, ...verifier });
     this.store = new WorkflowPublicationStore(pool);
   }
 
@@ -110,25 +126,65 @@ export class WorkflowPublicationRuntime {
   }
 
   /**
-   * Advances one durable step. When no signed attempt exists yet, the caller
-   * must present the `approvedIntentHash` returned by review; otherwise a new
-   * payload would be signed unseen. Reconciliation of an already signed attempt
-   * is allowed without a fresh approval.
+   * Advances one durable step. Any NEW signature requires the
+   * `approvedAttemptPlanHash` returned by `review`, which committed the exact
+   * reserved unsigned bytes, lifetime, fee, attempt/day/segment and cluster,
+   * plus the authenticated `actor`/`device` the approval is bound to. The
+   * runtime mints the signed approval receipt for exactly the inspected
+   * reservation and passes it to the publisher; the issuer key never reaches
+   * the publisher. Reconciliation or re-send of an already signed attempt is
+   * allowed without a fresh approval and never mints a signature. A
+   * stale/consumed plan hash can never arm a new lifetime.
    */
-  async run(registryId: string, worker: string, approvedIntentHash?: string, operationId?: string): Promise<PublicationRunResult> {
+  async run(
+    registryId: string,
+    worker: string,
+    approval?: { attemptPlanHash?: string; intentHash?: string; actor?: string; device?: string },
+    operationId?: string,
+  ): Promise<PublicationRunResult> {
     const lease = await this.leaseFor(registryId, worker, operationId);
     if (lease === null) return { status: "IDLE" };
     try {
-      if (approvedIntentHash === undefined) {
-        const current = await this.publisher.review(lease);
-        if (!current.hasSignedAttempt) throw new WorkflowRuntimeError(409, "PUBLICATION_INTENT_APPROVAL_REQUIRED");
-      } else {
-        const current = await this.publisher.review(lease);
-        if (current.intentHash !== approvedIntentHash) throw new WorkflowRuntimeError(409, "PUBLICATION_INTENT_APPROVAL_MISMATCH");
+      const current = await this.publisher.inspect(lease);
+      if (approval?.intentHash !== undefined && current.intentHash !== approval.intentHash) {
+        throw new WorkflowRuntimeError(409, "PUBLICATION_INTENT_APPROVAL_MISMATCH");
       }
-      return await this.publisher.step(lease);
+      if (approval?.attemptPlanHash !== undefined && current.attemptPlanHash !== approval.attemptPlanHash) {
+        throw new WorkflowRuntimeError(409, "PUBLICATION_ATTEMPT_PLAN_MISMATCH");
+      }
+      if (approval?.attemptPlanHash === undefined && !current.hasLiveSignedAttempt) {
+        throw new WorkflowRuntimeError(409, "PUBLICATION_INTENT_APPROVAL_REQUIRED");
+      }
+      if (approval?.attemptPlanHash === undefined) return await this.publisher.step(lease);
+      // Mint the approval receipt at the authorized boundary for exactly the
+      // reserved plan the caller presented. actor/device are session-derived by
+      // the HTTP route, never read from the request body.
+      if (this.#approvals === undefined) throw new WorkflowRuntimeError(503, "PUBLICATION_APPROVAL_UNAVAILABLE");
+      const actor = approval.actor;
+      const device = approval.device;
+      if (typeof actor !== "string" || actor.length === 0 || typeof device !== "string" || device.length === 0) {
+        throw new WorkflowRuntimeError(409, "PUBLICATION_APPROVAL_ACTOR_REQUIRED");
+      }
+      const receipt = this.#approvals.issue({
+        operationId: lease.operationId,
+        intentHash: current.intentHash,
+        attemptPlanHash: approval.attemptPlanHash,
+      }, actor, device);
+      return await this.publisher.step(lease, { approval: receipt });
     } catch (error) {
+      if (error instanceof WorkflowRuntimeError) throw error;
       if (error instanceof PublicationError) {
+        // A live attempt that expired mid-step, a plan that went stale between
+        // inspect and step, or a refused approval receipt: approval/identity
+        // problems are 409, never a generic soft error. An unconfigured
+        // approval boundary is a hard 503 (fail closed).
+        if (error.code === "PUBLICATION_APPROVAL_UNCONFIGURED") throw new WorkflowRuntimeError(503, error.code);
+        if (error.code.startsWith("PUBLICATION_APPROVAL_")
+          || error.code === "PUBLICATION_INTENT_APPROVAL_REQUIRED"
+          || error.code === "PUBLICATION_ATTEMPT_PLAN_MISMATCH"
+          || error.code.startsWith("PUBLICATION_CHAIN_IDENTITY")) {
+          throw new WorkflowRuntimeError(409, error.code);
+        }
         return { status: "ERROR", operationId: lease.operationId, code: error.code };
       }
       throw this.domain(error, lease.operationId);

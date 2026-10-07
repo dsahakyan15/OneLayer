@@ -197,6 +197,43 @@ export function intentBytesHash(bytes: Uint8Array): string {
   return createHash("sha256").update(INTENT_DOMAIN + "\n").update(bytes).digest("hex");
 }
 
+export const ATTEMPT_PLAN_DOMAIN = "ONELAYER:WORKFLOW:ATTEMPT-PLAN:V1";
+
+/**
+ * Durable per-attempt approval commitment (H3). It binds the semantic intent
+ * hash together with the exact reserved unsigned message bytes and every
+ * lifetime/fee/attempt-plan field the operator must approve before the signer
+ * produces a signature. `review` returns this over the bytes it reserved;
+ * `run` requires it; the signer independently recomputes it from the decoded
+ * message bytes and refuses a mismatch. Frozen protocol formats are untouched:
+ * this is an off-chain approval commitment, not a new on-chain instruction.
+ */
+export interface AttemptPlanCommitment {
+  intentHash: string;
+  attemptNo: number;
+  cluster: string;
+  programId: string;
+  configPda: string;
+  operator: string;
+  registryId: string;
+  segmentPda: string;
+  segmentIndex: number;
+  dayUtc: number;
+  recentBlockhash: string;
+  lastValidBlockHeight: string;
+  /** Quoted fee for the reserved message (lamports). */
+  feeLamports: string;
+  /** Bounded fee constraint: the quote may not exceed it (lamports). */
+  feeLimitLamports: string;
+  /** Base64 of the exact reserved unsigned message bytes that will be signed. */
+  messageBase64: string;
+}
+
+export function attemptPlanHash(plan: AttemptPlanCommitment): string {
+  const bytes = Buffer.from(canonicalWorkflow({ version: 1, domain: ATTEMPT_PLAN_DOMAIN, plan }), "utf8");
+  return createHash("sha256").update(ATTEMPT_PLAN_DOMAIN + "\n").update(bytes).digest("hex");
+}
+
 /** Builds the intent. Same membership + context always yields identical bytes. */
 export function buildPublicationIntent(items: readonly PublicationItem[], context: IntentContext, keys: PublicationKeys): EncodedIntent {
   if (items.length === 0) throw new PublicationIntentError("PUBLICATION_EMPTY");
