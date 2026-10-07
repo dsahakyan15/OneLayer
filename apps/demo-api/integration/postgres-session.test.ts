@@ -113,3 +113,38 @@ test("login races, invalid grants and audit failure cannot bypass atomic revoke"
   await assert.rejects(unavailable.login("auditor", "synthetic-auditor-password"), IdentityUnavailableError);
   await assert.rejects(unavailable.destroy(active.sessionId), IdentityUnavailableError);
 });
+
+test("lab password sessions carry the deployment-owned device identity without touching the OIDC device binding", { timeout: 60_000 }, async context => {
+  const { pool } = await isolatedPostgres(context);
+  const previous = process.env.ONELAYER_ADMIN_ACCESS_LAB;
+  process.env.ONELAYER_ADMIN_ACCESS_LAB = "1";
+  let lab: ReturnType<typeof parseCredentials>;
+  try {
+    lab = parseCredentials(JSON.stringify({
+      operator: { password: "lab-operator-password-0123456789", role: "operator", deviceId: "demo-device-operator-1" },
+      auditor: { password: "lab-auditor-password-0123456789", role: "auditor", deviceId: "demo-device-auditor-1" },
+    }));
+  } finally {
+    if (previous === undefined) delete process.env.ONELAYER_ADMIN_ACCESS_LAB;
+    else process.env.ONELAYER_ADMIN_ACCESS_LAB = previous;
+  }
+  const store = new PostgresSessionStore(pool, lab);
+  await store.initialize();
+  // Regression: a lab credential's deviceId was written into the OIDC
+  // managed-device binding column, violating `session_device_binding`, so every
+  // password login surfaced as 503 IDENTITY_UNAVAILABLE.
+  const session = await store.login("operator", "lab-operator-password-0123456789");
+  assert.ok(session, "a lab password login must return a session, not IDENTITY_UNAVAILABLE");
+  assert.equal(session?.deviceId, "demo-device-operator-1", "the deployment-owned device identity must ride the session");
+  const stored = (await pool.query("SELECT auth_method, device_id, device_revision FROM demo_admin_session WHERE username='operator'")).rows[0];
+  assert.equal(stored.auth_method, "password");
+  assert.equal(stored.device_id, null, "demo_admin_session.device_id is the OIDC managed-device binding and must stay NULL for password sessions");
+  assert.equal(stored.device_revision, null);
+  const reread = await store.get(session?.sessionId);
+  assert.equal(reread?.deviceId, "demo-device-operator-1", "get() must re-attach the deployment-owned device identity");
+  const auditor = await store.login("auditor", "lab-auditor-password-0123456789");
+  assert.equal(auditor?.deviceId, "demo-device-auditor-1");
+  assert.equal(await store.login("auditor", "wrong-password-0000000000000"), null, "a wrong password stays indistinguishable from an unknown user");
+  await store.destroy(session?.sessionId);
+  assert.equal(await store.get(session?.sessionId), null);
+});

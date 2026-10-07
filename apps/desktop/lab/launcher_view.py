@@ -59,6 +59,10 @@ PROBE_REQUEST_DETAIL = "Request in progress…"
 
 _CSS = b"""
 .ol-window { background-color: #f4f6fa; }
+.ol-window combobox cellview { color: #1d2839; }
+.ol-window entry { color: #1d2839; background-color: #ffffff; }
+.ol-window entry:disabled { color: #72809a; background-color: #f4f6fa; }
+.ol-window button:disabled { color: #72809a; background-color: #edf1f7; }
 .ol-header { background-color: #ffffff; border-bottom: 1px solid #dce3ee; }
 .ol-header-title { font-size: 17px; font-weight: bold; color: #1d2839; }
 .badge { background-color: #2f6fdd; color: #ffffff; border-radius: 9px;
@@ -178,6 +182,9 @@ class LauncherView:
         from live_demo_view import LiveDemoPages
         self._live_demo = live_demo
         self._live_pages = LiveDemoPages(live_demo, window=window)
+        from workflow_demo import build_page
+        from live_demo_controller import LiveDemoController
+        self._workflow = build_page(LiveDemoController.local()._api, window)
 
         header = Gtk.HeaderBar()
         header.set_show_close_button(True)
@@ -205,11 +212,12 @@ class LauncherView:
         content.pack_start(self._nav_box, False, False, 0)
         content.pack_start(self._stack, True, True, 0)
 
+        self._stack.add_named(self._workflow.widget, "workflow")
         self._stack.add_named(self._build_overview_page(), "overview")
         self._stack.add_named(self._build_connection_page(), "connection")
         for name, widget in self._live_pages.pages():
             self._stack.add_named(widget, name)
-        self._show_page("overview")
+        self._show_page("workflow" if self._live_demo._api.profile.is_local_cluster else "overview")
         root.pack_start(self._build_footer(), False, False, 0)
 
     def _build_sidebar(self):
@@ -220,7 +228,10 @@ class LauncherView:
         sidebar.pack_start(_label("Sections", "sidebar-caption"), False, False, 0)
         buttons = {}
         sections = (("overview", "_Overview"), ("connection", "_Connection"))
-        sections = sections + tuple(self._live_pages.nav_items())
+        if self._live_demo._api.profile.is_local_cluster:
+            sections = (("workflow", "_Сценарий"),) + sections
+        else:
+            sections = sections + tuple(self._live_pages.nav_items())
         for name, text in sections:
             button = Gtk.Button.new_with_mnemonic(text)
             button.set_relief(Gtk.ReliefStyle.NONE)

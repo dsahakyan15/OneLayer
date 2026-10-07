@@ -55,13 +55,24 @@ export class PostgresSessionStore implements SessionBackend {
     await this.transaction(async client => {
       for (const credential of this.credentials) {
         const access = normalizeAccess(credential);
-        const inserted = await client.query(
-          `INSERT INTO demo_admin_account (username, role, permissions, registry_ids)
-           VALUES ($1,$2,$3,$4) ON CONFLICT (username) DO NOTHING RETURNING username`,
-          [credential.username, access.role, access.permissions, access.registryIds],
-        );
+        // `demo_admin_account.resource_policy` is NOT NULL with a deny-by-default
+        // value; a credential without an explicit deployment policy keeps that
+        // default instead of inserting NULL.
+        const inserted = credential.resourcePolicy === undefined
+          ? await client.query(
+              `INSERT INTO demo_admin_account (username, role, permissions, registry_ids)
+               VALUES ($1,$2,$3,$4) ON CONFLICT (username) DO NOTHING RETURNING username`,
+              [credential.username, access.role, access.permissions, access.registryIds],
+            )
+          : await client.query(
+              `INSERT INTO demo_admin_account (username, role, permissions, registry_ids, resource_policy)
+               VALUES ($1,$2,$3,$4,$5) ON CONFLICT (username) DO NOTHING RETURNING username`,
+              [credential.username, access.role, access.permissions, access.registryIds,
+                JSON.stringify(credential.resourcePolicy)],
+            );
         if (inserted.rowCount) {
-          await this.audit(client, credential.username, "deployment-bootstrap", "BOOTSTRAP", "1", access);
+          await this.audit(client, credential.username, "deployment-bootstrap", "BOOTSTRAP", "1",
+            { ...access, ...(credential.resourcePolicy === undefined ? {} : { resourcePolicy: credential.resourcePolicy }) });
         }
       }
     });
@@ -77,9 +88,19 @@ export class PostgresSessionStore implements SessionBackend {
       const row = result.rows[0];
       if (!row || !row.enabled || row.auth_source !== "password") return null;
       const access = accessFromRow(row);
+      const resourcePolicy = row.resource_policy === null || row.resource_policy === undefined
+        ? credential.resourcePolicy
+        : normalizeResourcePolicy(row.resource_policy);
+      const deviceId = credential.deviceId;
       const sessionId = randomBytes(32).toString("base64url");
       const csrfToken = randomBytes(32).toString("base64url");
       await client.query("DELETE FROM demo_admin_session WHERE username=$1 AND expires_at <= clock_timestamp()", [credential.username]);
+      // `demo_admin_session.device_id` is the OIDC managed-device binding
+      // (`session_device_binding` requires it NULL for password auth), so the
+      // deployment-owned lab device identity never enters that column. It is
+      // attached to the session object from the deployment credential file, so
+      // the approval receipt's device is still backend-owned, never a renderer
+      // claim.
       const inserted = await client.query(
         `INSERT INTO demo_admin_session (token_hash, username, access_revision, csrf_token, expires_at)
          VALUES ($1,$2,$3,$4,clock_timestamp() + $5 * interval '1 millisecond') RETURNING expires_at`,
@@ -88,6 +109,8 @@ export class PostgresSessionStore implements SessionBackend {
       return Object.freeze({ sessionId, username: credential.username, ...access,
         permissions: Object.freeze(access.permissions), registryIds: Object.freeze(access.registryIds),
         csrfToken, expiresAt: inserted.rows[0].expires_at.getTime(),
+        ...(deviceId === undefined ? {} : { deviceId }),
+        ...(resourcePolicy === undefined ? {} : { resourcePolicy }),
       });
     });
   }
@@ -186,10 +209,26 @@ export class PostgresSessionStore implements SessionBackend {
       if (!row || row.auth_source !== row.auth_method) return null;
       if (this.options.oidcOnly ? row.auth_method !== "oidc" : row.auth_method !== "password" || !this.credentials.some(entry => entry.username === row.username)) return null;
       const access = accessFromRow(row);
+      // Deployment-owned scope/device are attached to BOTH auth methods so a
+      // password session carries the server-side resource policy and the
+      // backend-owned device identity the approval receipt binds.
+      const resourcePolicy = row.resource_policy === null || row.resource_policy === undefined
+        ? undefined : normalizeResourcePolicy(row.resource_policy);
+      // Password sessions carry the deployment-owned device identity from the
+      // credential file (the stored row keeps `device_id` NULL — see login).
+      // OIDC sessions carry the managed device bound at authentication.
+      const passwordCredential = row.auth_method === "password"
+        ? this.credentials.find(entry => entry.username === row.username)
+        : undefined;
+      const deviceId = row.auth_method === "oidc"
+        ? (row.device_id ?? undefined)
+        : passwordCredential?.deviceId;
       return Object.freeze({ sessionId, username: row.username, ...access,
         permissions: Object.freeze(access.permissions), registryIds: Object.freeze(access.registryIds),
         csrfToken: row.csrf_token, expiresAt: row.expires_at.getTime(),
-        ...(row.auth_method === "oidc" ? { authMethod: "oidc" as const, deviceId: row.device_id, resourcePolicy: normalizeResourcePolicy(row.resource_policy) } : {}),
+        ...(deviceId === undefined || deviceId === null ? {} : { deviceId }),
+        ...(resourcePolicy === undefined ? {} : { resourcePolicy }),
+        ...(row.auth_method === "oidc" ? { authMethod: "oidc" as const } : {}),
       });
     } catch { throw new IdentityUnavailableError(); }
   }

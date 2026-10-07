@@ -53,6 +53,7 @@ from live_demo_api import (  # noqa: E402
     validate_explorer_url,
 )
 from live_demo_session import AdminSession, ApiRefusal  # noqa: E402
+from live_demo_controller import LiveDemoController, ControllerError  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 SPEC_VECTORS = REPO_ROOT / "spec" / "vectors" / "certificate.json"
@@ -738,9 +739,28 @@ class ApiFixture(unittest.TestCase):
 
     def install_verifier(self, status, payload):
         def handle(_request):
-            return (200 if status != "INVALID" else 422), payload, None
+            return (200 if status != "INVALID" else 422), self._v2_envelope(payload), None
 
-        self.verifier_routes[("POST", "/v1/verify")] = handle
+        self.verifier_routes[("POST", "/v2/verify")] = handle
+
+    @staticmethod
+    def _v2_envelope(payload):
+        """Wrap a test payload in the strict /v2 wire shape.
+
+        Real ``/v2/verify`` always returns ``resultVersion: 2`` with nested
+        proofs/registry/incidents/lifecycle; the desktop refuses anything else.
+        Nested values default to honest ones (proof VERIFIED, lifecycle UNKNOWN)
+        so a fixture can state the exact split it wants to assert.
+        """
+        body = {
+            "resultVersion": 2,
+            "proofs": {"status": "VERIFIED"},
+            "registry": {"registryId": "gov.registry.land", "status": "CHECKED"},
+            "incidents": {"status": "NOT_CHECKED"},
+            "lifecycle": {"status": "UNKNOWN", "code": "LIFECYCLE_UNAVAILABLE"},
+        }
+        body.update(payload)
+        return body
 
 
 class RecordAdapterTests(ApiFixture):
@@ -1510,13 +1530,53 @@ class VerifyFlowTests(ApiFixture):
         self.assertEqual(report.explorer_url, f"https://explorer.solana.com/tx/{SIGNATURE}?cluster=devnet")
         self.assertEqual(report.package_hash.verdict, HashVerdict.MATCH)
 
+    def test_v2_healthy_package_reports_verified_proof_but_unknown_overall(self):
+        # M2 honesty: a workflow-issued certificate whose proofs are established
+        # (proofs.status VERIFIED) still has an UNAUTHENTICATED lifecycle, so the
+        # overall verdict is UNKNOWN — never VERIFIED and never "current". The
+        # proof status is surfaced separately so the split is visible.
+        self.sign_in()
+        package, digest = build_package()
+        self.install_verifier(
+            "UNKNOWN",
+            {
+                "resultVersion": 2,
+                "status": "UNKNOWN",
+                "code": "LIFECYCLE_UNAVAILABLE",
+                "certificateId": CERT_ID,
+                "batchSequence": "2",
+                "recordVersion": "1",
+                "proofs": {"status": "VERIFIED", "anchorSlot": "412267854"},
+                "registry": {"registryId": "gov.registry.land", "status": "CHECKED"},
+                "incidents": {"status": "NOT_CHECKED"},
+                "lifecycle": {"status": "UNKNOWN", "code": "LIFECYCLE_UNAVAILABLE"},
+                "disclosureMode": "SELECTIVE_FIELDS",
+                "disclosedFields": {"status": "ACTIVE"},
+                "warnings": ["Current suitability is not proven."],
+            },
+        )
+        self.routes[("GET", f"/v1/certificates/{CERT_ID}/metadata")] = lambda request: (
+            200, {"certificateId": CERT_ID}, None,
+        )
+        report = self.api.verify_package(package, expected_hash_hex=digest)
+        self.assertEqual(report.status, "UNKNOWN")
+        self.assertFalse(report.is_verified)
+        self.assertEqual(report.proofs_status, "VERIFIED")
+        self.assertEqual(report.lifecycle_status, "UNKNOWN")
+        self.assertEqual(report.registry_status, "CHECKED")
+        self.assertEqual(report.checked_slot, "412267854")
+        # UNKNOWN still discloses the signed fields (it is not INVALID), but it
+        # is never presented as verified/current.
+        self.assertEqual(dict(report.disclosed_fields), {"status": "ACTIVE"})
+        self.assertIn("UNKNOWN", report.as_dict()["status"])
+
     def test_tampered_area_package_fails_the_hash_check_without_the_verifier(self):
         self.sign_in()
         original, original_hash = build_package()
         tampered, tampered_hash = build_package(tamper="area")
         self.assertNotEqual(original_hash, tampered_hash)
         called = []
-        self.verifier_routes[("POST", "/v1/verify")] = lambda request: (
+        self.verifier_routes[("POST", "/v2/verify")] = lambda request: (
             called.append(True) or (200, {"status": "VERIFIED"}, None)
         )
         report = self.api.verify_package(tampered, expected_hash_hex=original_hash)
@@ -1530,7 +1590,7 @@ class VerifyFlowTests(ApiFixture):
     def test_relabelled_tamper_is_still_detected(self):
         self.sign_in()
         tampered, tampered_hash = build_package(tamper="area")
-        self.verifier_routes[("POST", "/v1/verify")] = lambda request: (
+        self.verifier_routes[("POST", "/v2/verify")] = lambda request: (
             200, {"status": "VERIFIED", "certificateId": CERT_ID,
                   "disclosedFields": {"areaSquareMeters": "9999.99"}}, None,
         )
@@ -1582,7 +1642,7 @@ class VerifyFlowTests(ApiFixture):
     def test_unparseable_package_never_reaches_the_verifier(self):
         self.sign_in()
         called = []
-        self.verifier_routes[("POST", "/v1/verify")] = lambda request: (
+        self.verifier_routes[("POST", "/v2/verify")] = lambda request: (
             called.append(True) or (200, {"status": "VERIFIED"}, None)
         )
         report = self.api.verify_package(b"not a package", expected_hash_hex="0" * 64)
@@ -1597,7 +1657,7 @@ class VerifyFlowTests(ApiFixture):
         )
         api = LiveDemoApi(self.profile, session, hash_verifier=DeferredPackageHashVerifier())
         called = []
-        self.verifier_routes[("POST", "/v1/verify")] = lambda request: (
+        self.verifier_routes[("POST", "/v2/verify")] = lambda request: (
             called.append(True) or (200, {"status": "VERIFIED"}, None)
         )
         report = api.verify_package(package, expected_hash_hex=digest, expected_source="qr")
@@ -1693,7 +1753,7 @@ class AdversarialInputTests(ApiFixture):
     def test_deeply_nested_cbor_never_crashes_the_verify_flow(self):
         self.sign_in()
         called = []
-        self.verifier_routes[("POST", "/v1/verify")] = lambda request: (
+        self.verifier_routes[("POST", "/v2/verify")] = lambda request: (
             called.append(True) or (200, {"status": "VERIFIED"}, None)
         )
         blob = b"\x81" * 1500 + b"\x00"
@@ -1720,7 +1780,7 @@ class AdversarialInputTests(ApiFixture):
     def test_deeply_nested_verifier_response_is_refused_not_crashed(self):
         self.sign_in()
         package, digest = build_package()
-        self.verifier_routes[("POST", "/v1/verify")] = lambda request: (
+        self.verifier_routes[("POST", "/v2/verify")] = lambda request: (
             200, ('{"a":' * 20000 + "1" + "}" * 20000).encode(), None,
         )
         report = self.api.verify_package(package, expected_hash_hex=digest)
@@ -1822,6 +1882,231 @@ class SecretSurfaceTests(ApiFixture):
         self.assertNotIn("password", summary.as_dict())
         self.assertNotIn("csrfToken", summary.as_dict())
         self.assertNotIn("csrf", json.dumps(summary.as_dict()).lower())
+
+
+class _DurableReviewBody:
+    """Shared reserved-attempt review fixture (M1/H3)."""
+
+    OPERATION_ID = "11111111-2222-3333-4444-555555555555"
+
+    def _review_body(self, **overrides):
+        body = {
+            "operationId": self.OPERATION_ID,
+            "review": {
+                "intentHash": "ab" * 32,
+                "registryId": "gov.registry.land",
+                "programId": "6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo",
+                "configPda": "BPgSTnDHop1NhMrksBWJtZV2zqVmUM1iusEuUXocCnFU",
+                "operator": "4Y4pGizJm5QqJtZV2zqVmUM1iusEuUXocCnFUAA",
+                "operatorKeyId": "demo-operator-1",
+                "batchSequence": "2",
+                "registryVersion": "1",
+                "previousAnchorHash": "cd" * 32,
+                "cursorStart": "1",
+                "cursorEnd": "2",
+                "merkleRoot": "ef" * 32,
+                "manifestHash": "12" * 32,
+                "leafCount": 1,
+                "members": [
+                    {"eventId": "ev-1", "recordId": "SYNTHETIC-1", "version": 1,
+                     "operation": "upsert", "payloadHash": "34" * 32},
+                ],
+                "blockedReason": None,
+                "attemptStates": [{"attemptNo": 1, "state": "PREPARED"}],
+                "hasSignedAttempt": False,
+                "hasLiveSignedAttempt": False,
+                "attemptPlanHash": "56" * 32,
+                "attemptNo": 1,
+                "cluster": "solana:devnet",
+                "feeLamports": "5000",
+                "feeLimitLamports": "1000000",
+                "segmentPda": "SEG1111111111111111111111111111111111111",
+                "segmentIndex": 0,
+                "blockhash": "78" * 32,
+                "lastValidBlockHeight": "1150",
+                "messageBase64": "AQIDBA==",
+                "simulation": {"ok": True, "error": None, "logs": [], "unitsConsumed": 1},
+            },
+        }
+        body["review"].update(overrides)
+        return body
+
+
+class DurablePublicationContractTests(_DurableReviewBody, ApiFixture):
+    """The real /v2/admin/workflow/publications consumer (M1/H3).
+
+    The launcher drives the durable review → approved reserved attempt →
+    finalized anchor → certificate path, never the legacy /v1 facade. A new
+    signature requires the exact per-attempt ``approvedAttemptPlanHash``; this
+    layer never signs or holds an issuer key (the receipt comes from the backend).
+    """
+
+    def test_review_parses_attempt_plan_fee_lifetime_and_message(self):
+        self.sign_in()
+        self.routes[("POST", "/v2/admin/workflow/publications/review")] = lambda request: (
+            200, self._review_body(), None,
+        )
+        review = self.api.review_publication()
+        self.assertEqual(review.operation_id, self.OPERATION_ID)
+        self.assertEqual(review.intent_hash, "ab" * 32)
+        self.assertEqual(review.attempt_plan_hash, "56" * 32)
+        self.assertEqual(review.attempt_no, 1)
+        self.assertEqual(review.cluster, "solana:devnet")
+        self.assertEqual(review.fee_lamports, "5000")
+        self.assertEqual(review.fee_limit_lamports, "1000000")
+        self.assertEqual(review.blockhash, "78" * 32)
+        self.assertEqual(review.last_valid_block_height, "1150")
+        self.assertEqual(review.message_base64, "AQIDBA==")
+        self.assertTrue(review.can_approve)
+        shown = review.as_dict()
+        self.assertEqual(shown["attemptPlanHash"], "56" * 32)
+        self.assertEqual(shown["feeLamports"], "5000")
+        self.assertEqual(shown["feeLimitLamports"], "1000000")
+        self.assertEqual(shown["blockhash"], "78" * 32)
+        self.assertEqual(shown["lastValidBlockHeight"], "1150")
+        self.assertEqual(shown["messageBase64"], "AQIDBA==")
+
+    def test_run_sends_approved_attempt_plan_hash_for_a_new_signature(self):
+        self.sign_in()
+        self.routes[("POST", "/v2/admin/workflow/publications/review")] = lambda request: (
+            200, self._review_body(), None,
+        )
+        review = self.api.review_publication()
+        self.routes[("POST", "/v2/admin/workflow/publications/run")] = lambda request: (
+            200, {"status": "FINALIZED", "operationId": self.OPERATION_ID}, None,
+        )
+        result = self.api.run_publication(
+            approved_attempt_plan_hash=review.attempt_plan_hash,
+            approved_intent_hash=review.intent_hash,
+            operation_id=review.operation_id,
+        )
+        self.assertEqual(result["status"], "FINALIZED")
+        sent = self.last("POST", "/run")
+        body = json.loads(sent["body"].decode("utf-8"))
+        self.assertEqual(body["approvedAttemptPlanHash"], "56" * 32)
+        self.assertEqual(body["approvedIntentHash"], "ab" * 32)
+        self.assertEqual(body["operationId"], self.OPERATION_ID)
+
+    def test_live_signed_attempt_needs_no_approval_hash(self):
+        self.sign_in()
+        self.routes[("POST", "/v2/admin/workflow/publications/review")] = lambda request: (
+            200, self._review_body(
+                attemptPlanHash=None, attemptNo=None, hasSignedAttempt=True,
+                hasLiveSignedAttempt=True, blockhash=None, lastValidBlockHeight=None,
+                messageBase64=None, simulation=None,
+            ), None,
+        )
+        review = self.api.review_publication()
+        self.assertIsNone(review.attempt_plan_hash)
+        self.assertFalse(review.can_approve, "a live signed attempt reconciles; it never arms a new signature")
+        self.routes[("POST", "/v2/admin/workflow/publications/run")] = lambda request: (
+            200, {"status": "SUBMITTED", "operationId": self.OPERATION_ID}, None,
+        )
+        self.api.run_publication(approved_attempt_plan_hash=None)
+        body = json.loads(self.last("POST", "/run")["body"].decode("utf-8"))
+        self.assertNotIn("approvedAttemptPlanHash", body, "reconciliation sends no approval")
+
+    def test_malformed_review_is_refused_before_any_approve(self):
+        self.sign_in()
+        self.routes[("POST", "/v2/admin/workflow/publications/review")] = lambda request: (
+            200, self._review_body(attemptPlanHash="not-a-hash"), None,
+        )
+        with self.assertRaises(ProtocolError):
+            self.api.review_publication()
+
+
+class _FakeSigner:
+    def sign(self, request):
+        return "signature-never-used-by-durable-path"
+
+
+class _FakeQr:
+    def decode(self, _path):
+        return "qr-payload"
+
+
+class DurableControllerFlowTests(_DurableReviewBody, ApiFixture):
+    """M1: the controller drives the durable /v2 adapter end-to-end.
+
+    Buttons/actions go through ``LiveDemoController`` (durable_review →
+    durable_run → durable_issue_certificate) against a real loopback HTTP fixture
+    — not the legacy /v1 facade. The run is bound to the reviewed
+    ``attemptPlanHash``; a stale hash is refused before any request is made and no
+    issuer key is ever held by the controller (the result comes from the backend).
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.controller = LiveDemoController(
+            self.api, signer=_FakeSigner(), qr_decoder=_FakeQr(), mode="fixture"
+        )
+
+    def test_controller_durable_review_then_run_binds_the_exact_plan(self):
+        self.sign_in()
+        self.routes[("POST", "/v2/admin/workflow/publications/review")] = lambda request: (
+            200, self._review_body(), None,
+        )
+        review = self.controller.durable_review()
+        self.assertEqual(review.attempt_plan_hash, "56" * 32)
+        snap = self.controller.snapshot()
+        self.assertEqual(snap["durableReview"]["attemptPlanHash"], "56" * 32)
+        self.assertTrue(snap["durableCanApprove"])
+        # The operator approves exactly the displayed hash.
+        self.routes[("POST", "/v2/admin/workflow/publications/run")] = lambda request: (
+            200, {"status": "FINALIZED", "operationId": self.OPERATION_ID}, None,
+        )
+        result = self.controller.durable_run(
+            approved_attempt_plan_hash=review.attempt_plan_hash,
+            approved_intent_hash=review.intent_hash,
+        )
+        self.assertEqual(result["status"], "FINALIZED")
+        body = json.loads(self.last("POST", "/run")["body"].decode("utf-8"))
+        self.assertEqual(body["approvedAttemptPlanHash"], "56" * 32)
+        self.assertEqual(self.controller.snapshot()["durableResult"]["status"], "FINALIZED")
+
+    def test_controller_refuses_an_approval_hash_that_was_never_shown(self):
+        self.sign_in()
+        self.routes[("POST", "/v2/admin/workflow/publications/review")] = lambda request: (
+            200, self._review_body(), None,
+        )
+        self.controller.durable_review()
+        # A hash the operator never saw cannot be approved: refused locally before
+        # any /run request is sent.
+        with self.assertRaises(ControllerError):
+            self.controller.durable_run(approved_attempt_plan_hash="ab" * 32)
+        self.assertFalse(
+            any(item["path"].endswith("/run") for item in self.requests),
+            "a stale approval never reaches the backend",
+        )
+
+    def test_controller_requires_an_approval_to_arm_a_new_signature(self):
+        self.sign_in()
+        self.routes[("POST", "/v2/admin/workflow/publications/review")] = lambda request: (
+            200, self._review_body(), None,
+        )
+        self.controller.durable_review()
+        # No approved hash and no live signed attempt → refuse before /run.
+        with self.assertRaises(ControllerError):
+            self.controller.durable_run(approved_attempt_plan_hash=None)
+
+    def test_controller_issues_a_workflow_certificate_with_disclosed_paths(self):
+        self.sign_in()
+        self.routes[("POST", f"/v2/admin/workflow/publications/{self.OPERATION_ID}/certificate")] = (
+            lambda request: (200, {"certificateId": "aa" * 16, "operationId": self.OPERATION_ID}, None)
+        )
+        issued = self.controller.durable_issue_certificate(
+            operation_id=self.OPERATION_ID,
+            record_id="SYNTHETIC-1",
+            version=1,
+            disclosed_paths=("status", "areaSquareMeters"),
+        )
+        self.assertEqual(issued["certificateId"], "aa" * 16)
+        body = json.loads(
+            self.last("POST", "/certificate")["body"].decode("utf-8")
+        )
+        self.assertEqual(body["recordId"], "SYNTHETIC-1")
+        self.assertEqual(body["version"], 1)
+        self.assertEqual(sorted(body["disclosedPaths"]), ["areaSquareMeters", "status"])
 
 
 if __name__ == "__main__":

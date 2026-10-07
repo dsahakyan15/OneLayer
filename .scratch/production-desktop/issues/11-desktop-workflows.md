@@ -58,3 +58,13 @@ workspaces or full native signer/recovery flows. See
 
 
 2026-10-06: текущий ограниченный срез выполняется в `feat/pipeline-live-demo-20261006` через T3 orchestration. Полные acceptance и зависимости остаются открытыми; итоги и evidence будут опубликованы после интеграционной проверки.
+
+### 2026-10-07 — guided live scenario
+
+The visible GTK create/submit/different-approver/commit/exact-plan publication/
+selective certificate/QR/verify/export path passed against the real local
+validator and a clean PR-source demo API. Rejection/correction, worker approval
+refusal and tampered-copy refusal also passed. Evidence:
+[evidence/11/guided-live-scenario-2026-10-07.md](../evidence/11/guided-live-scenario-2026-10-07.md).
+This is one accepted service-backed business walkthrough, not acceptance of the
+entire eight-role recovery/audit desktop matrix or signed installed release.

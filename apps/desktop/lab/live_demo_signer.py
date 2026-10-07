@@ -56,8 +56,12 @@ __all__ = [
 
 MAX_REQUEST_BYTES = 256 * 1024
 MAX_OUTPUT_BYTES = 64 * 1024
-DEFAULT_TIMEOUT_SECONDS = 20.0
-ADDRESS_TIMEOUT_SECONDS = 10.0
+# Bounded but load-tolerant (L1): the real Node helper subprocess can take far
+# longer than a trivial call to start under a loaded machine. These are still
+# hard upper bounds — the signer never hangs indefinitely — but they no longer
+# flake when the full suite runs alongside other work.
+DEFAULT_TIMEOUT_SECONDS = 45.0
+ADDRESS_TIMEOUT_SECONDS = 30.0
 
 # Code-only failures; nothing from the key or the request is ever echoed.
 SIGNER_UNAVAILABLE = "SIGNER_UNAVAILABLE"

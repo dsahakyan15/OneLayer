@@ -37,7 +37,7 @@ import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import (
@@ -48,9 +48,53 @@ from urllib.request import (
     build_opener,
 )
 
-RUNTIME_DIR = Path("/dev/shm/onelayer-devnet-demo")
+RUNTIME_DIR_ENV = "ONELAYER_DEMO_RUNTIME_DIR"
+DEFAULT_LEGACY_RUNTIME_DIR = Path("/dev/shm/onelayer-devnet-demo")
+
+
+def runtime_directory(environ: Mapping[str, str] | None = None) -> Path:
+    """The private runtime dir holding the credential file.
+
+    ``ONELAYER_DEMO_RUNTIME_DIR`` selects an isolated per-namespace dir for the
+    local-validator profile; the legacy tmpfs path stays the default. The path
+    must be absolute and is never derived from a request or the renderer.
+    """
+    env = os.environ if environ is None else environ
+    raw = env.get(RUNTIME_DIR_ENV)
+    if raw:
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            raise ValueError(f"{RUNTIME_DIR_ENV} must be an absolute path")
+        return candidate
+    return DEFAULT_LEGACY_RUNTIME_DIR
+
+
+def _default_private_root(runtime_dir: Path, environ: Mapping[str, str] | None = None) -> Path:
+    env = os.environ if environ is None else environ
+    if env.get(RUNTIME_DIR_ENV):
+        # The runtime dir itself is the private root (0700), so its parent check
+        # applies to the namespace runtime directory.
+        return runtime_dir
+    return Path("/dev/shm")
+
+
+RUNTIME_DIR = runtime_directory()
 DEFAULT_CREDENTIAL_PATH = RUNTIME_DIR / "admin-credentials.json"
-DEFAULT_PRIVATE_ROOT = Path("/dev/shm")
+DEFAULT_PRIVATE_ROOT = _default_private_root(RUNTIME_DIR)
+
+# The eight server role IDs. An identity is a username; the server session is
+# the only thing that states the role (never a renderer-chosen role).
+DEMO_IDENTITIES = (
+    "operator",
+    "auditor",
+    "chief_admin",
+    "registry_worker",
+    "registry_approver",
+    "identity_admin",
+    "key_holder",
+    "storage_custodian",
+)
+DEMO_USERNAMES = DEMO_IDENTITIES + tuple(f"{role}-1" for role in DEMO_IDENTITIES[3:])
 
 SESSION_COOKIE = "onelayer_admin_session"
 
@@ -342,18 +386,18 @@ def _is_regular_file(path: Path) -> bool:
     return stat.S_ISREG(info.st_mode) and not path.is_symlink()
 
 
-def load_operator_password(
+def _read_credential_document(
     credential_path: Path | str = DEFAULT_CREDENTIAL_PATH,
     *,
     private_root: Path | str | None = None,
-) -> str:
-    """Read the demo operator password out of the private runtime file.
+) -> dict[str, Any]:
+    """Read and validate the private credential JSON object (no secret returned).
 
     The file must be a regular file (never a symlink) whose resolved location
-    lives under ``private_root`` (``/dev/shm`` by default), inside a directory
-    owned by this user with no group/other permission bits. The returned string
-    must be kept out of argv, environment, logs and UI; prefer passing it to
-    :meth:`AdminSession.sign_in` directly rather than storing it.
+    lives under ``private_root``, inside a directory owned by this user with no
+    group/other permission bits. Both the legacy flat schema and the extended
+    per-identity object schema are accepted here; the password is extracted by
+    the caller and never returned in bulk.
     """
     root = Path(private_root) if private_root is not None else DEFAULT_PRIVATE_ROOT
     try:
@@ -379,7 +423,7 @@ def load_operator_password(
         raw = resolved.read_bytes()
     except OSError:
         raise CredentialError("credentials", "credential file is unreadable") from None
-    if len(raw) > 8192:
+    if len(raw) > 65536:
         raise CredentialError("credentials", "credential file is too large")
     try:
         parsed = json.loads(raw.decode("utf-8"))
@@ -389,13 +433,64 @@ def load_operator_password(
         raise CredentialError("credentials", "credential file is not valid JSON") from None
     if not isinstance(parsed, dict):
         raise CredentialError("credentials", "credential file must be a JSON object")
+    return parsed
 
-    password = parsed.get(_OPERATOR_ROLE)
+
+def configured_identities(
+    credential_path: Path | str = DEFAULT_CREDENTIAL_PATH,
+    *,
+    private_root: Path | str | None = None,
+) -> tuple[str, ...]:
+    """The known demo identities actually present in the credential file.
+
+    The file is deployment-owned; the renderer only learns which usernames may
+    be selected, never a role or a password. Unknown keys are ignored.
+    """
+    try:
+        document = _read_credential_document(credential_path, private_root=private_root)
+    except CredentialError:
+        return ()
+    present = []
+    for identity in DEMO_USERNAMES:
+        raw = document.get(identity)
+        password = raw if isinstance(raw, str) else (raw.get("password") if isinstance(raw, dict) else None)
+        if isinstance(password, str) and len(password) >= _MIN_PASSWORD_LENGTH:
+            present.append(identity)
+    return tuple(present)
+
+
+def load_identity_password(
+    identity: str = _OPERATOR_ROLE,
+    credential_path: Path | str = DEFAULT_CREDENTIAL_PATH,
+    *,
+    private_root: Path | str | None = None,
+) -> str:
+    """Read one identity's password out of the private runtime credential file.
+
+    The returned string must be kept out of argv, environment, logs and UI;
+    prefer passing it to :meth:`AdminSession.sign_in` directly rather than
+    storing it. Both the legacy flat value and the extended object entry are
+    accepted; the identity must be one of the eight known demo usernames.
+    """
+    if identity not in DEMO_USERNAMES:
+        raise CredentialError("credentials", "unknown demo identity")
+    document = _read_credential_document(credential_path, private_root=private_root)
+    raw = document.get(identity)
+    password = raw if isinstance(raw, str) else (raw.get("password") if isinstance(raw, dict) else None)
     if not isinstance(password, str) or len(password) < _MIN_PASSWORD_LENGTH:
-        raise CredentialError("credentials", "operator credential is missing or too short")
+        raise CredentialError("credentials", f"{identity} credential is missing or too short")
     if any(character < " " or character == "\x7f" for character in password):
-        raise CredentialError("credentials", "operator credential is not printable")
+        raise CredentialError("credentials", "credential is not printable")
     return password
+
+
+def load_operator_password(
+    credential_path: Path | str = DEFAULT_CREDENTIAL_PATH,
+    *,
+    private_root: Path | str | None = None,
+) -> str:
+    """Backward-compatible operator password loader (see :func:`load_identity_password`)."""
+    return load_identity_password("operator", credential_path, private_root=private_root)
 
 
 class LoopbackHttp:
@@ -463,7 +558,17 @@ def decode_json_body(raw: bytes) -> Any:
     if not raw:
         return None
     try:
-        return json.loads(raw.decode("utf-8"))
+        document = json.loads(raw.decode("utf-8"))
+        pending = [(document, 0)]
+        while pending:
+            value, depth = pending.pop()
+            if depth > 64:
+                raise ProtocolError("error", "response is too deeply nested")
+            if isinstance(value, dict):
+                pending.extend((child, depth + 1) for child in value.values())
+            elif isinstance(value, list):
+                pending.extend((child, depth + 1) for child in value)
+        return document
     except (UnicodeDecodeError, ValueError):
         raise ProtocolError("error", "response is not JSON") from None
     except RecursionError:
@@ -575,16 +680,21 @@ class AdminSession:
 
     # -- session lifecycle -------------------------------------------------
 
-    def sign_in(self) -> SessionSummary:
-        """Sign in as the demo operator using the private credential file."""
-        password = load_operator_password(self._credential_path, private_root=self._private_root)
+    def sign_in(self, identity: str = _OPERATOR_ROLE) -> SessionSummary:
+        """Sign in as one configured demo identity using the private credential file.
+
+        The identity is a username from the deployment-owned credential file; the
+        server session is the only source of the role and permissions. There is
+        no renderer-selected role and no fabricated actor.
+        """
+        password = load_identity_password(identity, self._credential_path, private_root=self._private_root)
         self.clear()
         try:
             response = self._http.request(
                 "POST",
                 "/v1/admin/session",
                 body=json.dumps(
-                    {"username": _OPERATOR_ROLE, "password": password},
+                    {"username": identity, "password": password},
                     separators=(",", ":"),
                 ).encode("utf-8"),
                 headers={"content-type": "application/json; charset=utf-8"},

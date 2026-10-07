@@ -130,13 +130,58 @@ class SetupAssessment:
         }
 
 
-def planned_action_summary(assessment: SetupAssessment) -> str:
+def _assessment_from_as_dict(payload: Mapping[str, Any]) -> SetupAssessment:
+    """Rebuild a :class:`SetupAssessment` from its ``as_dict`` snapshot shape.
+
+    The launcher stores assessments as plain dicts in the controller snapshot;
+    the single summary builder accepts either form so there is only ever one
+    rendering of the planned actions (M5).
+    """
+    raw_steps = payload.get("steps") if isinstance(payload.get("steps"), list) else []
+    steps = tuple(
+        SetupStep(
+            step_id=str(s.get("id") or ""),
+            status=str(s.get("status") or ""),
+            detail=str(s.get("detail") or ""),
+            action_kind=str(s.get("actionKind")) if s.get("actionKind") else None,
+            blocker_codes=tuple(str(c) for c in (s.get("blockerCodes") or [])),
+            required_signer=str(s.get("requiredSigner")) if s.get("requiredSigner") else None,
+            args={str(k): v for k, v in (s.get("args") or {}).items()},
+            signatures=tuple(str(x) for x in (s.get("signatures") or [])),
+        )
+        for s in raw_steps if isinstance(s, dict)
+    )
+    return SetupAssessment(
+        registry_id=str(payload.get("registryId") or ""),
+        cluster=str(payload.get("cluster") or ""),
+        program_id=str(payload.get("programId") or ""),
+        config_pda=str(payload.get("configPda") or ""),
+        prepared=bool(payload.get("prepared")),
+        ok=bool(payload.get("ok")),
+        steps=steps,
+        refusal_code=str(payload.get("refusalCode")) if payload.get("refusalCode") else None,
+        refusal_detail=str(payload.get("refusalDetail")) if payload.get("refusalDetail") else None,
+        mutations=int(payload.get("mutations") or 0),
+    )
+
+
+def planned_action_summary(assessment: "SetupAssessment | Mapping[str, Any]") -> str:
     """A human-readable, concrete summary of what ``prepare`` would do.
 
-    This is the text the confirmation dialog must show *before* any explicit
-    approve click. It names the cluster, program, config PDA and each planned
-    action with its required signer. No key material, ever.
+    This is the ONE summary builder the confirmation dialog shows *before* any
+    explicit approve click (M5). It names the cluster, program, config PDA and
+    each planned action with its required signer and concrete args — including
+    recipient (``to=``), amount (``lamports=``), fee, rent and accounts when the
+    planner reports them. No key material, ever. Accepts either a
+    :class:`SetupAssessment` or its ``as_dict`` snapshot form.
     """
+    if isinstance(assessment, Mapping):
+        # The as_dict snapshot carries the aggregate blocker codes at the top
+        # level; carry them across so the one builder always shows them.
+        top_codes = tuple(str(c) for c in (assessment.get("blockerCodes") or []))
+        assessment = _assessment_from_as_dict(assessment)
+    else:
+        top_codes = ()
     lines = [
         f"Cluster: {assessment.cluster}",
         f"Program: {assessment.program_id}",
@@ -156,7 +201,7 @@ def planned_action_summary(assessment: SetupAssessment) -> str:
         lines.append(f"      signer: {signer}")
         if args:
             lines.append(f"      args: {args}")
-    codes = assessment.blocker_codes
+    codes = tuple(dict.fromkeys([*assessment.blocker_codes, *top_codes]))
     if codes:
         lines.append("")
         lines.append("Blockers: " + ", ".join(codes))

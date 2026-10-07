@@ -38,6 +38,20 @@ const REGISTRY_ID = process.env.ONELAYER_REGISTRY_ID ?? "gov.registry.land";
 if (!/^[A-Za-z0-9._:-]{1,128}$/.test(REGISTRY_ID)) throw new Error("ONELAYER_REGISTRY_ID is invalid");
 const REGISTRY_ID_PATTERN = new RegExp(`^${REGISTRY_ID.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
 const MARKER = "ONELAYER_SYNTHETIC_DEVNET_DEMO_V1";
+// Deployment contract version surfaced on /v1/health so a launcher or session
+// can compare the LIVE service identity to its configured profile and fail
+// closed on a mismatch (M6). It names the demo API/registry contract, not a
+// production release. Bump only on a breaking change to the health identity.
+const DEPLOYMENT_CONTRACT_VERSION = "onelayer.demo-api.health.v1";
+// The publication deployment cluster and its pinned chain identity come only
+// from the explicit publication configuration (ONELAYER_PUBLICATION_CLUSTER,
+// optionally ONELAYER_RPC_GENESIS_HASH). The runtime never falls back to a
+// solana:local default: the cluster is baked into the reserved attempt's plan
+// hash, the signer enforces it, and the publisher compares the connected RPC's
+// getGenesisHash against the pinned expected identity before reserving/signing.
+// Upper bound (lamports) on the quoted publish fee. A single publish_anchor is
+// ~5000 lamports; a quote above this bound fails closed
+// (PUBLICATION_FEE_EXCEEDS_LIMIT) instead of silently overpaying.
 const MAX_PUBLISH_FEE_LAMPORTS = 1_000_000n;
 /** Verifier batch sequences are u64; the demo stores them in a BIGINT column. */
 const U64_MAX = 0xffff_ffff_ffff_ffffn;
@@ -67,7 +81,15 @@ if (issuerSecretKey.length !== 32) throw new Error("ONELAYER_ISSUER_SECRET_FILE 
 const oidcConfig = process.env.ONELAYER_OIDC_CONFIG_FILE
   ? parseOidcConfig(JSON.parse(secret("ONELAYER_OIDC_CONFIG_FILE"))) : undefined;
 const adminCredentials = oidcConfig ? [] : parseCredentials(secret("ONELAYER_ADMIN_CREDENTIALS_FILE"));
-if (rpcUrl !== "https://api.devnet.solana.com") throw new Error("demo API is devnet-only");
+const localValidatorProfile = process.env.ONELAYER_SYNTHETIC_PROFILE === "local-validator" &&
+  process.env.ONELAYER_ADMIN_ACCESS_LAB === "1" &&
+  process.env.ONELAYER_PUBLICATION_CLUSTER === "solana:local" &&
+  REGISTRY_ID !== "gov.registry.land" && /^http:\/\/127\.0\.0\.1:[0-9]{2,5}$/.test(rpcUrl) &&
+  Boolean(process.env.ONELAYER_RPC_GENESIS_HASH);
+if (rpcUrl !== "https://api.devnet.solana.com" && !localValidatorProfile) throw new Error("demo API requires devnet or an explicit isolated local-validator lab profile");
+if (localValidatorProfile && await new PublicationRpc(rpcUrl, programId).genesisHash() !== process.env.ONELAYER_RPC_GENESIS_HASH) {
+  throw new Error("LOCAL_DEMO_GENESIS_MISMATCH");
+}
 const pool = new Pool({ connectionString: databaseUrl, max: 5, connectionTimeoutMillis: 5_000 });
 // The snapshot writer key is explicit, restart-stable configuration. It is
 // never generated, split or persisted here: without configuration the API
@@ -514,7 +536,25 @@ async function handle(request: IncomingMessage, response: ServerResponse): Promi
   }
   if (request.method === "GET" && url.pathname === "/v1/health") {
     await ensureFixture();
-    json(response, 200, { status: "ok", fixture: MARKER, cluster: "devnet" });
+    // Live deployment identity (M6): the running service reports the registry
+    // namespace, the actual deployment cluster, the pinned chain genesis, the
+    // program, config PDA and contract version it actually serves. The cluster
+    // and genesis come from the explicit publication configuration (never a
+    // hardcoded devnet): an isolated local-validator profile reports
+    // `solana:local` and its real genesis, while a legacy deployment reports
+    // `solana:devnet`. Callers compare this to their configured profile and
+    // refuse on a mismatch; a missing field is unknown and fails closed. This is
+    // read from server configuration, never from a mutable client assertion.
+    json(response, 200, {
+      status: "ok",
+      fixture: MARKER,
+      cluster: publicationConfig?.cluster ?? "solana:devnet",
+      genesisHash: publicationConfig?.genesisHash ?? null,
+      registryId: REGISTRY_ID,
+      programId,
+      configPda: configAddress,
+      contractVersion: DEPLOYMENT_CONTRACT_VERSION,
+    });
     return;
   }
   if (request.method === "POST" && internalRoute) {

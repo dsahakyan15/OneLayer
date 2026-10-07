@@ -43,7 +43,7 @@ export function parseTrustPolicy(value: unknown, minimumRevision: number): Trust
   timestamp(p.validUntil);
   if (!text(p.genesisHash) || !text(p.registryId) || !hex(p.programIdHex) || !hex(p.configPdaHex)) throw new TypeError("invalid trust binding");
   if (!Array.isArray(p.schemaVersions) || p.schemaVersions.length === 0 || p.schemaVersions.some((v: unknown) => v !== 1)) throw new TypeError("unsupported schema policy");
-  if (!Array.isArray(p.registryVersions) || p.registryVersions.length === 0 || p.registryVersions.some((v: unknown) => typeof v !== "string" || !/^[1-9][0-9]*$/.test(v) || BigInt(v) > 18446744073709551615n)) throw new TypeError("invalid registry versions");
+  if (!Array.isArray(p.registryVersions) || p.registryVersions.length === 0 || p.registryVersions.some((v: unknown) => typeof v !== "string" || !/^(0|[1-9][0-9]*)$/.test(v) || BigInt(v) > 18446744073709551615n)) throw new TypeError("invalid registry versions");
   if (!Array.isArray(p.issuers) || p.issuers.length === 0) throw new TypeError("missing trusted issuers");
   const ids = new Set<string>();
   for (const value of p.issuers) {

@@ -104,10 +104,26 @@ service_healthy() {
   [[ "$body" == *'"status":"ok"'* || "$body" == *'"status": "ok"'* ]]
 }
 
-# The native stack records which registry namespace it is serving at startup
-# (deploy/devnet-demo/native: record_stack_identity). A running stack must not
-# be reused for a different namespace: an explicit isolated request must never
-# silently bind to a legacy gov.registry.land stack (ADR-0010).
+# The live service reports the registry namespace it actually serves on
+# /v1/health (M6). This is the authoritative identity: it comes from the running
+# service's HTTP response, never from a mutable env var or a local file. A
+# missing registryId is treated as unknown and fails closed.
+health_identity_registry() {
+  local body
+  body=$(curl -fsS --max-time 4 --noproxy '*' http://127.0.0.1:8090/v1/health 2>/dev/null) || { echo ""; return 0; }
+  /usr/bin/python3 - "$body" <<'PY'
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    print(str(data.get("registryId") or ""))
+except Exception:
+    print("")
+PY
+}
+
+# The native stack also records a sidecar identity
+# (deploy/devnet-demo/native: record_stack_identity). This is now only a
+# CROSS-CHECK: the authoritative identity is the live service's /v1/health.
 stack_identity_registry() {
   local native_root="${ONELAYER_NATIVE_STATE_DIR:-$demo_dir/.runtime/native}"
   local identity="$native_root/pids/stack-identity.json"
@@ -125,25 +141,35 @@ PY
 
 check_stack_identity() {
   local requested="${ONELAYER_REGISTRY_ID:-gov.registry.land}"
-  local serving
-  serving=$(stack_identity_registry)
-  if [[ -z "$serving" ]]; then
-    note "stack identity: unknown (no identity recorded by this stack)"
-    return 0
+  local live sidecar
+  live=$(health_identity_registry)
+  if [[ -z "$live" ]]; then
+    echo "" >&2
+    echo "live-demo: STACK IDENTITY UNKNOWN — the live service did not report a registryId on /v1/health." >&2
+    echo "live-demo: refusing to reuse the running stack (a missing identity fails closed, never accepted)." >&2
+    echo "live-demo: restart the stack so it reports its identity: ./deploy/devnet-demo/live-demo stop && ./deploy/devnet-demo/live-demo start" >&2
+    return 1
   fi
-  if [[ "$serving" == "$requested" ]]; then
-    note "stack identity: serving '$serving' — matches the requested namespace"
-    return 0
+  if [[ "$live" != "$requested" ]]; then
+    echo "" >&2
+    echo "live-demo: NAMESPACE MISMATCH — refusing to reuse the running stack." >&2
+    echo "live-demo: the running stack serves '$live' (from its live /v1/health)," >&2
+    echo "live-demo: but '$requested' was requested." >&2
+    echo "live-demo: stop the stack and start it with the requested namespace:" >&2
+    echo "live-demo:   ./deploy/devnet-demo/live-demo stop" >&2
+    echo "live-demo:   ONELAYER_REGISTRY_ID=$requested ./deploy/devnet-demo/live-demo start" >&2
+    echo "live-demo: a running stack is never silently re-pointed to another namespace." >&2
+    return 1
   fi
-  echo "" >&2
-  echo "live-demo: NAMESPACE MISMATCH — refusing to reuse the running stack." >&2
-  echo "live-demo: the running stack serves '$serving'," >&2
-  echo "live-demo: but '$requested' was requested." >&2
-  echo "live-demo: stop the stack and start it with the requested namespace:" >&2
-  echo "live-demo:   ./deploy/devnet-demo/live-demo stop" >&2
-  echo "live-demo:   ONELAYER_REGISTRY_ID=$requested ./deploy/devnet-demo/live-demo start" >&2
-  echo "live-demo: a running stack is never silently re-pointed to another namespace." >&2
-  return 1
+  note "stack identity: live service serves '$live' — matches the requested namespace"
+  # Cross-check only: the sidecar, when present, must agree with the live
+  # service. It is never authoritative on its own.
+  sidecar=$(stack_identity_registry)
+  if [[ -n "$sidecar" && "$sidecar" != "$live" ]]; then
+    echo "live-demo: note — sidecar cross-check disagrees (sidecar '$sidecar' vs live '$live');" >&2
+    echo "live-demo: the live service is authoritative; the stale sidecar is ignored." >&2
+  fi
+  return 0
 }
 
 wait_for_health() {
@@ -284,6 +310,16 @@ EOF
 # ---------------------------------------------------------------- commands
 
 case "$command" in
+  check-scenario)
+    exec /usr/bin/python3 "$scripts/open-local.py" --check-scenario
+    ;;
+  open-local)
+    exec /usr/bin/python3 "$scripts/open-local.py"
+    ;;
+  local)
+    note "explicit synthetic localhost profile; no devnet transactions"
+    exec node --experimental-transform-types "$repo_root/apps/demo-api/scripts/local-demo.ts"
+    ;;
   check)
     select_private_state
     report_namespace

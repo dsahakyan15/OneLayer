@@ -109,9 +109,8 @@ export class WorkflowPublicationRuntime {
   /** Acquires (or reuses) this worker's lease, without reserving an attempt. */
   private async leaseFor(registryId: string, worker: string, operationId?: string): Promise<PublicationLease | null> {
     const current = await this.store.leaseFor(registryId, worker);
-    if (current !== null && (operationId === undefined || current.operationId === operationId)) return current;
-    if (operationId !== undefined) return null;
-    return this.store.claim(registryId, worker);
+    if (current !== null && (operationId === undefined || current.operationId === operationId)) return this.store.renew(current);
+    return this.store.claim(registryId, worker, 30000, 100, operationId);
   }
 
   /** No-send review of what the next approval would sign. */

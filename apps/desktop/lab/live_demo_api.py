@@ -56,6 +56,7 @@ from live_demo_session import (
     TransportError,
     build_loopback_url,
     decode_base64url,
+    decode_json_body,
     encode_base64url,
     loopback_origin,
 )
@@ -114,6 +115,15 @@ REGISTRY_ID = "gov.registry.land"
 # switched implicitly.
 REGISTRY_ID_ENV = "ONELAYER_REGISTRY_ID"
 SYNTHETIC_PROFILE_ENV = "ONELAYER_SYNTHETIC_PROFILE"
+# The publication cluster + pinned chain identity the launcher expects. The
+# default is the public devnet; an explicit local profile sets
+# ONELAYER_PUBLICATION_CLUSTER=solana:local and ONELAYER_RPC_GENESIS_HASH=<the
+# local validator's actual getGenesisHash>. The launcher refuses a review whose
+# cluster does not match this profile and never assumes devnet.
+PUBLICATION_CLUSTER_ENV = "ONELAYER_PUBLICATION_CLUSTER"
+RPC_GENESIS_HASH_ENV = "ONELAYER_RPC_GENESIS_HASH"
+DEFAULT_PUBLICATION_CLUSTER = "solana:devnet"
+_CLUSTER_TEXT = re.compile(r"^[A-Za-z0-9:._-]{1,64}$")
 
 RECORD_STATUSES = ("ACTIVE", "ARCHIVED", "PENDING", "DISPUTED")
 DISCLOSURE_MODES = ("FULL_RECORD", "SELECTIVE_FIELDS")
@@ -175,10 +185,13 @@ _BASE64URL = re.compile(r"^[A-Za-z0-9_-]+$")
 _IDEMPOTENCY = re.compile(r"^[A-Za-z0-9_-]{16,64}$")
 _PUBKEY = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 _SIGNATURE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{64,96}$")
+_OPERATION_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_IDENT = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 _INTENT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 _QR_HASH = re.compile(r"^[A-Za-z0-9_-]{43}$")
 _SIGNED_TX_B64 = re.compile(r"^[A-Za-z0-9+/]+={0,2}$")
 _REGISTRY_ID_TEXT = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+_WORKFLOW_RECORD = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 _TIMESTAMP = re.compile(r"^[A-Za-z0-9:.+T-]{1,64}$")
 
 MAX_PACKAGE_BYTES = 1 << 20
@@ -215,6 +228,33 @@ def configured_registry_id(environ: Mapping[str, str] | None = None) -> str:
     return raw
 
 
+def configured_publication_cluster(environ: Mapping[str, str] | None = None) -> str:
+    """The publication cluster this launcher profile expects.
+
+    Defaults to public devnet. A local-validator profile sets
+    ``ONELAYER_PUBLICATION_CLUSTER=solana:local`` explicitly; nothing switches
+    the devnet default implicitly.
+    """
+    env = os.environ if environ is None else environ
+    raw = env.get(PUBLICATION_CLUSTER_ENV)
+    if raw is None or raw == "":
+        return DEFAULT_PUBLICATION_CLUSTER
+    if not _CLUSTER_TEXT.match(raw):
+        raise ValueError(f"{PUBLICATION_CLUSTER_ENV} is not a valid cluster label")
+    return raw
+
+
+def configured_genesis_hash(environ: Mapping[str, str] | None = None) -> str | None:
+    """The pinned expected genesis hash, or ``None`` for a known public cluster."""
+    env = os.environ if environ is None else environ
+    raw = env.get(RPC_GENESIS_HASH_ENV)
+    if raw is None or raw == "":
+        return None
+    if not _HASH_HEX.match(raw) and not _PUBKEY.match(raw):
+        raise ValueError(f"{RPC_GENESIS_HASH_ENV} is not a valid genesis hash")
+    return raw
+
+
 @dataclass(frozen=True)
 class LiveDemoProfile:
     """The fixed loopback service set. There is no way to add an endpoint.
@@ -228,12 +268,20 @@ class LiveDemoProfile:
     demo_api_origin: str
     verifier_origin: str
     registry_id: str = REGISTRY_ID
+    publication_cluster: str = DEFAULT_PUBLICATION_CLUSTER
+    expected_genesis_hash: str | None = None
 
     def __post_init__(self) -> None:
         loopback_origin(self.demo_api_origin)
         loopback_origin(self.verifier_origin)
         if not _REGISTRY_ID_TEXT.match(self.registry_id):
             raise ValueError("registry_id is not a valid registry id")
+        if not _CLUSTER_TEXT.match(self.publication_cluster):
+            raise ValueError("publication_cluster is not a valid cluster label")
+        if self.expected_genesis_hash is not None and not (
+            _HASH_HEX.match(self.expected_genesis_hash) or _PUBKEY.match(self.expected_genesis_hash)
+        ):
+            raise ValueError("expected_genesis_hash is not a valid genesis hash")
 
     @classmethod
     def local(cls, *, registry_id: str | None = None) -> "LiveDemoProfile":
@@ -241,7 +289,18 @@ class LiveDemoProfile:
             demo_api_origin=f"http://127.0.0.1:{DEMO_API_PORT}",
             verifier_origin=f"http://127.0.0.1:{VERIFIER_PORT}",
             registry_id=registry_id if registry_id is not None else configured_registry_id(),
+            publication_cluster=configured_publication_cluster(),
+            expected_genesis_hash=configured_genesis_hash(),
         )
+
+    @property
+    def expected_cluster(self) -> str:
+        """The cluster a durable review must report to be approvable here."""
+        return self.publication_cluster
+
+    @property
+    def is_local_cluster(self) -> bool:
+        return self.publication_cluster == "solana:local"
 
     @property
     def is_legacy_registry(self) -> bool:
@@ -895,6 +954,20 @@ class VerificationReport:
     disclosed_fields: Mapping[str, Any] = field(default_factory=dict)
     explorer_url: str | None = None
     package_hash: PackageHashResult | None = None
+    # /v2 strict detail (M2). The overall ``status`` is the honest lifecycle
+    # answer (UNKNOWN until an authenticated lifecycle source exists); the proof
+    # status is surfaced separately so "proof VERIFIED + overall UNKNOWN" is
+    # visible instead of being conflated with a current-verifiable result.
+    result_version: int | None = None
+    proofs_status: str | None = None
+    registry_id: str | None = None
+    registry_status: str | None = None
+    lifecycle_status: str | None = None
+    lifecycle_code: str | None = None
+    checked_slot: str | None = None
+    observed_indexed_through_slot: str | None = None
+    observed_finalized_head_slot: str | None = None
+    observed_lag_slots: str | None = None
 
     @property
     def is_verified(self) -> bool:
@@ -920,6 +993,16 @@ class VerificationReport:
             "disclosedFields": dict(self.disclosed_fields),
             "explorerUrl": self.explorer_url,
             "packageHash": self.package_hash.as_dict() if self.package_hash else None,
+            "resultVersion": self.result_version,
+            "proofsStatus": self.proofs_status,
+            "registryId": self.registry_id,
+            "registryStatus": self.registry_status,
+            "lifecycleStatus": self.lifecycle_status,
+            "lifecycleCode": self.lifecycle_code,
+            "checkedSlot": self.checked_slot,
+            "observedIndexedThroughSlot": self.observed_indexed_through_slot,
+            "observedFinalizedHeadSlot": self.observed_finalized_head_slot,
+            "observedLagSlots": self.observed_lag_slots,
         }
 
 
@@ -990,6 +1073,92 @@ def normalize_verification_result(
         disclosed_fields=dict(disclosed),
         explorer_url=explorer_url,
         package_hash=package_hash,
+    )
+
+
+def normalize_verification_result_v2(
+    payload: Any,
+    *,
+    package_hash: PackageHashResult | None = None,
+    explorer_url: str | None = None,
+) -> VerificationReport:
+    """Turn a ``/v2/verify`` response into a UI-safe report (strict, versioned).
+
+    The /v2 wire contract is authoritative (``resultVersion == 2``); there is no
+    fallback to the /v1 shape and nothing here may claim proven currentness.
+    Nested ``proofs`` / ``registry`` / ``incidents`` / ``lifecycle`` are parsed
+    strictly and their checked/observed slots are normalized. The overall
+    ``status`` is the honest verdict — ``UNKNOWN`` until a complete,
+    authenticated lifecycle source exists — while the proof status is surfaced
+    separately so "proof VERIFIED + overall UNKNOWN" is visible. A response that
+    is not a well-formed v2 body is ``INVALID`` and discloses nothing.
+    """
+
+    def invalid(code: str) -> VerificationReport:
+        return VerificationReport(
+            status=INVALID,
+            code=code,
+            certificate_id="",
+            package_hash=package_hash,
+            explorer_url=explorer_url,
+            result_version=2,
+        )
+
+    if not isinstance(payload, dict) or payload.get("resultVersion") != 2:
+        return invalid("VERIFIER_RESPONSE_INVALID")
+
+    raw_status = payload.get("status")
+    status = raw_status if isinstance(raw_status, str) and raw_status in KNOWN_VERIFICATION_STATUSES else INVALID
+    if raw_status != status:
+        # Unrecognized status is treated as INVALID and claims nothing.
+        return invalid(VERIFICATION_STATUS_UNKNOWN)
+    code = _string_or_none(payload.get("code"))
+
+    proofs = payload.get("proofs") if isinstance(payload.get("proofs"), dict) else {}
+    registry = payload.get("registry") if isinstance(payload.get("registry"), dict) else {}
+    incidents = payload.get("incidents") if isinstance(payload.get("incidents"), dict) else {}
+    lifecycle = payload.get("lifecycle") if isinstance(payload.get("lifecycle"), dict) else {}
+    reported = lifecycle.get("reported") if isinstance(lifecycle.get("reported"), dict) else {}
+
+    disclosed = payload.get("disclosedFields")
+    disclosure_mode = payload.get("disclosureMode")
+    if status == INVALID:
+        # A failed verification must not disclose any field value.
+        disclosed = {}
+        disclosure_mode = None
+    elif not isinstance(disclosed, dict):
+        disclosed = {}
+
+    warnings = payload.get("warnings")
+    if not isinstance(warnings, list):
+        warnings = []
+    clean_warnings = tuple(item for item in warnings if isinstance(item, str))[:16]
+
+    return VerificationReport(
+        status=status,
+        code=code,
+        certificate_id=_report_certificate_id(payload.get("certificateId")),
+        batch_sequence=_string_or_none(payload.get("batchSequence")),
+        solana_slot=_string_or_none(proofs.get("anchorSlot")),
+        record_version=_string_or_none(payload.get("recordVersion")),
+        current_record_version=_string_or_none(reported.get("currentRecordVersion")),
+        certificate_lifecycle=_string_or_none(reported.get("certificateStatus")) or _string_or_none(lifecycle.get("status")),
+        incident_index_status=_string_or_none(incidents.get("status")),
+        warnings=clean_warnings,
+        disclosure_mode=disclosure_mode if isinstance(disclosure_mode, str) else None,
+        disclosed_fields=dict(disclosed),
+        explorer_url=explorer_url,
+        package_hash=package_hash,
+        result_version=2,
+        proofs_status=_string_or_none(proofs.get("status")),
+        registry_id=_string_or_none(registry.get("registryId")),
+        registry_status=_string_or_none(registry.get("status")),
+        lifecycle_status=_string_or_none(lifecycle.get("status")),
+        lifecycle_code=_string_or_none(lifecycle.get("code")),
+        checked_slot=_string_or_none(proofs.get("anchorSlot")),
+        observed_indexed_through_slot=_string_or_none(incidents.get("indexedThroughSlot")),
+        observed_finalized_head_slot=_string_or_none(incidents.get("finalizedHeadSlot")),
+        observed_lag_slots=_string_or_none(incidents.get("lagSlots")),
     )
 
 
@@ -1484,6 +1653,279 @@ def _peek_certificate_id(package_bytes: bytes) -> str | None:
 # --------------------------------------------------------------------------
 
 
+# --------------------------------------------------------------------------
+# Durable workflow publication (M1) — the real /v2/admin/workflow/publications
+# consumer. This is the reviewed-intent → approved reserved attempt → finalized
+# anchor → certificate path. The legacy /v1 facade is not an acceptable live
+# workflow consumer; the launcher drives THIS surface.
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DurableMember:
+    event_id: str
+    record_id: str
+    version: int
+    operation: str
+    payload_hash: str
+
+
+@dataclass(frozen=True)
+class DurableSimulation:
+    ok: bool
+    error: str | None
+    units_consumed: int | None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"ok": self.ok, "error": self.error, "unitsConsumed": self.units_consumed}
+
+
+@dataclass(frozen=True)
+class DurablePublicationReview:
+    """The reviewed publication exactly as the server reports it (H3/r5).
+
+    ``attemptPlanHash`` is the per-attempt approval commitment over the exact
+    reserved bytes (semantic intent + lifetime + fee + message). It is the value
+    the operator approves and passes to ``run`` as ``approvedAttemptPlanHash``;
+    a new signature is never produced without it. ``None`` means there is nothing
+    to approve (blocked, or a live signed attempt already exists → reconcile).
+    Parsing is fail-closed: a malformed core review never reaches an approve.
+    """
+
+    operation_id: str
+    intent_hash: str
+    registry_id: str
+    program_id: str
+    config_pda: str
+    operator: str
+    operator_key_id: str
+    batch_sequence: str
+    registry_version: str
+    previous_anchor_hash: str
+    cursor_start: str
+    cursor_end: str
+    merkle_root: str
+    manifest_hash: str
+    leaf_count: int
+    members: tuple[DurableMember, ...]
+    blocked_reason: str | None
+    attempt_states: tuple[tuple[int, str], ...]
+    has_signed_attempt: bool
+    has_live_signed_attempt: bool
+    attempt_plan_hash: str | None
+    attempt_no: int | None
+    cluster: str
+    fee_lamports: str
+    fee_limit_lamports: str
+    segment_pda: str | None
+    segment_index: int | None
+    blockhash: str | None
+    last_valid_block_height: str | None
+    message_base64: str | None
+    simulation: DurableSimulation | None
+
+    @property
+    def can_approve(self) -> bool:
+        """True only when a new signature is needed and a plan is reserved.
+
+        A live signed attempt needs reconciliation (no approval); a blocked
+        operation or an already-consumed plan never arms a new signature.
+        """
+        return self.attempt_plan_hash is not None and self.blocked_reason is None
+
+    def as_dict(self) -> dict[str, Any]:
+        """The exact hash/fee/lifetime/message plan the review card must show."""
+        return {
+            "operationId": self.operation_id,
+            "intentHash": self.intent_hash,
+            "registryId": self.registry_id,
+            "programId": self.program_id,
+            "configPda": self.config_pda,
+            "operator": self.operator,
+            "operatorKeyId": self.operator_key_id,
+            "batchSequence": self.batch_sequence,
+            "registryVersion": self.registry_version,
+            "previousAnchorHash": self.previous_anchor_hash,
+            "cursorStart": self.cursor_start,
+            "cursorEnd": self.cursor_end,
+            "merkleRoot": self.merkle_root,
+            "manifestHash": self.manifest_hash,
+            "leafCount": self.leaf_count,
+            "members": [
+                {
+                    "eventId": m.event_id, "recordId": m.record_id, "version": m.version,
+                    "operation": m.operation, "payloadHash": m.payload_hash,
+                }
+                for m in self.members
+            ],
+            "blockedReason": self.blocked_reason,
+            "attemptStates": [{"attemptNo": n, "state": s} for n, s in self.attempt_states],
+            "hasSignedAttempt": self.has_signed_attempt,
+            "hasLiveSignedAttempt": self.has_live_signed_attempt,
+            # Per-attempt approval commitment (H3) + reserved lifetime/fee/message.
+            "attemptPlanHash": self.attempt_plan_hash,
+            "attemptNo": self.attempt_no,
+            "cluster": self.cluster,
+            "feeLamports": self.fee_lamports,
+            "feeLimitLamports": self.fee_limit_lamports,
+            "segmentPda": self.segment_pda,
+            "segmentIndex": self.segment_index,
+            "blockhash": self.blockhash,
+            "lastValidBlockHeight": self.last_valid_block_height,
+            "messageBase64": self.message_base64,
+            "simulation": self.simulation.as_dict() if self.simulation else None,
+        }
+
+
+def _durable_members(value: Any) -> tuple[DurableMember, ...]:
+    if not isinstance(value, list) or len(value) > 512:
+        raise ProtocolError("error", "review.members is malformed")
+    members: list[DurableMember] = []
+    for index, item in enumerate(value):
+        if not isinstance(item, dict):
+            raise ProtocolError("error", f"review.members[{index}] is invalid")
+        version = item.get("version")
+        if not isinstance(version, int) or version < 1:
+            raise ProtocolError("error", f"review.members[{index}].version is invalid")
+        members.append(DurableMember(
+            event_id=_require_string(item.get("eventId"), f"review.members[{index}].eventId", _IDENT),
+            record_id=_require_string(item.get("recordId"), f"review.members[{index}].recordId", _IDENT),
+            version=version,
+            operation=_require_string(item.get("operation"), f"review.members[{index}].operation", _IDENT),
+            payload_hash=_require_string(item.get("payloadHash"), f"review.members[{index}].payloadHash", _HASH_HEX),
+        ))
+    return tuple(members)
+
+
+def _durable_simulation(value: Any) -> DurableSimulation | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ProtocolError("error", "review.simulation is malformed")
+    ok = value.get("ok")
+    if not isinstance(ok, bool):
+        raise ProtocolError("error", "review.simulation.ok is invalid")
+    units = value.get("unitsConsumed")
+    return DurableSimulation(
+        ok=ok,
+        error=_string_or_none(value.get("error")),
+        units_consumed=units if isinstance(units, int) and units >= 0 else None,
+    )
+
+
+def _durable_review(operation_id: str, review: Any) -> DurablePublicationReview:
+    if not isinstance(review, dict):
+        raise ProtocolError("error", "publication review is malformed")
+    plan_hash = review.get("attemptPlanHash")
+    if plan_hash is not None and not (isinstance(plan_hash, str) and _HASH_HEX.match(plan_hash)):
+        raise ProtocolError("error", "review.attemptPlanHash is invalid")
+    attempt_no = review.get("attemptNo")
+    if attempt_no is not None and not (isinstance(attempt_no, int) and attempt_no >= 1):
+        raise ProtocolError("error", "review.attemptNo is invalid")
+
+    def opt_str(key: str) -> str | None:
+        return _string_or_none(review.get(key))
+
+    def req_str(key: str) -> str:
+        value = review.get(key)
+        if not isinstance(value, str) or not _IDENT.match(value):
+            raise ProtocolError("error", f"review.{key} is malformed")
+        return value
+
+    raw_states = review.get("attemptStates")
+    states: list[tuple[int, str]] = []
+    if isinstance(raw_states, list):
+        for item in raw_states[:64]:
+            if isinstance(item, dict) and isinstance(item.get("attemptNo"), int) and isinstance(item.get("state"), str):
+                states.append((int(item["attemptNo"]), item["state"]))
+    segment_index = review.get("segmentIndex")
+    leaf_count = review.get("leafCount")
+    return DurablePublicationReview(
+        operation_id=operation_id,
+        intent_hash=_require_string(review.get("intentHash"), "review.intentHash", _HASH_HEX),
+        registry_id=req_str("registryId"),
+        program_id=_require_string(review.get("programId"), "review.programId", _PUBKEY),
+        config_pda=_require_string(review.get("configPda"), "review.configPda", _PUBKEY),
+        operator=_require_string(review.get("operator"), "review.operator", _PUBKEY),
+        operator_key_id=req_str("operatorKeyId"),
+        batch_sequence=_require_int_string(review.get("batchSequence"), "review.batchSequence"),
+        registry_version=_require_int_string(review.get("registryVersion"), "review.registryVersion"),
+        previous_anchor_hash=opt_str("previousAnchorHash") or "",
+        cursor_start=_require_int_string(review.get("cursorStart"), "review.cursorStart"),
+        cursor_end=_require_int_string(review.get("cursorEnd"), "review.cursorEnd"),
+        merkle_root=_require_string(review.get("merkleRoot"), "review.merkleRoot", _HASH_HEX),
+        manifest_hash=_require_string(review.get("manifestHash"), "review.manifestHash", _HASH_HEX),
+        leaf_count=leaf_count if isinstance(leaf_count, int) and leaf_count >= 0 else 0,
+        members=_durable_members(review.get("members")),
+        blocked_reason=opt_str("blockedReason"),
+        attempt_states=tuple(states),
+        has_signed_attempt=bool(review.get("hasSignedAttempt")),
+        has_live_signed_attempt=bool(review.get("hasLiveSignedAttempt")),
+        attempt_plan_hash=plan_hash,
+        attempt_no=attempt_no,
+        cluster=req_str("cluster"),
+        fee_lamports=_require_int_string(review.get("feeLamports"), "review.feeLamports"),
+        fee_limit_lamports=_require_int_string(review.get("feeLimitLamports"), "review.feeLimitLamports"),
+        segment_pda=opt_str("segmentPda"),
+        segment_index=segment_index if isinstance(segment_index, int) and segment_index >= 0 else None,
+        blockhash=opt_str("blockhash"),
+        last_valid_block_height=opt_str("lastValidBlockHeight"),
+        message_base64=opt_str("messageBase64"),
+        simulation=_durable_simulation(review.get("simulation")),
+    )
+
+
+def _workflow_record_id(value: Any) -> str:
+    return _require_string(value, "recordId", _WORKFLOW_RECORD)
+
+
+def _draft_id(value: Any) -> str:
+    return _require_string(value, "draftId", _OPERATION_ID)
+
+
+def _workflow_version(value: Any, minimum: int = 0) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= 2147483647:
+        raise ProtocolError("error", "workflow version is malformed")
+    return value
+
+
+def _workflow_operation(value: Any) -> str:
+    if value not in ("upsert", "tombstone"):
+        raise ProtocolError("error", "workflow operation is malformed")
+    return value
+
+
+def _workflow_payload(value: Any) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ProtocolError("error", "workflow payload is malformed")
+    try:
+        encoded = json.dumps(dict(value), ensure_ascii=False, allow_nan=False).encode("utf8")
+    except (TypeError, ValueError, UnicodeError):
+        raise ProtocolError("error", "workflow payload is malformed") from None
+    if len(encoded) > 65536:
+        raise ProtocolError("error", "workflow payload is too large")
+    return json.loads(encoded)
+
+
+def _workflow_result(value: Any, label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ProtocolError("error", f"{label} response is malformed")
+    # Read endpoints expose database column names; mutation receipts expose
+    # camelCase. Normalize both into the same UI contract.
+    result = dict(value)
+    for public, stored in (("draftId", "draft_id"), ("recordId", "record_id"),
+                           ("payloadHash", "payload_hash"), ("baseVersion", "base_version")):
+        if public not in result and stored in result:
+            result[public] = result[stored]
+    _draft_id(result.get("draftId"))
+    _workflow_version(result.get("revision"), minimum=1)
+    _workflow_version(result.get("baseVersion"))
+    _require_string(result.get("payloadHash"), "payloadHash", _HASH_HEX)
+    if result.get("state") not in ("DRAFT", "SUBMITTED", "APPROVED", "REJECTED", "COMMITTED"):
+        raise ProtocolError("error", "workflow state is malformed")
+    return result
+
+
 class LiveDemoApi:
     """Records / publish / certificate / verify adapters for the demo launcher.
 
@@ -1529,9 +1971,56 @@ class LiveDemoApi:
 
     # -- session -----------------------------------------------------------
 
-    def sign_in(self) -> SessionSummary:
-        """Sign in as the demo operator; the password is read from /dev/shm."""
-        return self._session.sign_in()
+    def sign_in(self, identity: str = "operator") -> SessionSummary:
+        """Sign in as one configured demo identity (password from the private file).
+
+        The identity is a username; the returned role/permissions come from the
+        server session only.
+        """
+        return self._session.sign_in(identity)
+
+    def served_identity(self) -> dict[str, Any]:
+        """The live demo-api identity from ``/v1/health`` (server configuration).
+
+        Returns the served registry/cluster/genesis/program/config identity. A
+        missing or malformed field is left absent so a caller fails closed.
+        """
+        response = self._session.request_bytes("GET", "/v1/health")
+        payload = decode_json_body(response.body)
+        if response.status != 200 or not isinstance(payload, dict):
+            raise ProtocolError("error", "health response is malformed")
+
+        def text(key: str) -> str | None:
+            value = payload.get(key)
+            return value if isinstance(value, str) and value else None
+
+        return {
+            "status": text("status"),
+            "registryId": text("registryId"),
+            "cluster": text("cluster"),
+            "genesisHash": text("genesisHash"),
+            "programId": text("programId"),
+            "configPda": text("configPda"),
+            "contractVersion": text("contractVersion"),
+        }
+
+    def verify_served_identity(self) -> dict[str, Any]:
+        """Compare the served live identity to this profile; fail closed on drift.
+
+        The launcher never asserts a fixed devnet: it requires the running stack
+        to report exactly the configured namespace and cluster, and (when pinned)
+        the configured genesis hash. A missing field is a mismatch, not a pass.
+        """
+        served = self.served_identity()
+        mismatches: list[str] = []
+        if served.get("registryId") != self._profile.registry_id:
+            mismatches.append("registryId")
+        if served.get("cluster") != self._profile.expected_cluster:
+            mismatches.append("cluster")
+        expected_genesis = self._profile.expected_genesis_hash
+        if expected_genesis is not None and served.get("genesisHash") != expected_genesis:
+            mismatches.append("genesisHash")
+        return {"served": served, "matches": not mismatches, "mismatches": mismatches}
 
     def refresh(self) -> SessionSummary:
         return self._session.refresh()
@@ -1840,6 +2329,219 @@ class LiveDemoApi:
             raise ProtocolError("error", "status response is malformed")
         return dict(response.payload)
 
+    # -- registry workflow drafts (role-aware /v2) -------------------------
+    #
+    # The durable draft lifecycle: discover → create → read → edit (revise) →
+    # submit → a DIFFERENT authenticated approver approve/reject → commit. The
+    # commit produces the outbox row the durable publication review later
+    # reserves. Every call is authorized by the server session; the renderer
+    # never decides the role or the scope.
+
+    def list_workflow_drafts(self, after: str | None = None) -> dict[str, Any]:
+        path = "/v2/admin/workflow/drafts"
+        if after is not None:
+            if not _OPERATION_ID.match(after):
+                raise ProtocolError("error", "draft cursor is malformed")
+            path += "?after=" + after
+        response = self._session.request_json("GET", path)
+        if not isinstance(response.payload, dict) or not isinstance(response.payload.get("drafts"), list):
+            raise ProtocolError("error", "draft list is malformed")
+        return dict(response.payload)
+
+    def read_workflow_draft(self, draft_id: str) -> dict[str, Any]:
+        response = self._session.request_json("GET", f"/v2/admin/workflow/drafts/{_draft_id(draft_id)}")
+        if not isinstance(response.payload, dict):
+            raise ProtocolError("error", "draft is malformed")
+        return dict(response.payload)
+
+    def create_workflow_draft(
+        self,
+        *,
+        record_id: str,
+        base_version: int,
+        operation: str,
+        payload: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        body = {
+            "recordId": _workflow_record_id(record_id),
+            "baseVersion": _workflow_version(base_version),
+            "operation": _workflow_operation(operation),
+            "payload": _workflow_payload(payload),
+        }
+        response = self._session.request_json(
+            "POST", "/v2/admin/workflow/drafts", json_body=body, idempotency_key=idempotency_key
+        )
+        return _workflow_result(response.payload, "draft")
+
+    def edit_workflow_draft(
+        self,
+        draft_id: str,
+        *,
+        expected_revision: int,
+        operation: str,
+        payload: Mapping[str, Any],
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        body = {
+            "expectedRevision": _workflow_version(expected_revision, minimum=1),
+            "operation": _workflow_operation(operation),
+            "payload": _workflow_payload(payload),
+        }
+        response = self._session.request_json(
+            "POST", f"/v2/admin/workflow/drafts/{_draft_id(draft_id)}/edit",
+            json_body=body, idempotency_key=idempotency_key,
+        )
+        return _workflow_result(response.payload, "draft")
+
+    def _workflow_action(
+        self,
+        draft_id: str,
+        action: str,
+        *,
+        expected_revision: int,
+        payload_hash: str,
+        base_version: int,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        if not _HASH_HEX.match(payload_hash):
+            raise ProtocolError("error", "payload hash is malformed")
+        body = {
+            "expectedRevision": _workflow_version(expected_revision, minimum=1),
+            "payloadHash": payload_hash,
+            "baseVersion": _workflow_version(base_version),
+        }
+        response = self._session.request_json(
+            "POST", f"/v2/admin/workflow/drafts/{_draft_id(draft_id)}/{action}",
+            json_body=body, idempotency_key=idempotency_key,
+        )
+        return _workflow_result(response.payload, "draft")
+
+    def submit_workflow_draft(self, draft_id: str, **binding: Any) -> dict[str, Any]:
+        return self._workflow_action(draft_id, "submit", **binding)
+
+    def approve_workflow_draft(self, draft_id: str, **binding: Any) -> dict[str, Any]:
+        return self._workflow_action(draft_id, "approve", **binding)
+
+    def reject_workflow_draft(self, draft_id: str, **binding: Any) -> dict[str, Any]:
+        return self._workflow_action(draft_id, "reject", **binding)
+
+    def commit_workflow_draft(self, draft_id: str, **binding: Any) -> dict[str, Any]:
+        return self._workflow_action(draft_id, "commit", **binding)
+
+    def read_workflow_record_version(self, record_id: str, version: str | int = "latest") -> dict[str, Any]:
+        if version != "latest" and not (isinstance(version, int) and version >= 1):
+            raise ProtocolError("error", "record version is malformed")
+        response = self._session.request_json(
+            "GET", f"/v2/admin/workflow/records/{_workflow_record_id(record_id)}/versions/{version}"
+        )
+        if not isinstance(response.payload, dict):
+            raise ProtocolError("error", "record version is malformed")
+        return dict(response.payload)
+
+    # -- durable workflow publication (M1) --------------------------------
+    #
+    # The real reviewed-intent → approved reserved attempt → finalized anchor →
+    # certificate consumer. The operator approves the exact reserved bytes via
+    # `approvedAttemptPlanHash`; this layer never signs or holds an issuer key.
+    # A receipt/result always comes from the trusted backend, never a
+    # renderer-held key. There is no fallback to the legacy /v1 facade.
+
+    def durable_publications(self) -> dict[str, Any]:
+        """Open/blocked operations + finalized anchors for the served registry."""
+        response = self._session.request_json("GET", "/v2/admin/workflow/publications")
+        if not isinstance(response.payload, dict):
+            raise ProtocolError("error", "publications response is malformed")
+        return dict(response.payload)
+
+    def review_publication(self, operation_id: str | None = None) -> DurablePublicationReview:
+        """Reserve/reuse the next unsigned attempt and return its exact plan.
+
+        This is a no-sign/no-send review: it returns the reserved
+        ``attemptPlanHash`` over the exact message + lifetime + fee. Calling it
+        again returns the same plan (it does not reserve a second attempt).
+        """
+        body: dict[str, Any] = {}
+        if operation_id is not None:
+            body["operationId"] = _require_string(operation_id, "operationId", _OPERATION_ID)
+        response = self._session.request_json(
+            "POST", "/v2/admin/workflow/publications/review", json_body=body
+        )
+        payload = response.payload if isinstance(response.payload, dict) else {}
+        returned_op = _require_string(payload.get("operationId"), "operationId", _OPERATION_ID)
+        return _durable_review(returned_op, payload.get("review"))
+
+    def run_publication(
+        self,
+        *,
+        approved_attempt_plan_hash: str | None,
+        approved_intent_hash: str | None = None,
+        operation_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Advance one durable step.
+
+        A NEW signature requires ``approved_attempt_plan_hash`` — the exact
+        ``attemptPlanHash`` returned by :meth:`review_publication`. A stale or
+        missing plan never arms a new lifetime (the backend refuses with
+        ``PUBLICATION_ATTEMPT_PLAN_MISMATCH`` /
+        ``PUBLICATION_INTENT_APPROVAL_REQUIRED``). Reconciliation of an already
+        live signed attempt passes ``approved_attempt_plan_hash=None`` and needs
+        no approval. ``approved_intent_hash`` is optional defence-in-depth.
+        """
+        body: dict[str, Any] = {}
+        if operation_id is not None:
+            body["operationId"] = _require_string(operation_id, "operationId", _OPERATION_ID)
+        if approved_attempt_plan_hash is not None:
+            body["approvedAttemptPlanHash"] = _require_string(
+                approved_attempt_plan_hash, "approvedAttemptPlanHash", _HASH_HEX
+            )
+        if approved_intent_hash is not None:
+            body["approvedIntentHash"] = _require_string(
+                approved_intent_hash, "approvedIntentHash", _HASH_HEX
+            )
+        response = self._session.request_json(
+            "POST", "/v2/admin/workflow/publications/run", json_body=body
+        )
+        if not isinstance(response.payload, dict):
+            raise ProtocolError("error", "publication run response is malformed")
+        return dict(response.payload)
+
+    def issue_workflow_certificate(
+        self,
+        operation_id: str,
+        record_id: str,
+        version: int,
+        *,
+        disclosed_paths: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        """Issue a certificate from a FINALIZED workflow operation.
+
+        The server enforces object/record AND every disclosed field path against
+        the session's resource policy; an omitted disclosure is FULL_RECORD and
+        requires unrestricted access. Idempotent per (operation, record, version,
+        disclosure).
+        """
+        op = _require_string(operation_id, "operationId", _OPERATION_ID)
+        rid = _workflow_record_id(record_id)
+        if not isinstance(version, int) or version < 1:
+            raise ProtocolError("error", "version is invalid")
+        body: dict[str, Any] = {"recordId": rid, "version": version}
+        if disclosed_paths is not None:
+            paths = []
+            for path in disclosed_paths:
+                if not isinstance(path, str) or not (_FIELD_PATH.match(path) or "." in path):
+                    raise ProtocolError("error", "disclosed field path is invalid")
+                paths.append(path)
+            if len(paths) != len(set(paths)):
+                raise ProtocolError("error", "disclosed field path is duplicated")
+            body["disclosedPaths"] = paths
+        response = self._session.request_json(
+            "POST", f"/v2/admin/workflow/publications/{op}/certificate", json_body=body
+        )
+        if not isinstance(response.payload, dict):
+            raise ProtocolError("error", "workflow certificate response is malformed")
+        return dict(response.payload)
+
     # -- verify ------------------------------------------------------------
 
     def verify_package(
@@ -1897,7 +2599,7 @@ class LiveDemoApi:
         try:
             response = self._verifier_json(
                 "POST",
-                "/v1/verify",
+                "/v2/verify",
                 {"certificatePackage": encode_base64url(package_bytes), "requiredCommitment": "finalized"},
             )
         except LiveDemoError as error:
@@ -1915,7 +2617,7 @@ class LiveDemoApi:
         explorer_url = None
         if isinstance(response, dict) and isinstance(response.get("certificateId"), str):
             explorer_url = self._explorer_for(response["certificateId"])
-        return normalize_verification_result(response, package_hash=hash_result, explorer_url=explorer_url)
+        return normalize_verification_result_v2(response, package_hash=hash_result, explorer_url=explorer_url)
 
     def verify_package_file(
         self,
@@ -2012,6 +2714,8 @@ class LiveDemoApi:
     # -- internals ---------------------------------------------------------
 
     def _explorer_for(self, certificate_id: str) -> str | None:
+        if self._profile.is_local_cluster:
+            return None
         # A verifier-supplied id never reaches a request path unvalidated.
         if not isinstance(certificate_id, str) or not _CERTIFICATE_ID.match(certificate_id):
             return None

@@ -13,6 +13,7 @@ import {
   SESSION_TTL_MS,
   type AdminSession,
 } from "../src/admin-session.ts";
+import { demoPermissions } from "../src/admin-permissions.ts";
 
 const credentials = parseCredentials(
   JSON.stringify({ operator: "operator-password-0123456789", auditor: "auditor-password-0123456789" }),
@@ -171,4 +172,30 @@ test("deployment credentials can narrow access and reject malformed or elevated 
   ]) {
     assert.throws(() => parseCredentials(JSON.stringify({ ...config, operator: entry })), TypeError);
   }
+});
+
+test("audit.export exists and belongs only to the correctly scoped roles", () => {
+  assert.ok(demoPermissions("auditor").includes("audit.export"));
+  assert.ok(demoPermissions("chief_admin").includes("audit.export"));
+  for (const role of ["operator", "registry_worker", "registry_approver", "identity_admin", "key_holder", "storage_custodian"] as const) {
+    assert.equal(demoPermissions(role).includes("audit.export"), false, `${role} must not export audit evidence`);
+    assert.equal(demoPermissions(role).includes("audit.read"), role === "operator", "audit.read alone never implies export");
+  }
+  // A deployment credential may carry the permission only inside its role ceiling.
+  const config = {
+    operator: { password: "operator-password-0123456789", permissions: ["audit.export"] },
+    auditor: "auditor-password-0123456789",
+  };
+  assert.throws(() => parseCredentials(JSON.stringify(config)), TypeError, "operator may not be granted audit.export");
+  const auditorScoped = parseCredentials(JSON.stringify({
+    operator: "operator-password-0123456789",
+    auditor: { password: "auditor-password-0123456789", permissions: ["audit.read", "audit.export"] },
+  }));
+  assert.deepEqual(auditorScoped.find(entry => entry.username === "auditor")?.permissions, ["audit.read", "audit.export"]);
+  const chiefScoped = parseCredentials(JSON.stringify({
+    operator: "operator-password-0123456789",
+    auditor: "auditor-password-0123456789",
+    chief_admin: { password: "chief-password-0123456789", permissions: ["audit.read", "audit.export"] },
+  }));
+  assert.deepEqual(chiefScoped.find(entry => entry.username === "chief_admin")?.permissions, ["audit.read", "audit.export"]);
 });

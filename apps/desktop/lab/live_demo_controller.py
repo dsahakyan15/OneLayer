@@ -91,6 +91,13 @@ OPERATION_ISSUE = "issue_certificate"
 OPERATION_SAVE_PACKAGE = "save_package"
 OPERATION_SAVE_QR = "save_qr"
 OPERATION_VERIFY = "verify_file"
+# Durable workflow operations (M1): these drive the /v2/admin/workflow adapter,
+# never the legacy /v1 facade. A new signature is bound to the reviewed
+# attemptPlanHash; the receipt/result comes from the backend (no issuer key here).
+OPERATION_DURABLE_REVIEW = "durable_review"
+OPERATION_DURABLE_RUN = "durable_run"
+OPERATION_DURABLE_CERT = "durable_issue_certificate"
+OPERATION_DURABLE_LIST = "durable_publications"
 
 # Launcher-local refusal codes (the server's own codes pass through unchanged).
 SESSION_CHANGED = "SESSION_CHANGED"
@@ -156,6 +163,11 @@ class LiveDemoController:
         self._verify_pending = False
         self._error: dict[str, str] | None = None
         self._setup_assessment: dict[str, Any] | None = None
+        # Durable workflow state (M1). The review holds the exact reserved
+        # attemptPlanHash; approval binds it and the result comes from the backend.
+        self._durable_review: Any = None
+        self._durable_result: dict[str, Any] | None = None
+        self._durable_cert: dict[str, Any] | None = None
 
     # -- construction helpers ---------------------------------------------
 
@@ -199,6 +211,7 @@ class LiveDemoController:
         """Everything the pages render. Contains no secret material."""
         with self._lock:
             review = self._review
+            durable_review = self._durable_review
             profile = self._api.profile
             return {
                 "mode": self._mode,
@@ -216,6 +229,12 @@ class LiveDemoController:
                 "signed": bool(review is not None and review.intent_id in self._signed_intents),
                 "publishState": self._publish_state,
                 "certificate": self._issued.as_dict() if self._issued is not None else None,
+                # Durable workflow (M1): exact reserved attemptPlanHash/fees/
+                # lifetime/message the operator reviews and approves.
+                "durableReview": durable_review.as_dict() if durable_review is not None else None,
+                "durableCanApprove": bool(durable_review is not None and durable_review.can_approve),
+                "durableResult": dict(self._durable_result) if self._durable_result is not None else None,
+                "durableCertificate": dict(self._durable_cert) if self._durable_cert is not None else None,
                 "savedPackage": self._saved_package,
                 "savedQr": self._saved_qr,
                 "report": self._report.as_dict() if self._report is not None else None,
@@ -294,6 +313,10 @@ class LiveDemoController:
             OPERATION_SAVE_PACKAGE: self.save_package,
             OPERATION_SAVE_QR: self.save_qr,
             OPERATION_VERIFY: self.verify_file,
+            OPERATION_DURABLE_REVIEW: self.durable_review,
+            OPERATION_DURABLE_RUN: self.durable_run,
+            OPERATION_DURABLE_CERT: self.durable_issue_certificate,
+            OPERATION_DURABLE_LIST: self.durable_publications,
             "assess_setup": self.assess_setup,
             "prepare_setup": self.prepare_setup,
         }.get(operation)
@@ -577,6 +600,109 @@ class LiveDemoController:
             self._set_review(updated)
         self._emit("review", self._review_payload())
         return updated
+
+    # -- durable workflow (M1) -------------------------------------------
+    #
+    # These drive the /v2/admin/workflow/publications adapter end-to-end:
+    # review reserves the exact attemptPlanHash, run binds it (a new signature is
+    # impossible without it), and the certificate is issued from a FINALIZED
+    # operation under the server's object/field policy. No issuer/operator private
+    # key is ever held here: the plan, receipt and result come from the backend.
+
+    def durable_review(self, *, operation_id: str | None = None):
+        """Reserve/reuse the next unsigned attempt and bind the displayed plan.
+
+        This is a no-sign/no-send review. ``can_approve`` on the returned review
+        is the only thing that arms a run; a live signed attempt or a blocked
+        operation never does.
+        """
+        generation = self._begin()
+        review = self._api.review_publication(operation_id)
+        with self._lock:
+            self._require_session(generation)
+            self._durable_review = review
+            self._durable_result = None
+        self._emit("durable", {"review": review.as_dict()})
+        return review
+
+    def durable_run(
+        self,
+        *,
+        approved_attempt_plan_hash: str | None,
+        approved_intent_hash: str | None = None,
+    ) -> dict[str, Any]:
+        """Advance one durable step, bound to the reviewed attemptPlanHash.
+
+        A NEW signature requires ``approved_attempt_plan_hash`` — exactly the
+        value the operator saw and approved. A drifted/missing plan is refused by
+        the backend before any signing. Reconciliation of a live signed attempt
+        passes ``None`` and needs no approval. The run result (receipt, tx,
+        anchor) is produced by the backend; this launcher never signs.
+        """
+        with self._lock:
+            review = self._durable_review
+            if review is None:
+                raise ControllerError("NO_REVIEW")
+            # Bind the approval to the plan actually displayed. A caller cannot
+            # approve a hash that was never shown.
+            if approved_attempt_plan_hash is not None and approved_attempt_plan_hash != review.attempt_plan_hash:
+                raise ControllerError("APPROVAL_STALE")
+            if approved_attempt_plan_hash is not None and not review.can_approve:
+                raise ControllerError("APPROVAL_REQUIRED")
+            # A NEW signature is impossible without an approval: when the review
+            # still needs signing (can_approve) and no hash was approved, refuse
+            # before any request — there is no auto-confirm shortcut. A run with
+            # no hash is only ever reconciliation of a live signed attempt.
+            if approved_attempt_plan_hash is None and review.can_approve:
+                raise ControllerError("APPROVAL_REQUIRED")
+            if review.cluster != self._api.profile.expected_cluster:
+                raise ControllerError("CLUSTER_REFUSED")
+        generation = self._begin()
+        result = self._api.run_publication(
+            approved_attempt_plan_hash=approved_attempt_plan_hash,
+            approved_intent_hash=approved_intent_hash,
+            operation_id=review.operation_id,
+        )
+        with self._lock:
+            self._require_session(generation)
+            self._durable_result = result
+        self._emit("durable", {"review": review.as_dict(), "result": result})
+        return result
+
+    def durable_publications(self) -> dict[str, Any]:
+        """Open/blocked operations + finalized anchors for the served registry."""
+        generation = self._begin()
+        payload = self._api.durable_publications()
+        with self._lock:
+            self._require_session(generation)
+        self._emit("durable", {"publications": payload})
+        return payload
+
+    def durable_issue_certificate(
+        self,
+        *,
+        operation_id: str,
+        record_id: str,
+        version: int,
+        disclosed_paths: Sequence[str] | None = None,
+    ) -> dict[str, Any]:
+        """Issue a certificate from a FINALIZED workflow operation.
+
+        The server enforces the record/field scope; an omitted disclosure is
+        FULL_RECORD and requires unrestricted access. The renderer never decides
+        authorization — it only states the requested paths.
+        """
+        chosen = tuple(disclosed_paths) if disclosed_paths is not None else DEFAULT_DISCLOSED_PATHS
+        paths = tuple(sorted(dict.fromkeys(chosen)))
+        generation = self._begin()
+        issued = self._api.issue_workflow_certificate(
+            operation_id, record_id, version, disclosed_paths=list(paths)
+        )
+        with self._lock:
+            self._require_session(generation)
+            self._durable_cert = issued
+        self._emit("durable", {"certificate": issued})
+        return issued
 
     # -- certificates -----------------------------------------------------
 

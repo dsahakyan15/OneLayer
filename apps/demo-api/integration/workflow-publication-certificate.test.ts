@@ -153,3 +153,26 @@ test("workflow -> reviewed publication -> certificate verifies; lifecycle stays 
     (error: { code?: string }) => error.code === "PUBLICATION_VERSION_NOT_IN_OPERATION",
   );
 });
+
+test('the initial registry version zero projects a finalized certificate anchor unchanged', {timeout:60000}, async t => {
+  const {pool} = await isolatedPostgres(t);
+  const chain = new FakeChain();
+  chain.mutate(s => { s.config.currentRegistryVersion = 0n; });
+  const keys = {idKey:new Uint8Array(32).fill(7),fieldKeyMaster:new Uint8Array(32).fill(8)};
+  const runtime = new WorkflowPublicationRuntime(pool,chain,new TestSigner(),{
+    registryId:REGISTRY,programId:PROGRAM_ID,configPda:CONFIG_PDA,operatorKeyId:'synthetic-operator',keys,
+    cluster:TEST_CLUSTER,genesisHash:TEST_GENESIS,
+  },approvalService());
+  await append(pool,'initial-version',{status:'ACTIVE',area:1250});
+  const reviewed = await runtime.review(REGISTRY,'worker');
+  assert.equal(reviewed.review.registryVersion,'0');
+  await runtime.run(REGISTRY,'worker',{attemptPlanHash:reviewed.review.attemptPlanHash!,actor:APPROVAL_ACTOR,device:APPROVAL_DEVICE},reviewed.operationId);
+  assert.equal((await runtime.run(REGISTRY,'worker',undefined,reviewed.operationId)).status,'FINALIZED');
+  const issued = await issueWorkflowCertificate({pool,registryId:REGISTRY,programId:PROGRAM_ID,keys,
+    issuerSecretKey:ISSUER_SEED,issuerKeyId:ISSUER_KEY_ID,publicBaseUrl:'http://127.0.0.1:8091',now:()=>new Date()},
+    {operationId:reviewed.operationId,recordId:'initial-version',version:1,disclosedPaths:['payload.status']});
+  const stored = (await pool.query('SELECT package_base64url FROM demo_certificate WHERE certificate_id=$1',[issued.certificateId])).rows[0];
+  assert.equal(decodeCertificatePackageBase64url(stored.package_base64url).body.anchor.registryVersion,0n);
+  assert.equal((await pool.query('SELECT registry_version::text AS version FROM demo_anchor')).rows[0].version,'0');
+  await assert.rejects(pool.query('UPDATE demo_anchor SET registry_version=-1'),/check constraint/);
+});

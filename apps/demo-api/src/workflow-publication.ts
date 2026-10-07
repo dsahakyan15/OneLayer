@@ -37,7 +37,7 @@ export async function journal(c: PoolClient, lease: PublicationLease, action: st
  */
 export class WorkflowPublicationStore {
   constructor(private pool: Pool) {}
-  async claim(registryId: string, worker: string, leaseMs = 30000, limit = 100): Promise<PublicationLease | null> {
+  async claim(registryId: string, worker: string, leaseMs = 30000, limit = 100, targetOperationId?: string): Promise<PublicationLease | null> {
     validateDuration(leaseMs);
     if (!registryId || !worker || worker.length > 128 || !Number.isSafeInteger(limit) || limit < 1 || limit > 1000) throw new PublicationError('INVALID_CLAIM');
     return workflowTransaction(this.pool, async c => {
@@ -45,6 +45,7 @@ export class WorkflowPublicationStore {
       await lockRegistryPublication(c, registryId);
       const existing = await c.query("SELECT * FROM wf_publication WHERE registry_id=$1 AND state='OPEN' FOR UPDATE",[registryId]);
       if (existing.rowCount) {
+        if (targetOperationId !== undefined && existing.rows[0].operation_id !== targetOperationId) return null;
         const active = await c.query("SELECT lease_until > clock_timestamp() AS active FROM wf_publication WHERE registry_id=$1 AND state='OPEN'",[registryId]);
         if (active.rows[0].active) return null;
         const updated = await c.query("UPDATE wf_publication SET owner=$2,fence=fence+1,lease_until=clock_timestamp()+$3*interval '1 millisecond' WHERE registry_id=$1 AND state='OPEN' RETURNING *",[registryId,worker,leaseMs]);
@@ -52,6 +53,7 @@ export class WorkflowPublicationStore {
         await journal(c,lease,'RECLAIM');
         return lease;
       }
+      if (targetOperationId !== undefined) return null;
       // The per-record version lock in workflow commits makes predecessors
       // visible before successors. Sort record IDs and versions explicitly so
       // wall-clock changes cannot reverse version order. Not a global cursor.

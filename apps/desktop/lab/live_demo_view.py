@@ -29,6 +29,7 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GLib, Gtk
 
 from launcher_view import _add_classes, _install_css, _label, _scrolled
+from live_demo_setup import planned_action_summary
 
 __all__ = ["LiveDemoPages"]
 
@@ -295,34 +296,13 @@ class LiveDemoPages:
 
     @staticmethod
     def _setup_summary_text(assessment: Mapping[str, Any]) -> str:
-        """Concrete action summary shown before the approve click."""
-        lines = [
-            "Cluster: {0}".format(assessment.get("cluster")),
-            "Program: {0}".format(assessment.get("programId")),
-            "Registry: {0}".format(assessment.get("registryId")),
-            "Config PDA: {0}".format(assessment.get("configPda")),
-            "",
-            "Planned actions:",
-        ]
-        planned = [s for s in (assessment.get("steps") or [])
-                   if isinstance(s, dict) and s.get("actionKind")]
-        if not planned:
-            lines.append("  (none — every step is already satisfied)")
-        for step in planned:
-            lines.append("  [{0}] {1}".format(step.get("status"), step.get("actionKind")))
-            if step.get("requiredSigner"):
-                lines.append("      signer: {0}".format(step.get("requiredSigner")))
-        codes = assessment.get("blockerCodes") or []
-        if codes:
-            lines.append("")
-            lines.append("Blockers: {0}".format(", ".join(str(c) for c in codes)))
-            if "GOVERNANCE_KEY_UNAVAILABLE" in codes:
-                lines.append(
-                    "The legacy registry's governance authority is permanently lost; "
-                    "governance-signed setup cannot run on this namespace.")
-        lines.append("")
-        lines.append("Approving sends real devnet transactions.")
-        return "\n".join(lines)
+        """Concrete action summary shown before the approve click (M5).
+
+        Delegates to the single shared builder so the dialog always shows the
+        full planned-action detail (recipient ``to=``, amount ``lamports=``,
+        signer, fee/rent/accounts when reported) — never a lossy re-render.
+        """
+        return planned_action_summary(assessment)
 
     def _run_setup_operation(self, operation: str) -> None:
         self._busy = True
@@ -823,17 +803,25 @@ class LiveDemoPages:
         self.certificate_error.set_text(
             save_text if save_text else _error_text(error, "issue_certificate"))
         records = snapshot.get("records") or []
-        current = self.certificate_record_combo.get_active_id()
         known = [str(item.get("internalRecordId")) for item in records if isinstance(item, dict)]
-        if known != self._certificate_record_ids:
+        # Guard the combo against a missing/disposed model (L2): querying
+        # get_active_id() or clear() without a live string model trips GTK
+        # criticals. When the model is absent we simply track the ids and skip
+        # the widget work; a later render with a live model repopulates it.
+        combo = self.certificate_record_combo
+        model = combo.get_model()
+        if model is None:
             self._certificate_record_ids = list(known)
-            self.certificate_record_combo.remove_all()
+        elif known != self._certificate_record_ids:
+            current = combo.get_active_id()
+            self._certificate_record_ids = list(known)
+            combo.remove_all()
             for record_id in known[:MAX_SHOWN_ROWS]:
-                self.certificate_record_combo.append_text(record_id)
+                combo.append_text(record_id)
             if current in known:
-                self.certificate_record_combo.set_active_id(current)
+                combo.set_active_id(current)
             elif known:
-                self.certificate_record_combo.set_active(0)
+                combo.set_active(0)
         choices = self._controller.disclosure_choices()
         for path, check in list(self.disclosure_checks.items()):
             if path not in choices:

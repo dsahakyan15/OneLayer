@@ -3,17 +3,56 @@ set -euo pipefail
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$script_dir/../../.." && pwd)
-runtime=/dev/shm/onelayer-devnet-demo
+runtime="${ONELAYER_DEMO_RUNTIME_DIR:-/dev/shm/onelayer-devnet-demo}"
 umask 077
 mkdir -p "$runtime"
-random_hex() { od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; }
-[[ -s "$runtime/internal-token" ]] || random_hex > "$runtime/internal-token"
-# Software issuer test key and demo Admin credentials: tmpfs only, never in the
-# repository, never in the browser (§5.4 test identity).
-[[ -s "$runtime/issuer-secret" ]] || random_hex > "$runtime/issuer-secret"
-if [[ ! -s "$runtime/admin-credentials.json" ]]; then
-  printf '{"operator":"%s","auditor":"%s","chief_admin":"%s"}\n' "$(random_hex)" "$(random_hex)" "$(random_hex)" > "$runtime/admin-credentials.json"
-fi
+node - "$runtime" <<'NODE'
+const fs = require('node:fs');
+const crypto = require('node:crypto');
+const path = require('node:path');
+const root = process.argv[2];
+const directory = fs.lstatSync(root);
+if (!directory.isDirectory() || directory.uid !== process.getuid() || (directory.mode & 0o077)) {
+  throw new Error('runtime requires an owned private Unix directory');
+}
+for (const name of ['internal-token','issuer-secret','admin-credentials.json','test-payer.json','program-buffer-keypair.json','onelayer_registry-keypair.json']) {
+  try {
+    const info = fs.lstatSync(path.join(root, name));
+    if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) || info.size > 65536) throw new Error('unsafe runtime file');
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+}
+const random = () => crypto.randomBytes(32).toString('hex');
+const values = {
+  'internal-token': () => random() + '\n',
+  'issuer-secret': () => random() + '\n',
+  'admin-credentials.json': () => JSON.stringify({operator:random(),auditor:random(),chief_admin:random()}) + '\n',
+};
+for (const [name, value] of Object.entries(values)) {
+  const file = path.join(root, name);
+  if (!fs.existsSync(file)) fs.writeFileSync(file, value(), {flag:'wx',mode:0o600});
+}
+if (process.env.ONELAYER_ADMIN_ACCESS_LAB === '1') {
+  if (process.env.ONELAYER_SYNTHETIC_PROFILE !== 'local-validator' || process.env.ONELAYER_PUBLICATION_CLUSTER !== 'solana:local' || !process.env.ONELAYER_REGISTRY_ID || process.env.ONELAYER_REGISTRY_ID === 'gov.registry.land') throw new Error('lab identities require explicit isolated local profile');
+  const file = path.join(root, 'admin-credentials.json');
+  const handle = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  let prior;
+  try { prior = JSON.parse(fs.readFileSync(handle, 'utf8')); } finally { fs.closeSync(handle); }
+  const roles = {operator:'operator',auditor:'auditor',chief_admin:'chief_admin','registry_worker-1':'registry_worker','registry_approver-1':'registry_approver','identity_admin-1':'identity_admin','key_holder-1':'key_holder','storage_custodian-1':'storage_custodian'};
+  const entries = {};
+  for (const [username, role] of Object.entries(roles)) {
+    const previous = prior[username];
+    const password = typeof previous === 'string' ? previous : previous?.password ?? random();
+    const actions = ['operator','registry_worker','registry_approver'].includes(role)
+      ? ['records.read','records.write','certificates.read','certificates.export']
+      : ['auditor','chief_admin'].includes(role) ? ['records.read','certificates.read'] : [];
+    entries[username] = {password,role,registryIds:[process.env.ONELAYER_REGISTRY_ID],deviceId:'demo-device-' + username,
+      resourcePolicy:{version:1,grants:actions.length ? [{registryId:process.env.ONELAYER_REGISTRY_ID,recordIds:'all',fieldPaths:'all',actions}] : []}};
+  }
+  const temp = file + '.' + process.pid + '.' + random().slice(0,8);
+  fs.writeFileSync(temp, JSON.stringify(entries) + '\n', {flag:'wx',mode:0o600});
+  fs.renameSync(temp, file);
+}
+NODE
 if [[ ! -s "$runtime/test-payer.json" ]]; then
   NO_DNA=1 solana-keygen new --no-bip39-passphrase --silent --force -o "$runtime/test-payer.json"
 fi
@@ -25,10 +64,5 @@ if [[ -s "$program_keypair" ]]; then
   cp "$program_keypair" "$runtime/onelayer_registry-keypair.json"
   chmod 600 "$runtime/onelayer_registry-keypair.json"
 fi
-chmod 600 "$runtime"/*
-chmod 644 \
-  "$runtime/internal-token" \
-  "$runtime/issuer-secret" \
-  "$runtime/admin-credentials.json"
-echo "synthetic devnet runtime initialized in tmpfs"
+echo "synthetic runtime initialized in private state"
 echo "admin demo credentials: $runtime/admin-credentials.json"

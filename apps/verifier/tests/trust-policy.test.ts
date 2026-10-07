@@ -25,3 +25,10 @@ test("strict policy parser rejects ambiguity and malformed trust material", () =
     { issuers: [{ ...policy.issuers[0], revoked: "false" }] },
   ]) assert.throws(() => parseTrustPolicy({ ...policy, ...mutation }, 1));
 });
+
+test('initial unsigned registry version zero is trustable without accepting ambiguous or negative values', () => {
+  assert.deepEqual(parseTrustPolicy({...policy,registryVersions:['0']},3).registryVersions,['0']);
+  for (const value of ['00','-1','+0','0.0','18446744073709551616']) {
+    assert.throws(()=>parseTrustPolicy({...policy,registryVersions:[value]},3),/registry versions/);
+  }
+});

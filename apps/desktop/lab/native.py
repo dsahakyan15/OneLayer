@@ -37,7 +37,7 @@ def main():
     if not Gtk.init_check()[0]:
         raise SystemExit("Native display unavailable")
     window = Gtk.Window(title="OneLayer — Demo")
-    window.set_default_size(980, 640)
+    window.set_default_size(1100, 820)
     window.connect("destroy", Gtk.main_quit)
 
     def completed(state, summary):

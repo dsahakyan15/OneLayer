@@ -5,7 +5,7 @@ export const ADMIN_PERMISSIONS = [
   "records.read", "records.draft", "records.approve", "certificates.verify", "certificates.export", "incidents.read", "access.manage", "publication.read", "publication.prepare",
   "publication.submit", "certificates.read", "certificates.issue", "backups.read",
   "backups.create", "recovery.read", "recovery.initiate", "recovery.approve",
-  "recovery.cutover", "audit.read",
+  "recovery.cutover", "audit.read", "audit.export",
   // ADR-0009: approve a version exclusion or an archival publication cancellation.
   "publication.maintenance",
 ] as const;
@@ -23,8 +23,10 @@ const policy: Record<AdminRole, readonly AdminPermission[]> = {
   identity_admin: ["access.manage"],
   key_holder: ["recovery.read"],
   storage_custodian: ["backups.read"],
-  auditor: reads,
-  chief_admin: [...reads, "recovery.approve"],
+  // Scoped evidence export is read-side custody: auditor/chief_admin only.
+  // `audit.read` alone never grants `audit.export` (monitor contract §6).
+  auditor: [...reads, "audit.export"],
+  chief_admin: [...reads, "recovery.approve", "audit.export"],
 };
 
 export function demoPermissions(role: AdminRole): readonly AdminPermission[] {

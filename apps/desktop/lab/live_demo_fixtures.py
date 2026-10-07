@@ -542,22 +542,42 @@ class FixtureStack:
 
     # -- verifier protocol ------------------------------------------------
 
+    @staticmethod
+    def _v2_envelope(body: dict[str, Any]) -> dict[str, Any]:
+        """Wrap a fixture verdict in the strict ``/v2/verify`` wire shape.
+
+        The desktop refuses anything without ``resultVersion: 2`` and reads the
+        nested proofs/registry/incidents/lifecycle. Nested values are honest
+        defaults so the overall ``status`` (what the UI chip renders) stays the
+        fixture's intended verdict.
+        """
+        status = body.get("status")
+        out: dict[str, Any] = {
+            "resultVersion": 2,
+            "proofs": {"status": "NOT_ESTABLISHED" if status == "INVALID" else "VERIFIED", "anchorSlot": "412267854"},
+            "registry": {"registryId": "gov.registry.land", "status": "NOT_ESTABLISHED" if status == "INVALID" else "CHECKED"},
+            "incidents": {"status": "NOT_CHECKED"},
+            "lifecycle": {"status": "UNKNOWN", "code": "LIFECYCLE_UNAVAILABLE"},
+        }
+        out.update(body)
+        return out
+
     def _verifier_dispatch(self, request: BaseHTTPRequestHandler) -> None:
         body = self._record_request(request)
-        if request.command != "POST" or request.path != "/v1/verify":
+        if request.command != "POST" or request.path != "/v2/verify":
             self._reply(request, 404, {"code": "NOT_FOUND"})
             return
         payload = json.loads(body.decode("utf-8")) if body else {}
         encoded = payload.get("certificatePackage")
         if not isinstance(encoded, str):
-            self._reply(request, 422, {"status": "INVALID", "code": "CERTIFICATE_FORMAT_INVALID"})
+            self._reply(request, 422, self._v2_envelope({"status": "INVALID", "code": "CERTIFICATE_FORMAT_INVALID"}))
             return
         try:
             package = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
         except (ValueError, base64.binascii.Error):  # type: ignore[attr-defined]
-            self._reply(request, 422, {"status": "INVALID", "code": "CERTIFICATE_FORMAT_INVALID"})
+            self._reply(request, 422, self._v2_envelope({"status": "INVALID", "code": "CERTIFICATE_FORMAT_INVALID"}))
             return
-        report = self._verdict(package)
+        report = self._v2_envelope(self._verdict(package))
         status = 200 if report["status"] != "INVALID" else 422
         self._reply(request, status, report)
 
