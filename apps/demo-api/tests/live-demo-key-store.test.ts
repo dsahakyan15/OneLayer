@@ -171,6 +171,8 @@ test("ensureKeyPair refuses to bless an existing invalid or unsafe file", async 
 test("ensureKeyPair refuses to write into an unsafe store", async () => {
   const looseHome = path.join(tmpdir(), `onelayer-live-demo-key-store-loose-${process.pid}`);
   await mkdir(looseHome, { mode: 0o777, recursive: true });
+  // mkdir applies the runner umask; force the unsafe mode this test exercises.
+  await chmod(looseHome, 0o777);
   try {
     await expectStoreError("KEYFILE_REJECTED", () => ensureKeyPair({ home: looseHome, keypair: keypairBytesFor(SEED) }));
   } finally {
