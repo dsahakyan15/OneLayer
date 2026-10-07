@@ -1,7 +1,7 @@
-//! CLI: `onelayer-monitor once|run --config <file>` и `verify-evidence --dir <dir>`.
+//! CLI: `onelayer-monitor once|run --config <file>` и `verify-evidence --dir <dir> [--floor <file>]`.
 
 use onelayer_monitor::chain::RpcChain;
-use onelayer_monitor::evidence::replay;
+use onelayer_monitor::evidence::{check_floor, default_floor_path, replay};
 use onelayer_monitor::monitor::{load_keys, Config, Monitor};
 use onelayer_monitor::source::PgSource;
 use std::path::PathBuf;
@@ -9,7 +9,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: onelayer-monitor once|run --config <file> [--cycles N]\n       onelayer-monitor verify-evidence --dir <dir>");
+    eprintln!("usage: onelayer-monitor once|run --config <file> [--cycles N]\n       onelayer-monitor verify-evidence --dir <dir> [--floor <file>]");
     ExitCode::from(64)
 }
 
@@ -26,6 +26,7 @@ fn start(config_path: &str) -> Result<(Config, Monitor<RpcChain, PgSource>), Str
     let keys = load_keys(&config.keys_file)?;
     let chain = RpcChain::new(&config.rpc_url)?;
     let source = PgSource::connect(&config.source_dsn)?;
+    let floor = config.floor_path();
     let monitor = Monitor::new(
         trust,
         keys,
@@ -33,8 +34,37 @@ fn start(config_path: &str) -> Result<(Config, Monitor<RpcChain, PgSource>), Str
         chain,
         source,
         &config.evidence_dir,
+        &floor,
     )?;
     Ok((config, monitor))
+}
+
+fn verify_evidence(args: &[String]) -> ExitCode {
+    let Some(dir) = arg(args, "--dir") else {
+        return usage();
+    };
+    let dir = PathBuf::from(dir);
+    let floor = arg(args, "--floor")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_floor_path(&dir));
+    match replay(&dir.join("evidence.jsonl")).and_then(|r| check_floor(&floor, &r).map(|f| (r, f)))
+    {
+        Ok((r, floor)) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "ok": true, "entries": r.entries, "head": r.head,
+                    "activeFindings": r.active.len(),
+                    "floor": floor.map(|f| serde_json::json!({"entries": f.entries, "head": f.head})),
+                })
+            );
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            println!("{}", serde_json::json!({"ok": false, "error": e}));
+            ExitCode::from(2)
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -43,24 +73,7 @@ fn main() -> ExitCode {
         return usage();
     };
     match command.as_str() {
-        "verify-evidence" => {
-            let Some(dir) = arg(&args, "--dir") else {
-                return usage();
-            };
-            match replay(&PathBuf::from(dir).join("evidence.jsonl")) {
-                Ok(r) => {
-                    println!(
-                        "{}",
-                        serde_json::json!({"ok": true, "entries": r.entries, "head": r.head, "activeFindings": r.active.len()})
-                    );
-                    ExitCode::SUCCESS
-                }
-                Err(e) => {
-                    println!("{}", serde_json::json!({"ok": false, "error": e}));
-                    ExitCode::from(2)
-                }
-            }
-        }
+        "verify-evidence" => verify_evidence(&args),
         "once" | "run" => {
             let Some(path) = arg(&args, "--config") else {
                 return usage();

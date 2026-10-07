@@ -10,7 +10,7 @@
 //   faulty-anchor --state <file> --skip <n>   // неисправный Builder: anchor с разрывом cursor
 import { createRequire } from 'node:module';
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, readdir, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -50,7 +50,15 @@ async function rpcCall(url: string, method: string, params: unknown[] = []): Pro
 async function waitFinalized(url: string, signature: string): Promise<void> {
   const deadline = Date.now() + 120_000;
   for (;;) {
-    const status = (await rpcCall(url, 'getSignatureStatuses', [[signature], { searchTransactionHistory: true }])).value[0];
+    let status: any;
+    try {
+      status = (await rpcCall(url, 'getSignatureStatuses', [[signature], { searchTransactionHistory: true }])).value[0];
+    } catch (error) {
+      // Disposable validator RPC can reset once during startup; retry until deadline.
+      if (Date.now() > deadline) throw error;
+      await new Promise(resolve => setTimeout(resolve, 250));
+      continue;
+    }
     if (status?.err) throw new Error(`transaction failed: ${JSON.stringify(status.err)}`);
     if (status?.confirmationStatus === 'finalized') return;
     if (Date.now() > deadline) throw new Error('transaction did not finalize');
@@ -185,6 +193,7 @@ async function publish() {
       seen.push(result.status);
       if (result.status === 'FINALIZED') {
         const anchor = (await pool.query('SELECT batch_sequence::text AS seq, merkle_root FROM wf_publication_anchor WHERE operation_id=$1', [lease.operationId])).rows[0];
+        await rm(home, { recursive: true, force: true });
         return { status: 'FINALIZED', operationId: lease.operationId, batchSequence: anchor.seq, merkleRoot: anchor.merkle_root, steps: seen };
       }
       if (Date.now() > deadline) throw new Error(`publication did not finalize: ${seen.join(',')}`);

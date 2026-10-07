@@ -6,15 +6,16 @@
 
 use crate::chain::{parse_pubkey, verify_chain, ChainReader, ChainView, Trust};
 use crate::detect::{detect, DetectInput, Finding, FindingKind};
-use crate::evidence::{now_unix_ms, EvidenceLog};
+use crate::evidence::{default_floor_path, now_unix_ms, EvidenceLog};
 use crate::fieldmap::CommitKeys;
 use crate::policy::{Policy, Reaction};
+use crate::securefs::{read_private, SecureReadPolicy, MAX_CONFIG_BYTES, MAX_KEY_BYTES};
 use crate::source::SourceReader;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -29,6 +30,10 @@ pub struct Config {
     /// JSON `{ "idKey": hex32, "fieldKeyMaster": hex32 }`, права 0600.
     pub keys_file: PathBuf,
     pub evidence_dir: PathBuf,
+    /// Отдельный файл внешнего floor цепочки evidence (не сам журнал).
+    /// По умолчанию `<evidence_dir>.floor.json`.
+    #[serde(default)]
+    pub evidence_floor_file: Option<PathBuf>,
     #[serde(default = "default_poll")]
     pub poll_interval_ms: u64,
     #[serde(default)]
@@ -41,8 +46,17 @@ fn default_poll() -> u64 {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, String> {
-        let text =
-            std::fs::read_to_string(path).map_err(|e| format!("config {}: {e}", path.display()))?;
+        let bytes = read_private(
+            path,
+            &SecureReadPolicy {
+                max_bytes: MAX_CONFIG_BYTES,
+                require_owner: true,
+                require_private_mode: true,
+                what: "monitor config",
+            },
+        )?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| format!("config {}: not UTF-8", path.display()))?;
         serde_json::from_str(&text).map_err(|e| format!("config {}: {e}", path.display()))
     }
 
@@ -53,20 +67,25 @@ impl Config {
             parse_pubkey(&self.config_pda)?,
         )
     }
+
+    pub fn floor_path(&self) -> PathBuf {
+        self.evidence_floor_file
+            .clone()
+            .unwrap_or_else(|| default_floor_path(&self.evidence_dir))
+    }
 }
 
 pub fn load_keys(path: &Path) -> Result<CommitKeys, String> {
-    let meta = std::fs::metadata(path).map_err(|e| format!("keys {}: {e}", path.display()))?;
-    if meta.permissions().mode() & 0o077 != 0 {
-        return Err(format!(
-            "keys {} must not be group/other accessible (chmod 600)",
-            path.display()
-        ));
-    }
-    let v: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(path).map_err(|e| format!("keys {}: {e}", path.display()))?,
-    )
-    .map_err(|e| format!("keys: {e}"))?;
+    let bytes = read_private(
+        path,
+        &SecureReadPolicy {
+            max_bytes: MAX_KEY_BYTES,
+            require_owner: true,
+            require_private_mode: true,
+            what: "monitor keys",
+        },
+    )?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|e| format!("keys: {e}"))?;
     let key = |name: &str| -> Result<[u8; 32], String> {
         let bytes = hex::decode(v[name].as_str().ok_or(format!("keys: {name} missing"))?)
             .map_err(|_| format!("keys: {name} is not hex"))?;
@@ -112,8 +131,9 @@ impl<C: ChainReader, S: SourceReader> Monitor<C, S> {
         chain: C,
         source: S,
         evidence_dir: &Path,
+        floor_path: &Path,
     ) -> Result<Self, String> {
-        let (mut log, replayed) = EvidenceLog::open(evidence_dir)?;
+        let (mut log, replayed) = EvidenceLog::open_with_floor(evidence_dir, floor_path)?;
         log.append(
             "monitor_start",
             json!({
@@ -320,5 +340,70 @@ impl<C: ChainReader, S: SourceReader> Monitor<C, S> {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "onelayer-monitor-cfg-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write(path: &Path, mode: u32, text: &str) {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(path)
+            .unwrap();
+        f.write_all(text.as_bytes()).unwrap();
+        drop(f);
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    const KEYS: &str = r#"{"idKey":"1111111111111111111111111111111111111111111111111111111111111111","fieldKeyMaster":"2222222222222222222222222222222222222222222222222222222222222222"}"#;
+
+    #[test]
+    fn config_and_keys_require_private_regular_files() {
+        let dir = tmp("modes");
+        let keys = dir.join("keys.json");
+        write(&keys, 0o600, KEYS);
+        assert!(load_keys(&keys).is_ok());
+        write(&keys, 0o640, KEYS);
+        assert!(load_keys(&keys).unwrap_err().contains("group/other"));
+        write(&keys, 0o644, KEYS);
+        assert!(load_keys(&keys).unwrap_err().contains("group/other"));
+        std::fs::remove_file(&keys).unwrap();
+        assert!(load_keys(&keys).is_err());
+
+        let config = dir.join("monitor.json");
+        let body = format!(
+            r#"{{"registryId":"r","programId":"6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo","configPda":"{}","rpcUrl":"http://127.0.0.1:1","sourceDsn":"postgresql://x","keysFile":"{}","evidenceDir":"{}"}}"#,
+            crate::chain::b58(&crate::chain::config_pda(
+                "r",
+                &parse_pubkey("6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo").unwrap()
+            )),
+            keys.display(),
+            dir.display()
+        );
+        write(&config, 0o644, &body);
+        assert!(Config::load(&config).unwrap_err().contains("group/other"));
+        write(&config, 0o600, &body);
+        let loaded = Config::load(&config).unwrap();
+        assert_eq!(
+            loaded.floor_path(),
+            PathBuf::from(format!("{}.floor.json", dir.display()))
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

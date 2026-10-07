@@ -14,4 +14,5 @@ pub mod fieldmap;
 pub mod http;
 pub mod monitor;
 pub mod policy;
+pub mod securefs;
 pub mod source;

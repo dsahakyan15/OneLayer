@@ -53,9 +53,23 @@ pub struct Replayed {
     pub head: String,
 }
 
+/// Внешний floor: последняя зафиксированная позиция цепочки, хранится
+/// отдельным файлом (не в самом журнале). Усечение/rollback хвоста журнала
+/// обнаруживается при открытии, даже если оставшаяся цепочка внутренне
+/// согласована.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Floor {
+    pub entries: u64,
+    pub head: String,
+    pub at_unix_ms: i64,
+}
+
+#[derive(Debug)]
 pub struct EvidenceLog {
     path: PathBuf,
     file: File,
+    floor_path: PathBuf,
     next_seq: u64,
     head: String,
 }
@@ -135,11 +149,103 @@ fn apply(r: &mut Replayed, e: &Entry) -> Result<(), String> {
     Ok(())
 }
 
+fn read_floor(path: &Path) -> Result<Option<Floor>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map(Some)
+            .map_err(|e| format!("EVIDENCE_FLOOR_CORRUPT {}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("evidence floor {}: {e}", path.display())),
+    }
+}
+
+/// Атомарная запись floor: tmp + fsync файла + rename + fsync каталога.
+fn write_floor(path: &Path, floor: &Floor) -> Result<(), String> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|e| format!("floor dir: {e}"))?;
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    let bytes = serde_json::to_vec(floor).expect("serializable");
+    {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| format!("floor tmp: {e}"))?;
+        f.write_all(&bytes)
+            .map_err(|e| format!("floor write: {e}"))?;
+        f.sync_all().map_err(|e| format!("floor sync: {e}"))?;
+    }
+    std::fs::rename(&tmp, path).map_err(|e| format!("floor rename: {e}"))?;
+    File::open(dir)
+        .and_then(|d| d.sync_all())
+        .map_err(|e| format!("floor dir sync: {e}"))?;
+    Ok(())
+}
+
+/// Проверяет floor против восстановленного журнала.
+///
+/// `Err` = хвост журнала откатан/удалён, либо floor отсутствует при непустом
+/// журнале (`EVIDENCE_FLOOR_MISSING`): удаление floor не должно «обнулять»
+/// защиту. Пустой журнал без floor — первый запуск, floor создаётся.
+/// Отставание floor (crash между записью строки и floor) не является потерей:
+/// вызывающий продвигает floor вперёд.
+pub fn check_floor(floor_path: &Path, replayed: &Replayed) -> Result<Option<Floor>, String> {
+    let Some(floor) = read_floor(floor_path)? else {
+        if replayed.entries > 0 {
+            return Err(format!(
+                "EVIDENCE_FLOOR_MISSING: journal has {} entries but floor {} is absent (rollback evidence)",
+                replayed.entries,
+                floor_path.display()
+            ));
+        }
+        return Ok(None);
+    };
+    if floor.entries > replayed.entries
+        || (floor.entries == replayed.entries && floor.head != replayed.head)
+    {
+        return Err(format!(
+            "EVIDENCE_TAIL_ROLLBACK: floor has {} entries head {} but log has {} entries head {}",
+            floor.entries, floor.head, replayed.entries, replayed.head
+        ));
+    }
+    Ok(Some(floor))
+}
+
+pub fn floor_from(replayed: &Replayed) -> Floor {
+    Floor {
+        entries: replayed.entries,
+        head: replayed.head.clone(),
+        at_unix_ms: now_unix_ms(),
+    }
+}
+
+/// Путь floor по умолчанию: sibling каталога evidence (`<dir>.floor.json`),
+/// то есть отдельный файл вне самого журнала.
+pub fn default_floor_path(dir: &Path) -> PathBuf {
+    let mut s = dir.as_os_str().to_owned();
+    s.push(".floor.json");
+    PathBuf::from(s)
+}
+
 impl EvidenceLog {
+    /// Открывает журнал с floor по умолчанию рядом с каталогом evidence.
     pub fn open(dir: &Path) -> Result<(Self, Replayed), String> {
+        Self::open_with_floor(dir, &default_floor_path(dir))
+    }
+
+    /// `floor_path` обязан быть отдельным путём (не самим журналом). Для
+    /// deployment рекомендуется отдельный mount; в lab достаточно отдельного
+    /// файла 0600, что исключает незаметный rollback цепочки.
+    pub fn open_with_floor(dir: &Path, floor_path: &Path) -> Result<(Self, Replayed), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("evidence dir: {e}"))?;
         let path = dir.join("evidence.jsonl");
         let replayed = replay(&path)?;
+        match check_floor(floor_path, &replayed)? {
+            Some(floor) if floor.entries == replayed.entries && floor.head == replayed.head => {}
+            _ => write_floor(floor_path, &floor_from(&replayed))?,
+        }
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -150,6 +256,7 @@ impl EvidenceLog {
             Self {
                 path,
                 file,
+                floor_path: floor_path.to_path_buf(),
                 next_seq: replayed.entries + 1,
                 head: replayed.head.clone(),
             },
@@ -161,7 +268,12 @@ impl EvidenceLog {
         &self.path
     }
 
-    /// Добавляет запись и сбрасывает её на диск до возврата. Возвращает hash записи.
+    pub fn floor_path(&self) -> &Path {
+        &self.floor_path
+    }
+
+    /// Добавляет запись, сбрасывает её на диск и продвигает floor до возврата.
+    /// Возвращает hash записи.
     pub fn append(&mut self, kind: &str, body: Json) -> Result<Entry, String> {
         let mut e = Entry {
             seq: self.next_seq,
@@ -183,6 +295,14 @@ impl EvidenceLog {
             .map_err(|err| format!("evidence sync: {err}"))?;
         self.next_seq += 1;
         self.head = hash;
+        write_floor(
+            &self.floor_path,
+            &Floor {
+                entries: e.seq,
+                head: self.head.clone(),
+                at_unix_ms: now_unix_ms(),
+            },
+        )?;
         Ok(e)
     }
 
@@ -240,5 +360,106 @@ mod tests {
             "deleted middle entry must be detected"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_file(default_floor_path(&dir));
+    }
+
+    #[test]
+    fn floor_deletion_is_refused_with_nonempty_journal() {
+        let dir = tmp("floor-missing");
+        let floor_path = default_floor_path(&dir);
+        {
+            let (mut log, _) = EvidenceLog::open(&dir).unwrap();
+            log.append("finding", json!({"key": "k1"})).unwrap();
+            log.append("finding", json!({"key": "k2"})).unwrap();
+        }
+        std::fs::remove_file(&floor_path).unwrap();
+        let err = EvidenceLog::open(&dir).unwrap_err();
+        assert!(err.contains("EVIDENCE_FLOOR_MISSING"), "{err}");
+        let replayed = replay(&dir.join("evidence.jsonl")).unwrap();
+        assert!(check_floor(&floor_path, &replayed)
+            .unwrap_err()
+            .contains("EVIDENCE_FLOOR_MISSING"));
+        // Пустой журнал без floor — легитимный первый запуск.
+        let fresh = tmp("floor-fresh");
+        assert!(EvidenceLog::open(&fresh).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&fresh).unwrap();
+        let _ = std::fs::remove_file(default_floor_path(&fresh));
+    }
+
+    #[test]
+    fn floor_detects_tail_truncation_and_head_replacement() {
+        let dir = tmp("floor-tail");
+        {
+            let (mut log, _) = EvidenceLog::open(&dir).unwrap();
+            log.append("finding", json!({"key": "k1"})).unwrap();
+            log.append("finding", json!({"key": "k2"})).unwrap();
+            log.append("finding", json!({"key": "k3"})).unwrap();
+        }
+        let floor_path = default_floor_path(&dir);
+        let floor: Floor =
+            serde_json::from_str(&std::fs::read_to_string(&floor_path).unwrap()).unwrap();
+        assert_eq!(floor.entries, 3);
+        assert_eq!(
+            floor.head,
+            replay(&dir.join("evidence.jsonl")).unwrap().head
+        );
+
+        // Усечение хвоста (внутренне целая цепочка из 2 строк) обнаруживается.
+        let text = std::fs::read_to_string(dir.join("evidence.jsonl")).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        std::fs::write(
+            dir.join("evidence.jsonl"),
+            format!("{}\n{}\n", lines[0], lines[1]),
+        )
+        .unwrap();
+        let err = EvidenceLog::open(&dir).unwrap_err();
+        assert!(err.contains("EVIDENCE_TAIL_ROLLBACK"), "{err}");
+
+        // Полная подмена цепочки на более короткую валидную тоже видна по floor.
+        std::fs::write(dir.join("evidence.jsonl"), format!("{}\n", lines[0])).unwrap();
+        let err = EvidenceLog::open(&dir).unwrap_err();
+        assert!(err.contains("EVIDENCE_TAIL_ROLLBACK"), "{err}");
+
+        // Head не совпадает на той же длине.
+        let mut tampered = floor.clone();
+        tampered.head = "00".repeat(32);
+        std::fs::write(&floor_path, serde_json::to_vec(&tampered).unwrap()).unwrap();
+        std::fs::write(dir.join("evidence.jsonl"), &text).unwrap();
+        let err = EvidenceLog::open(&dir).unwrap_err();
+        assert!(err.contains("EVIDENCE_TAIL_ROLLBACK"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_file(&floor_path);
+    }
+
+    #[test]
+    fn floor_advances_after_crash_window_and_survives_reopen() {
+        let dir = tmp("floor-crash");
+        let floor_path = default_floor_path(&dir);
+        let head_after_two = {
+            let (mut log, _) = EvidenceLog::open(&dir).unwrap();
+            log.append("finding", json!({"key": "k1"})).unwrap();
+            let e = log.append("finding", json!({"key": "k2"})).unwrap();
+            e.hash.unwrap()
+        };
+        // Имитация crash между записью строки и floor: floor отстал.
+        let stale = Floor {
+            entries: 1,
+            head: head_after_two,
+            at_unix_ms: 0,
+        };
+        std::fs::write(&floor_path, serde_json::to_vec(&stale).unwrap()).unwrap();
+        {
+            let (mut log, replayed) = EvidenceLog::open(&dir).unwrap();
+            assert_eq!(replayed.entries, 2, "отставание floor — не потеря");
+            let floor: Floor =
+                serde_json::from_str(&std::fs::read_to_string(&floor_path).unwrap()).unwrap();
+            assert_eq!(floor.entries, 2);
+            log.append("finding", json!({"key": "k3"})).unwrap();
+        }
+        let r = replay(&dir.join("evidence.jsonl")).unwrap();
+        assert_eq!(r.entries, 3);
+        std::fs::remove_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_file(&floor_path);
     }
 }
