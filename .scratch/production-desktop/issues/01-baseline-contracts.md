@@ -1,8 +1,8 @@
 # 01 — Baseline, модель угроз и обязательные контракты
 
 Status: ready-for-agent
-Execution: in-progress
-Owner: Codex
+Execution: claimed
+Owner: Codex coordinator
 Role: Coordinator
 Phase: P0
 Blocked by: none
@@ -47,3 +47,6 @@ Docs review + запуск существующих тестов по облас
 Задача создана планом 2026-09-19. На момент создания реализация ещё не была начата; актуальный результат указан выше.
 
 2026-09-19: работа начата. Частичные результаты и незакрытые критерии: [evidence](../evidence/01/report.md). Задача целиком не закрыта.
+
+
+2026-10-06: текущий ограниченный срез выполняется в `feat/pipeline-live-demo-20261006` через T3 orchestration. Полные acceptance и зависимости остаются открытыми; итоги и evidence будут опубликованы после интеграционной проверки.

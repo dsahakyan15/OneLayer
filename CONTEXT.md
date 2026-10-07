@@ -50,6 +50,10 @@ _Avoid_: backup password, center key
 Отдельное подписанное разрешение `chief_admin` на восстановление конкретного snapshot, его root и target. Оно не заменяет recovery shares.
 _Avoid_: operator confirmation, fourth share
 
+**Validated Recovery Material**:
+Расшифрованное содержимое Snapshot с проверенными schema, hashes и commitments, пригодное для следующего шага восстановления. Состояние `VALIDATED` подтверждает материал; `RESTORED` подтверждает импортированные и проверенные данные в target.
+_Avoid_: restored summary, restored hash
+
 **Retention Window**:
 Правило, по которому каждый BackupCenter хранит не более 12 snapshots и сохраняет хотя бы один Finalized Snapshot. Старейшие не-finalized snapshots удаляются первыми.
 _Avoid_: arbitrary cleanup, manual delete

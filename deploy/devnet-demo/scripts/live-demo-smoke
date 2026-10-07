@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Live-demo opt-in GTK smoke entry (B4/B5). Without ONELAYER_LIVE_DEVNET_SMOKE=1
+# it does nothing and touches no network or chain. With the flag it preflights
+# health + readiness and runs the real launcher pages against the real local
+# demo-api/verifier/signature flow; a missing governance authority reports
+# BLOCKED with "0/3 completed", never a green pass or a silent skip.
+set -euo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+exec /usr/bin/python3 "$script_dir/live_demo_smoke_gtk.py" "$@"

@@ -1,0 +1,20 @@
+[package]
+name = "onelayer-audit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "OneLayer protected audit evidence sink (ticket 13): append-only destination, capabilities, rebuild."
+
+[[bin]]
+name = "onelayer-audit"
+path = "src/main.rs"
+
+[dependencies]
+sha2.workspace = true
+hmac.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
+libc = "0.2"

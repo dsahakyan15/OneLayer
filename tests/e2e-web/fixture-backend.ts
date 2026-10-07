@@ -11,11 +11,51 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 export const OPERATOR_PASSWORD = "operator-password-0123456789";
 export const AUDITOR_PASSWORD = "auditor-password-0123456789";
 export const CHIEF_ADMIN_PASSWORD = "chief-admin-password-0123456789";
+export const REGISTRY_WORKER_PASSWORD = "registry-worker-password-0123456789";
+export const REGISTRY_APPROVER_PASSWORD = "registry-approver-password-0123456789";
 export const WALLET_ADDRESS = "9zjRUZLLE4nRvXtDkYPJDGnnLrLrGCUbHVLbdaFmMbJq";
+
+const DEPLOYMENT_REGISTRY = "gov.registry.land";
+
+/** Compatibility policy mirrored from apps/demo-api/src/admin-permissions.ts. */
+const ROLE_PERMISSIONS: Record<string, readonly string[]> = {
+  operator: ["records.read", "publication.read", "certificates.read", "backups.read", "recovery.read", "audit.read",
+    "records.draft", "publication.prepare", "publication.submit", "certificates.issue", "backups.create",
+    "recovery.initiate", "recovery.cutover"],
+  registry_worker: ["records.read", "records.draft", "certificates.read", "certificates.verify", "certificates.export"],
+  registry_approver: ["records.read", "records.approve", "publication.maintenance"],
+  identity_admin: ["access.manage"],
+  key_holder: ["recovery.read"],
+  storage_custodian: ["backups.read"],
+  auditor: ["records.read", "publication.read", "certificates.read", "backups.read", "recovery.read", "audit.read"],
+  chief_admin: ["records.read", "publication.read", "certificates.read", "backups.read", "recovery.read", "audit.read", "recovery.approve"],
+};
+
+const DEMO_ACCOUNTS: Record<string, { password: string; role: string }> = {
+  operator: { password: OPERATOR_PASSWORD, role: "operator" },
+  auditor: { password: AUDITOR_PASSWORD, role: "auditor" },
+  chief_admin: { password: CHIEF_ADMIN_PASSWORD, role: "chief_admin" },
+  registry_worker: { password: REGISTRY_WORKER_PASSWORD, role: "registry_worker" },
+  registry_approver: { password: REGISTRY_APPROVER_PASSWORD, role: "registry_approver" },
+};
 
 export interface Scenario {
   /** Verifier answer for the freshly issued certificate. */
   verification?: Record<string, unknown>;
+  /** Current /v2/verify envelope for the freshly issued certificate. */
+  verificationV2?: Record<string, unknown>;
+  /** Emulates a verifier with no /v2/verify: the browser must report the error and never request /v1/verify. */
+  verifyV2Unavailable?: boolean;
+  /** Emulates an older session DTO without permissions/registryIds/deploymentRegistryId. */
+  sessionMetadataOmitted?: boolean;
+  /** Gives every session a registry scope that excludes the deployment registry. */
+  sessionForeignRegistry?: boolean;
+  /** Fails the first workflow mutation with 503 so a retry must reuse its idempotency key. */
+  workflowUnavailableOnce?: boolean;
+  /** Provisions the workflow writer with records.approve so the route's SELF_APPROVAL rule can be exercised. */
+  workflowSelfApprovalActor?: boolean;
+  /** Clears workflow drafts, heads and idempotency records. */
+  resetWorkflow?: boolean;
   /** Simulates the on-chain RegistryConfig.pause flag. */
   registryPaused?: boolean;
   simulationFails?: boolean;
@@ -32,8 +72,27 @@ export interface Scenario {
 
 interface Session {
   username: string;
-  role: "operator" | "auditor" | "chief_admin";
+  role: string;
   csrfToken: string;
+  permissions: string[];
+  registryIds: string[];
+}
+
+interface FixtureDraft {
+  draft_id: string;
+  registry_id: string;
+  record_id: string;
+  creator: string;
+  revision: number;
+  base_version: number;
+  state: string;
+  approver: string | null;
+  committed_version: number | null;
+  payload: Record<string, unknown>;
+  payload_hash: string;
+  operation: string;
+  /** Creator and every historical editor; all of them are denied approval. */
+  editors: Set<string>;
 }
 
 interface Intent {
@@ -103,7 +162,7 @@ interface FixtureRecoveryOperation {
     merkleRoot: string;
     finalizedAt: string;
   };
-  state: "AWAITING_APPROVAL" | "APPROVED" | "RESTORED" | "FAILED";
+  state: "AWAITING_APPROVAL" | "APPROVED" | "VALIDATED" | "RESTORED" | "FAILED";
   failureCode: string | null;
   approvedBy: string | null;
   approval: Record<string, unknown> | null;
@@ -118,6 +177,8 @@ const SEGMENT_PDA = "5vJRnEr1x8ChoVvVaSBLQ3PXfBEcbLmqLgN4uWvyfHKJ";
 const SIGNATURE = "5".repeat(88);
 const CERTIFICATE_PACKAGE = "Q0VSVElGSUNBVEUtUEFDS0FHRS1GSVhUVVJF";
 const SCHEMA_ID = "land-registry-v1";
+/** A contract-shaped certificate ID for the scripted answers before any certificate is issued. */
+const FIXTURE_CERTIFICATE_ID = "1a".repeat(16);
 
 // These are test-only out-of-band custody artifacts. The fixture accepts them
 // to stand in for three valid shares; it never returns or records their text.
@@ -185,6 +246,13 @@ export function createFixtureBackend(
   const sessions = new Map<string, Session>();
   const intents = new Map<string, Intent>();
   const idempotency = new Map<string, string>();
+  // Registry workflow fixtures: drafts, committed heads per record and recorded
+  // idempotency results, mirroring the /v2/admin/workflow contract.
+  const wfDrafts = new Map<string, FixtureDraft>();
+  const wfHeads = new Map<string, number>();
+  const wfRequests = new Map<string, { requestHash: string; status: number; body: unknown }>();
+  const wfAttempts=new Map<string,{attemptId:string;actor:string;requestHash:string;action:string;recordId:string;draftId:string|null;acked:boolean;cancelled:boolean}>();
+  let workflowUnavailableConsumed = false;
   const records: Array<{
     internalRecordId: string;
     recordVersion: string;
@@ -579,6 +647,107 @@ export function createFixtureBackend(
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
   }
 
+  /** Legacy v1 envelope: the shape an older verifier serves. */
+  function defaultVerification(): Record<string, unknown> {
+    return {
+      status: "VERIFIED",
+      certificateId: certificates[0]?.certificateId ?? FIXTURE_CERTIFICATE_ID,
+      batchSequence: "1",
+      solanaSlot: "412346000",
+      incidentIndexStatus: "CHECKED",
+      indexedThroughSlot: "412346040",
+      rpcFinalizedHeadSlot: "412346050",
+      indexLagSlots: "10",
+      recordVersion: "1",
+      currentRecordVersion: "1",
+      certificateLifecycle: "ACTIVE",
+      warnings: [],
+    };
+  }
+
+  /** Current v2 envelope: a healthy certificate answers UNKNOWN, never current. */
+  function defaultVerificationV2(): Record<string, unknown> {
+    return {
+      resultVersion: 2,
+      status: "UNKNOWN",
+      code: "LIFECYCLE_UNAUTHENTICATED",
+      checkedAt: "2026-10-01T12:00:00.000Z",
+      certificateId: certificates[0]?.certificateId ?? FIXTURE_CERTIFICATE_ID,
+      recordVersion: "1",
+      batchSequence: "1",
+      proofs: { status: "VERIFIED", anchorSlot: "412346000" },
+      registry: { registryId: "gov.registry.land", status: "CHECKED" },
+      incidents: { status: "CHECKED", indexedThroughSlot: "412346040", finalizedHeadSlot: "412346050", lagSlots: "10" },
+      lifecycle: {
+        status: "UNAUTHENTICATED",
+        code: "LIFECYCLE_UNAUTHENTICATED",
+        reported: { certificateStatus: "ACTIVE", currentRecordVersion: "1" },
+      },
+      warnings: ["Current suitability is not proven. Lifecycle reports are advisory until an authenticated complete source is implemented."],
+      disclosureMode: "FULL_RECORD",
+      disclosedFields: { parcelAddress: "1 Example Street, Yerevan", cadastralNumber: "01-001-0001-0001" },
+    };
+  }
+
+  /** V2 INVALID keeps the envelope shape but establishes nothing and discloses nothing. */
+  function invalidV2(code: string): Record<string, unknown> {
+    return {
+      resultVersion: 2,
+      status: "INVALID",
+      code,
+      checkedAt: "2026-10-01T12:00:00.000Z",
+      certificateId: certificates[0]?.certificateId ?? FIXTURE_CERTIFICATE_ID,
+      recordVersion: "1",
+      batchSequence: "1",
+      proofs: { status: "NOT_ESTABLISHED" },
+      registry: { registryId: "gov.registry.land", status: "NOT_ESTABLISHED" },
+      incidents: { status: "NOT_CHECKED" },
+      lifecycle: { status: "UNKNOWN", code: "LIFECYCLE_UNAVAILABLE" },
+      warnings: [],
+    };
+  }
+
+  /** Sorted-key canonical JSON; the same shape the backend hashes. */
+  function canonical(value: unknown): string {
+    if (value === null || typeof value !== "object") return JSON.stringify(value);
+    if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+    const record = value as Record<string, unknown>;
+    return "{" + Object.keys(record).sort().map((key) => JSON.stringify(key) + ":" + canonical(record[key])).join(",") + "}";
+  }
+
+  function workflowHash(value: unknown): string {
+    return createHash("sha256").update("ONELAYER:WORKFLOW:JSON:V1\n" + canonical(value)).digest("hex");
+  }
+
+  /** The session DTO the admin API returns; a scenario can omit the permission metadata. */
+  function sessionBody(session: Session): Record<string, unknown> {
+    const base = { role: session.role, username: session.username, csrfToken: session.csrfToken };
+    if (scenario.sessionMetadataOmitted === true) return base;
+    return {
+      ...base,
+      permissions: [...session.permissions],
+      registryIds: [...session.registryIds],
+      deploymentRegistryId: DEPLOYMENT_REGISTRY,
+    };
+  }
+
+  function draftBody(draft: FixtureDraft): Record<string, unknown> {
+    return {
+      draft_id: draft.draft_id,
+      registry_id: draft.registry_id,
+      record_id: draft.record_id,
+      creator: draft.creator,
+      revision: draft.revision,
+      base_version: draft.base_version,
+      state: draft.state,
+      approver: draft.approver,
+      committed_version: draft.committed_version,
+      payload: draft.payload,
+      payload_hash: draft.payload_hash,
+      operation: draft.operation,
+    };
+  }
+
   function sessionOf(request: IncomingMessage): Session | null {
     const cookie = /onelayer_admin_session=([^;]+)/.exec(request.headers.cookie ?? "");
     return cookie === null ? null : sessions.get(cookie[1]) ?? null;
@@ -610,6 +779,14 @@ export function createFixtureBackend(
         centers.forEach((center) => { center.folders.splice(0, center.folders.length); });
         centers.splice(5);
       }
+      if (nextScenario.resetWorkflow === true) {
+        wfDrafts.clear();
+        wfHeads.clear();
+        wfRequests.clear();
+        wfAttempts.clear();
+        workflowUnavailableConsumed = false;
+      }
+      if (nextScenario.workflowUnavailableOnce === true) workflowUnavailableConsumed = false;
       scenario = nextScenario;
       json(response, 200, { scenario });
       return;
@@ -617,20 +794,31 @@ export function createFixtureBackend(
 
     if (url.pathname === "/v1/admin/session" && method === "POST") {
       const body = await readBody(request);
-      const expected = body?.username === "operator"
-        ? OPERATOR_PASSWORD
-        : body?.username === "chief_admin" ? CHIEF_ADMIN_PASSWORD : AUDITOR_PASSWORD;
-      if ((body?.username !== "operator" && body?.username !== "auditor" && body?.username !== "chief_admin") || body?.password !== expected) {
+      const account = DEMO_ACCOUNTS[String(body?.username ?? "")];
+      if (account === undefined || body?.password !== account.password) {
         json(response, 401, { code: "INVALID_CREDENTIALS" });
         return;
       }
       const sessionId = randomUUID();
-      const session: Session = { username: body.username, role: body.username, csrfToken: randomUUID() };
+      const permissions = [...(ROLE_PERMISSIONS[account.role] ?? [])];
+      // A deliberately over-provisioned deployment variant: it exercises the
+      // workflow route's own SELF_APPROVAL rule, which the demo role policy does
+      // not otherwise reach. The browser still reads every grant from this DTO.
+      if (scenario.workflowSelfApprovalActor === true && account.role === "registry_worker" && !permissions.includes("records.approve")) {
+        permissions.push("records.approve");
+      }
+      const session: Session = {
+        username: String(body.username),
+        role: account.role,
+        csrfToken: randomUUID(),
+        permissions,
+        registryIds: [scenario.sessionForeignRegistry === true ? "gov.registry.other" : DEPLOYMENT_REGISTRY],
+      };
       sessions.set(sessionId, session);
       json(
         response,
         201,
-        { role: session.role, username: session.username, csrfToken: session.csrfToken },
+        sessionBody(session),
         `onelayer_admin_session=${sessionId}; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800`,
       );
       return;
@@ -646,6 +834,18 @@ export function createFixtureBackend(
       await handleAdmin(request, response, url, method, session);
       return;
     }
+
+    if (url.pathname.startsWith("/v2/admin/workflow/")) {
+      const session = sessionOf(request);
+      if (session === null) { json(response, 401, { code: "SESSION_REQUIRED" }); return; }
+      if (method !== "GET" && !csrfOk(request, session)) {
+        json(response, 403, { code: "CSRF_TOKEN_INVALID" });
+        return;
+      }
+      await handleWorkflow(request, response, url, method, session);
+      return;
+    }
+    if (url.pathname.startsWith("/v2/admin/")) { json(response, 404, { code: "NOT_FOUND" }); return; }
 
     const packagePath = /^\/v1\/certificates\/([0-9a-f]{32})\/package$/.exec(url.pathname);
     if (packagePath !== null && method === "GET") {
@@ -714,46 +914,239 @@ export function createFixtureBackend(
       return;
     }
 
-    if (url.pathname === "/v1/verify" && method === "POST") {
+    if ((url.pathname === "/v1/verify" || url.pathname === "/v2/verify") && method === "POST") {
+      const v2 = url.pathname === "/v2/verify";
+      // A verifier with no v2 route answers 404. The browser reports that error
+      // and never requests the legacy route; `/v1/verify` stays below for
+      // compatibility with non-browser consumers only.
+      if (v2 && scenario.verifyV2Unavailable === true) {
+        json(response, 404, { code: "NOT_FOUND" });
+        return;
+      }
       const body = await readBody(request);
       if (body?.certificatePackage !== CERTIFICATE_PACKAGE) {
-        json(response, 422, {
+        json(response, 422, v2 ? invalidV2("CERT_SIGNATURE_INVALID") : {
           status: "INVALID",
           code: "CERT_SIGNATURE_INVALID",
-          certificateId: "unknown",
+          certificateId: FIXTURE_CERTIFICATE_ID,
           batchSequence: "1",
           warnings: [],
         });
         return;
       }
       if (!registryIsWorking()) {
-        json(response, 422, {
+        json(response, 422, v2 ? invalidV2("REGISTRY_PAUSED") : {
           status: "INVALID",
           code: "REGISTRY_PAUSED",
-          certificateId: certificates[0]?.certificateId ?? "unknown",
+          certificateId: certificates[0]?.certificateId ?? FIXTURE_CERTIFICATE_ID,
           batchSequence: "1",
           warnings: [],
         });
         return;
       }
-      json(response, 200, scenario.verification ?? {
-        status: "VERIFIED",
-        certificateId: certificates[0]?.certificateId ?? "unknown",
-        batchSequence: "1",
-        solanaSlot: "412346000",
-        incidentIndexStatus: "CHECKED",
-        indexedThroughSlot: "412346040",
-        rpcFinalizedHeadSlot: "412346050",
-        indexLagSlots: "10",
-        recordVersion: "1",
-        currentRecordVersion: "1",
-        certificateLifecycle: "ACTIVE",
-        warnings: [],
-      });
+      const answer = v2 ? scenario.verificationV2 ?? defaultVerificationV2() : scenario.verification ?? defaultVerification();
+      // The wire contract answers 422 for an INVALID verdict, 200 otherwise.
+      json(response, v2 && answer.status === "INVALID" ? 422 : 200, answer);
       return;
     }
 
     json(response, 404, { code: "NOT_FOUND" });
+  }
+
+  /**
+   * /v2/admin/workflow mirror: exact routes, exact revision/hash/version binding,
+   * independent approval and idempotency scoped to the session username.
+   */
+  async function handleWorkflow(
+    request: IncomingMessage,
+    response: ServerResponse,
+    url: URL,
+    method: string,
+    session: Session,
+  ): Promise<void> {
+    const attemptRoot='/v2/admin/workflow/attempts';
+    const attemptAction=/^\/v2\/admin\/workflow\/attempts\/([a-f0-9-]{36})\/(ack|cancel)$/.exec(url.pathname);
+    const permitted=(permission:string)=>session.registryIds.includes(DEPLOYMENT_REGISTRY)&&session.permissions.includes(permission);
+    const attemptBody=(a:{attemptId:string;actor:string;action:string;recordId:string;draftId:string|null})=>{
+      const result=wfRequests.get(a.actor+'|'+a.attemptId)?.body as {draftId?:string}|undefined;
+      return {attemptId:a.attemptId,idempotencyKey:a.attemptId,state:result?'COMPLETED':'PREPARED',
+        draftId:result?.draftId??a.draftId,action:a.action,recordId:a.recordId};
+    };
+    if(url.pathname===attemptRoot||attemptAction) {
+      if(!permitted('records.read')) {json(response,403,{error:'PERMISSION_FORBIDDEN'});return;}
+      if(method==='GET'&&url.pathname===attemptRoot) {
+        json(response,200,{attempts:[...wfAttempts.values()].filter(a=>a.actor===session.username&&!a.acked&&!a.cancelled&&
+          permitted(a.action==='approve'||a.action==='reject'?'records.approve':'records.draft')).map(attemptBody)});return;
+      }
+      if(method!=='POST') {json(response,405,{error:'METHOD_NOT_ALLOWED'});return;}
+      const input=await readBody(request);
+      if(attemptAction) {
+        const a=wfAttempts.get(attemptAction[1]);
+        if(!a||a.actor!==session.username) {json(response,404,{error:'ATTEMPT_NOT_FOUND'});return;}
+        if(!permitted(a.action==='approve'||a.action==='reject'?'records.approve':'records.draft')) {json(response,403,{error:'PERMISSION_FORBIDDEN'});return;}
+        if(attemptAction[2]==='cancel') {
+          if(attemptBody(a).state==='COMPLETED') {json(response,409,{error:'ATTEMPT_ALREADY_COMPLETED'});return;}
+          a.cancelled=true;json(response,200,{cancelled:true});return;
+        }
+        if(a.cancelled) {json(response,409,{error:'ATTEMPT_CANCELLED'});return;}
+        if(attemptBody(a).state!=='COMPLETED') {json(response,409,{error:'ATTEMPT_UNCONFIRMED'});return;}
+        a.acked=true;json(response,200,{acknowledged:true});return;
+      }
+      const target=typeof input?.path==='string'?/^\/v2\/admin\/workflow\/drafts(?:\/([a-f0-9-]{36})\/(edit|submit|approve|reject|commit))?$/.exec(input.path):null;
+      if(!target||!input?.body||typeof input.body!=='object'||Array.isArray(input.body)) {json(response,400,{error:'INVALID_ATTEMPT'});return;}
+      const action=target[2]??'create';
+      if(!permitted(action==='approve'||action==='reject'?'records.approve':'records.draft')) {json(response,403,{error:'PERMISSION_FORBIDDEN'});return;}
+      const hash=workflowHash({method:'POST',path:input.path,body:input.body});
+      const prior=[...wfAttempts.values()].find(a=>a.actor===session.username&&a.requestHash===hash&&!a.acked&&!a.cancelled);
+      if(prior) {json(response,200,attemptBody(prior));return;}
+      const targetDraft=target[1]?wfDrafts.get(target[1]):null;
+      if(target[1]&&!targetDraft) {json(response,404,{error:'DRAFT_NOT_FOUND'});return;}
+      const recordId=targetDraft?.record_id??input.body.recordId;
+      if(typeof recordId!=='string') {json(response,400,{error:'INVALID_ATTEMPT'});return;}
+      const a={attemptId:randomUUID(),actor:session.username,requestHash:hash,action,recordId,draftId:target[1]??null,acked:false,cancelled:false};
+      wfAttempts.set(a.attemptId,a);json(response,200,attemptBody(a));return;
+    }
+    if(url.pathname==='/v2/admin/workflow/drafts'&&method==='GET') {
+      if(!permitted('records.read')) {json(response,403,{error:'PERMISSION_FORBIDDEN'});return;}
+      const after=url.searchParams.get('after');
+      const rows=[...wfDrafts.values()].filter(d=>!after||d.draft_id>after).sort((a,b)=>a.draft_id.localeCompare(b.draft_id));
+      const drafts=rows.slice(0,50).map(d=>{const {payload,...summary}=draftBody(d);return summary;});
+      json(response,200,{drafts,nextCursor:rows.length>50?rows[49].draft_id:null});return;
+    }
+    const createPath = url.pathname === "/v2/admin/workflow/drafts";
+    const draftPath = /^\/v2\/admin\/workflow\/drafts\/([0-9a-f-]{36})(?:\/(edit|submit|approve|reject|commit))?$/.exec(url.pathname);
+    if (!createPath && draftPath === null) { json(response, 404, { code: "NOT_FOUND" }); return; }
+    const action = draftPath === null ? null : draftPath[2] ?? null;
+    const reading = method === "GET" && draftPath !== null && action === null;
+    if (!reading && method !== "POST") { json(response, 405, { error: "METHOD_NOT_ALLOWED" }); return; }
+    const permission = reading
+      ? "records.read"
+      : action === "approve" || action === "reject" ? "records.approve" : "records.draft";
+    if (!session.registryIds.includes(DEPLOYMENT_REGISTRY) || !session.permissions.includes(permission)) {
+      json(response, 403, { error: "PERMISSION_FORBIDDEN" });
+      return;
+    }
+    const idempotencyKey = reading ? null : request.headers["idempotency-key"];
+    if (!reading && (typeof idempotencyKey !== "string" || !/^[\w.:-]{1,128}$/.test(idempotencyKey))) {
+      json(response, 400, { error: "IDEMPOTENCY_KEY_REQUIRED" });
+      return;
+    }
+    if (!reading && scenario.workflowUnavailableOnce === true && !workflowUnavailableConsumed) {
+      workflowUnavailableConsumed = true;
+      json(response, 503, { code: "UPSTREAM_UNAVAILABLE" });
+      return;
+    }
+    const body = reading ? null : await readBody(request);
+    const replayKey = session.username + "|" + String(idempotencyKey);
+    const requestHash = workflowHash({ method, path: url.pathname, body });
+    if (!reading) {
+      const attempt=wfAttempts.get(String(idempotencyKey));
+      if(attempt?.actor===session.username) {
+        if(attempt.cancelled) {json(response,409,{error:'ATTEMPT_CANCELLED'});return;}
+        if(attempt.requestHash!==requestHash) {json(response,409,{error:'IDEMPOTENCY_CONFLICT'});return;}
+      }
+      const replay = wfRequests.get(replayKey);
+      if (replay !== undefined) {
+        if (replay.requestHash !== requestHash) { json(response, 409, { error: "IDEMPOTENCY_CONFLICT" }); return; }
+        json(response, replay.status, replay.body);
+        return;
+      }
+    }
+    const answer = (status: number, payload: unknown): void => {
+      if (!reading) wfRequests.set(replayKey, { requestHash, status, body: payload });
+      json(response, status, payload);
+    };
+
+    if (createPath) {
+      const recordId = body?.recordId;
+      const baseVersion = body?.baseVersion;
+      const operation = body?.operation;
+      const payload = body?.payload;
+      if (typeof recordId !== "string" || !/^[a-zA-Z0-9_.:-]{1,128}$/.test(recordId)) { json(response, 400, { error: "INVALID_ID" }); return; }
+      if (!Number.isSafeInteger(baseVersion) || baseVersion < 0) { json(response, 400, { error: "INVALID_VERSION" }); return; }
+      if (operation !== "upsert" && operation !== "tombstone") { json(response, 400, { error: "INVALID_PAYLOAD" }); return; }
+      if (payload === null || typeof payload !== "object" || Array.isArray(payload)) { json(response, 400, { error: "INVALID_PAYLOAD" }); return; }
+      if (operation === "tombstone" && Object.keys(payload as Record<string, unknown>).length !== 0) { json(response, 400, { error: "TOMBSTONE_PAYLOAD" }); return; }
+      if ((wfHeads.get(recordId) ?? 0) !== baseVersion) { json(response, 409, { error: "BASE_VERSION_CONFLICT" }); return; }
+      const draftId = randomUUID();
+      const hash = workflowHash({ operation, payload });
+      wfDrafts.set(draftId, {
+        draft_id: draftId,
+        registry_id: DEPLOYMENT_REGISTRY,
+        record_id: recordId,
+        creator: session.username,
+        revision: 1,
+        base_version: baseVersion,
+        state: "DRAFT",
+        approver: null,
+        committed_version: null,
+        payload: payload as Record<string, unknown>,
+        payload_hash: hash,
+        operation,
+        editors: new Set([session.username]),
+      });
+      answer(201, { draftId, revision: 1, payloadHash: hash, baseVersion, state: "DRAFT" });
+      return;
+    }
+
+    const draft = wfDrafts.get(draftPath === null ? "" : draftPath[1]);
+    if (draft === undefined) { json(response, 404, { error: "DRAFT_NOT_FOUND" }); return; }
+    if (reading) { json(response, 200, draftBody(draft)); return; }
+    if (body?.expectedRevision !== draft.revision) { json(response, 409, { error: "REVISION_CONFLICT" }); return; }
+    if (draft.state === "COMMITTED") { json(response, 409, { error: "ALREADY_COMMITTED" }); return; }
+
+    if (action === "edit") {
+      const operation = body?.operation;
+      const payload = body?.payload;
+      if ((operation !== "upsert" && operation !== "tombstone") || payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+        json(response, 400, { error: "INVALID_PAYLOAD" });
+        return;
+      }
+      if (operation === "tombstone" && Object.keys(payload as Record<string, unknown>).length !== 0) { json(response, 400, { error: "TOMBSTONE_PAYLOAD" }); return; }
+      draft.revision += 1;
+      draft.operation = operation;
+      draft.payload = payload as Record<string, unknown>;
+      draft.payload_hash = workflowHash({ operation, payload });
+      draft.state = "DRAFT";
+      draft.approver = null;
+      draft.editors.add(session.username);
+      answer(200, { draftId: draft.draft_id, revision: draft.revision, payloadHash: draft.payload_hash, baseVersion: draft.base_version, state: "DRAFT" });
+      return;
+    }
+    if (body?.payloadHash !== draft.payload_hash || body?.baseVersion !== draft.base_version) {
+      json(response, 409, { error: "APPROVAL_BINDING_MISMATCH" });
+      return;
+    }
+
+    if (action === "submit") {
+      if (draft.state !== "DRAFT") { json(response, 409, { error: "INVALID_STATE" }); return; }
+      draft.state = "SUBMITTED";
+    } else if (action === "approve" || action === "reject") {
+      if (draft.state !== "SUBMITTED") { json(response, 409, { error: "INVALID_STATE" }); return; }
+      if (draft.creator === session.username || draft.editors.has(session.username)) { json(response, 403, { error: "SELF_APPROVAL" }); return; }
+      draft.state = action === "approve" ? "APPROVED" : "REJECTED";
+      draft.approver = session.username;
+    } else if (action === "commit") {
+      if (draft.state !== "APPROVED") { json(response, 409, { error: "APPROVAL_REQUIRED" }); return; }
+      if ((wfHeads.get(draft.record_id) ?? 0) !== draft.base_version) { json(response, 409, { error: "BASE_VERSION_CONFLICT" }); return; }
+      const version = draft.base_version + 1;
+      wfHeads.set(draft.record_id, version);
+      draft.state = "COMMITTED";
+      draft.committed_version = version;
+      answer(200, {
+        draftId: draft.draft_id,
+        revision: draft.revision,
+        payloadHash: draft.payload_hash,
+        baseVersion: draft.base_version,
+        state: "COMMITTED",
+        committed: { recordId: draft.record_id, version, payloadHash: draft.payload_hash },
+      });
+      return;
+    } else {
+      json(response, 405, { error: "METHOD_NOT_ALLOWED" });
+      return;
+    }
+    answer(200, { draftId: draft.draft_id, revision: draft.revision, payloadHash: draft.payload_hash, baseVersion: draft.base_version, state: draft.state });
   }
 
   async function handleAdmin(
@@ -764,7 +1157,7 @@ export function createFixtureBackend(
     session: Session,
   ): Promise<void> {
     if (url.pathname === "/v1/admin/session" && method === "GET") {
-      json(response, 200, { role: session.role, username: session.username, csrfToken: session.csrfToken });
+      json(response, 200, sessionBody(session));
       return;
     }
     if (url.pathname === "/v1/admin/session" && method === "DELETE") {
@@ -925,7 +1318,7 @@ export function createFixtureBackend(
       }
       if (method === "POST" && (action === "approve" || action === "approval")) {
         if (session.role !== "chief_admin") { json(response, 403, { code: "ROLE_FORBIDDEN" }); return; }
-        if (operation.state === "APPROVED" || operation.state === "RESTORED") {
+        if (operation.state === "APPROVED" || operation.state === "VALIDATED" || operation.state === "RESTORED") {
           json(response, 200, recoveryOperationBody(operation, true));
           return;
         }
@@ -974,7 +1367,7 @@ export function createFixtureBackend(
       }
       if (method === "POST" && action === "restore") {
         if (session.role !== "operator") { json(response, 403, { code: "ROLE_FORBIDDEN" }); return; }
-        if (operation.state === "RESTORED") {
+        if (operation.state === "VALIDATED" || operation.state === "RESTORED") {
           json(response, 200, recoveryOperationBody(operation, true));
           return;
         }
@@ -989,24 +1382,9 @@ export function createFixtureBackend(
           json(response, 409, { code: operation.failureCode });
           return;
         }
-        operation.state = "RESTORED";
-        operation.restoredTarget = {
-          targetId: operation.target,
-          stateSummary: {
-            records: 2,
-            recordVersions: 2,
-            certificatePackages: 0,
-            qrMetadata: 0,
-            proofs: 0,
-            roots: 1,
-            manifests: 1,
-            anchorReferences: 1,
-            operationHistory: timeline.length,
-          },
-          restoredAt: fixtureNow(),
-          plaintextCleared: true,
-        };
-        record("RESTORE_COMPLETED", session, {
+        operation.state = "VALIDATED";
+        operation.restoredTarget = null;
+        record("RECOVERY_MATERIAL_VALIDATED", session, {
           recoveryOperationId: operation.operationId,
           snapshotId: operation.snapshotId,
           merkleRoot: operation.merkleRoot,

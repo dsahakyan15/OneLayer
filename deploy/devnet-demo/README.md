@@ -231,3 +231,92 @@ If a stack is already running under the previous state path, stop it using its
 previous environment before switching. `stop` under a new path only knows that
 path's PID files. Startup and migration refuse shared, unowned or symlinked
 runtime roots/PGDATA; they never chmod or delete an old cluster to force a pass.
+
+## Explicit local-validator demo
+
+Run `./deploy/devnet-demo/live-demo local` to start an isolated synthetic registry
+on a localhost Solana validator, PostgreSQL, API, verifier, separate audit and
+monitor processes, and GTK launcher.
+This profile uses `demo.synthetic.local`; it preserves the legacy registry and
+never submits a devnet transaction. Closing the launcher stops this profile's
+services and validator. Its private ledger, database, keys and trust watermark
+are retained under the user's Unix state directory for the next launch.
+
+The source launcher requires the repository Node dependencies, Rust/Cargo, PostgreSQL, GTK
+and the pinned Agave 3.1.10/SBF platform-tools 1.52 toolchain. Use
+`ONELAYER_SBF_CACHE_DIR=/absolute/cache/path` to place disposable SBF builds on
+a disk with space. Private state stays on a filesystem enforcing Unix permissions.
+Rust audit/monitor builds use `CARGO_TARGET_DIR` when set, otherwise a
+`cargo-target` sibling of the explicit SBF cache, otherwise the private native
+state's build directory. Build caches can live on DATA; signing keys, credentials,
+database, custody material and evidence must retain real Unix permissions.
+For service-backed acceptance without a window, use
+`ONELAYER_LIVE_DEMO_NO_LAUNCHER=1 ./deploy/devnet-demo/live-demo local` and stop
+with Ctrl+C. Occupied ports are refused; stop their owning stack explicitly.
+A stale supervisor lock after SIGKILL requires inspection before removal.
+The profile checks the deployed program bytes against the source build, retained
+authorities and live genesis. It refuses mismatches and never resets the ledger,
+database or trust watermark automatically.
+
+The audit receiver listens on loopback 18991. Its retained capability key and
+scoped bearer files are private; only file paths enter the API environment.
+The monitor uses a separately provisioned read-only PostgreSQL role, verification
+material without chain signing keys, and its own retained evidence/floor. A
+running process does not establish a CURRENT projection or a verified publication.
+Scoped audit routes and the complete critical-event matrix have separate
+integration acceptance. This same-host lab does not establish production host or
+OS-user separation. Capability expiration fails closed; startup reissues lab
+capabilities without replacing the retained key or evidence floor.
+
+Headless supervision checks service PID birth identity and HTTP readiness every
+five seconds. Three consecutive failures stop the owned profile while preserving
+its retained state. Startup allows up to five minutes for retained validator
+recovery, then refuses readiness if the bounded window expires.
+
+This remains a synthetic lab profile. The complete eight-role GTK walkthrough
+and signed installed desktop release have separate acceptance gates.
+
+## Guided live scenario
+
+The local profile opens **Сценарий**. The tested business flow is:
+
+1. `registry_worker-1`: create a draft, then submit it.
+2. `registry_approver-1`: approve, or reject for correction.
+3. `registry_worker-1`: commit the approved revision.
+4. `operator`: review the exact transaction plan, confirm publication, and wait
+   for the server's `FINALIZED` result and transaction slot.
+5. Issue the selective certificate/QR, verify it, and save its JSON package.
+
+Only status and area are disclosed. Verification shows proof integrity separately
+from lifecycle/current suitability and incident-index freshness. `UNKNOWN` is not
+promoted to a current-valid result. The changed-copy action verifies an altered
+copy against the original certificate hash and displays the real refusal.
+
+For an already running local stack:
+
+```bash
+./deploy/devnet-demo/live-demo open-local
+```
+
+The opener checks the API namespace, local cluster and the validator's genesis
+before opening GTK; passwords and keys never appear in the window or command.
+To repeat the actual GTK acceptance check (creates/publishes a new synthetic
+record, exercises rejection/correction, checks denied approval, certificate,
+tamper and export), run:
+
+```bash
+./deploy/devnet-demo/live-demo check-scenario
+```
+
+It prints the evidence directory and refuses public-chain or mismatched profiles.
+**Открыть сертификат** retrieves a previously issued certificate by ID and lets
+you verify/export it again. **Новая запись** starts another independent record;
+creating another draft for the current committed record creates its next version.
+This verifies one end-to-end business scenario and its rejection, access-refusal
+and tamper branches; it does not establish completion of every production ticket.
+
+The local validator retains up to 1,000,000 ledger shreds for repeated certificate
+verification. The active ledger is retained state: cache cleanup must preserve it.
+Transactions already pruned by an older short-retention profile cannot be
+reconstructed; their certificates fail closed with ANCHOR_NOT_FOUND. Start a new
+record/publication after upgrading that profile to demonstrate a retained proof.

@@ -10,7 +10,7 @@ const OPERATOR_PASSWORD = "operator-password-0123456789";
 
 async function signIn(page: Page): Promise<void> {
   await page.goto("/admin");
-  await page.getByTestId("login-username").selectOption("operator");
+  await page.getByTestId("login-username").fill("operator");
   await page.getByTestId("login-password").fill(OPERATOR_PASSWORD);
   await page.getByTestId("login-submit").click();
   await expect(page.getByTestId("session-role")).toHaveText("operator");

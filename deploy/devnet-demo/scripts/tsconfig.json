@@ -1,0 +1,18 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowImportingTsExtensions": true,
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": ["node"],
+    "typeRoots": ["../../../apps/demo-api/node_modules/@types"],
+    "baseUrl": ".",
+    "paths": {
+      "@solana/kit": ["../../../apps/demo-api/node_modules/@solana/kit/dist/types/index.d.ts"]
+    }
+  },
+  "include": ["*.ts"]
+}

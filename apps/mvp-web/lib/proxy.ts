@@ -3,8 +3,8 @@
 // upstream session cookie is passed through unchanged.
 import { NextResponse } from "next/server";
 
-const FORWARDED_REQUEST_HEADERS = ["content-type", "cookie", "x-onelayer-csrf", "idempotency-key"];
-const FORWARDED_RESPONSE_HEADERS = ["content-type", "set-cookie"];
+const FORWARDED_REQUEST_HEADERS = ["content-type", "cookie", "x-onelayer-csrf", "idempotency-key", "origin"];
+const FORWARDED_RESPONSE_HEADERS = ["content-type", "set-cookie", "location"];
 
 export function upstream(variable: string): string {
   const value = process.env[variable];

@@ -1,8 +1,8 @@
 # 09 — Надежный publication и signer flow
 
 Status: ready-for-agent
-Execution: in-review
-Owner: publication agent
+Execution: claimed
+Owner: DeepSeek V4.1 Flash (max)
 Role: Backend/Identity + Protocol/Trust
 Phase: P2
 Blocked by: 02, 03, 04, 08
@@ -68,3 +68,6 @@ Round 2 (N1–N10, INFO) addressed: terminal LANDED_DISCREPANCY procedure for ou
 ## ADR-0009 archival safety continuation — 2026-10-01
 
 Owner for this bounded slice: publication_safety agent. Existing archival reconciliation/approval implementation inspected and exercised with real disposable PostgreSQL and synthetic chain/archive. Forced abandonment of a pruned own landing is rejected in worker and SQL; archival recovery distinguishes FINALIZED from LANDED_DISCREPANCY without a successor. Added regression coverage for incomplete/lagging archive, live blockhash, exact/newest evidence binding, independent approvals and approved foreign cancellation. Fixed SQL three-valued-logic bypass: FOREIGN_PROVEN evidence with a missing/null proof is rejected. See [evidence](../evidence/09/report.md). Execution remains in-review; no acceptance checkbox is closed by this bounded slice.
+
+
+2026-10-06: текущий ограниченный срез выполняется в `feat/pipeline-live-demo-20261006` через T3 orchestration. Полные acceptance и зависимости остаются открытыми; итоги и evidence будут опубликованы после интеграционной проверки.

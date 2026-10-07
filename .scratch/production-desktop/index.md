@@ -8,7 +8,7 @@
 
 | Ticket | Этап | Зависимости | Исполнитель | Triage | Execution |
 |---|---|---|---|---|---|
-| [01 — Baseline, модель угроз и обязательные контракты](issues/01-baseline-contracts.md) | P0 | — | Coordinator | ready-for-agent | in-progress |
+| [01 — Baseline, модель угроз и обязательные контракты](issues/01-baseline-contracts.md) | P0 | — | Codex coordinator | ready-for-agent | claimed |
 | [02 — Desktop spike: установка, SSO и signer](issues/02-desktop-platform-spike.md) | P0 | 01 | Desktop | ready-for-agent | blocked |
 | [03 — Закрепить доверие verifier к issuer, program и registry](issues/03-verifier-trust.md) | P1 | 01 | Protocol/Trust | ready-for-agent | in-review |
 | [04 — Полный и аутентифицированный incident index](issues/04-incident-index.md) | P1 | 01 | Protocol/Trust | ready-for-agent | in-review |
@@ -16,19 +16,19 @@
 | [06 — Private ingress и закрытие сетевой утечки demo](issues/06-private-ingress.md) | P1 | 01 | Backend/Identity | ready-for-agent | in-progress |
 | [07 — Identity, sessions и server-side permissions](issues/07-identity-authorization.md) | P2 | 01, 06 | Backend/Identity | ready-for-agent | in-review |
 | [08 — Записи, версии и независимое согласование](issues/08-registry-workflow.md) | P2 | 07 | Backend/Identity | ready-for-agent | in-review |
-| [09 — Надежный publication и signer flow](issues/09-durable-publication.md) | P2 | 02, 03, 04, 08 | Backend/Identity + Protocol/Trust | ready-for-agent | in-review |
-| [10 — Устанавливаемая программа, вход и ролевой каркас](issues/10-desktop-shell.md) | P3 | 02, 07 | Desktop | ready-for-agent | blocked |
-| [11 — Все рабочие кабинеты и сквозные ролевые действия](issues/11-desktop-workflows.md) | P3 | 05, 08, 09, 10 | Desktop | ready-for-agent | in-review |
+| [09 — Надежный publication и signer flow](issues/09-durable-publication.md) | P2 | 02, 03, 04, 08 | DeepSeek V4.1 Flash (max) | ready-for-agent | claimed |
+| [10 — Устанавливаемая программа, вход и ролевой каркас](issues/10-desktop-shell.md) | P3 | 02, 07 | MiMo V2.6 Pro (high) | ready-for-agent | claimed |
+| [11 — Все рабочие кабинеты и сквозные ролевые действия](issues/11-desktop-workflows.md) | P3 | 05, 08, 09, 10 | MiMo V2.6 Pro (high) | ready-for-agent | claimed |
 | [12 — Независимый Monitor и доказательства вмешательства](issues/12-independent-monitor.md) | P4 | 04, 08, 09 | Monitor | ready-for-agent | in-progress |
 | [13 — Audit, evidence и восстановление projections](issues/13-audit-evidence.md) | P4 | 07, 08, 12 | Backend/Identity + Monitor | ready-for-agent | not-started |
 | [14 — Full-state checkpoint и согласованный Snapshot](issues/14-snapshot-checkpoint.md) | P5 | 03, 04, 05, 09, 12 | Recovery/Storage + Protocol/Trust | ready-for-agent | not-started |
 | [15 — Реальные Backup Centers, read-back и retention](issues/15-backup-centers-retention.md) | P5 | 14 | Recovery/Storage | ready-for-agent | not-started |
 | [16 — Provisioning, 3-of-5 custody и ротация ключей](issues/16-key-custody.md) | P5 | 01, 14 | Recovery/Storage | ready-for-agent | in-review |
 | [17 — Изолированный Recovery Controller и Restore Approval](issues/17-recovery-controller.md) | P6 | 07, 14, 15, 16 | Recovery/Storage | ready-for-agent | not-started |
-| [18 — Полный restore в новую target и управляемый cutover](issues/18-restore-cutover.md) | P6 | 09, 12, 17 | Recovery/Storage + Backend | ready-for-agent | not-started |
-| [19 — CI, installers, signed updates и supply chain](issues/19-ci-signed-release.md) | P7 | 02, 10 | Release/Ops | ready-for-agent | in-review |
-| [20 — Deployment, наблюдаемость и runbooks](issues/20-deployment-operations.md) | P7 | 06, 12, 13, 15, 18, 19 | Release/Ops | ready-for-agent | not-started |
-| [21 — Сквозная приемка установленного приложения и 72-hour soak](issues/21-synthetic-acceptance.md) | P8 | 11, 18, 19, 20 | QA/Security Reviewer | ready-for-agent | not-started |
+| [18 — Полный restore в новую target и управляемый cutover](issues/18-restore-cutover.md) | P6 | 09, 12, 17 | DeepSeek V4.1 Flash (max) | ready-for-agent | claimed |
+| [19 — CI, installers, signed updates и supply chain](issues/19-ci-signed-release.md) | P7 | 02, 10 | Codex coordinator | ready-for-agent | claimed |
+| [20 — Deployment, наблюдаемость и runbooks](issues/20-deployment-operations.md) | P7 | 06, 12, 13, 15, 18, 19 | MiMo V2.6 Pro (high) | ready-for-agent | claimed |
+| [21 — Сквозная приемка установленного приложения и 72-hour soak](issues/21-synthetic-acceptance.md) | P8 | 11, 18, 19, 20 | Codex coordinator | ready-for-agent | claimed |
 | [22 — Production provisioning и ответственные за доверенные контуры](issues/22-production-provisioning.md) | P8 | 01, 02, 15, 16, 19 | Владелец инфраструктуры + Release/Ops | ready-for-human | not-started |
 | [23 — Независимые проверки, реальный restore drill и shadow pilot](issues/23-production-validation.md) | P8 | 21, 22 | Владелец системы + независимые reviewers | ready-for-human | not-started |
 | [24 — Go-live, ограниченный rollout и передача эксплуатации](issues/24-go-live-handover.md) | P8 | 23 | Владелец системы + Release/Ops | ready-for-human | not-started |

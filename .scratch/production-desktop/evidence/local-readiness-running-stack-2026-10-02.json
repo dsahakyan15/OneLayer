@@ -1,0 +1,269 @@
+{
+  "schema": "onelayer.desktop.local-readiness.v1",
+  "tool": "apps/desktop/readiness.py",
+  "repository": "/media/davit/DATA/projects/OneLayer",
+  "scope": [
+    "stack"
+  ],
+  "local_ready": false,
+  "summary": {
+    "checks": 22,
+    "required": 19,
+    "failed_required": 3,
+    "passed": 16,
+    "warnings": 0,
+    "informational": 3
+  },
+  "checks": [
+    {
+      "id": "runtime.node",
+      "group": "stack",
+      "title": "Node.js",
+      "severity": "required",
+      "status": "pass",
+      "detail": "Node.js 24.10.0 at /home/davit/.nvm/versions/node/v24.10.0/bin/node accepts --experimental-transform-types.",
+      "remediation": null
+    },
+    {
+      "id": "runtime.npm",
+      "group": "stack",
+      "title": "npm",
+      "severity": "required",
+      "status": "pass",
+      "detail": "npm 11.6.1 found at /home/davit/.nvm/versions/node/v24.10.0/bin/npm.",
+      "remediation": null
+    },
+    {
+      "id": "runtime.curl",
+      "group": "stack",
+      "title": "curl",
+      "severity": "required",
+      "status": "pass",
+      "detail": "curl found at /usr/bin/curl.",
+      "remediation": null
+    },
+    {
+      "id": "runtime.sha256sum",
+      "group": "stack",
+      "title": "sha256sum",
+      "severity": "required",
+      "status": "pass",
+      "detail": "sha256sum found at /usr/bin/sha256sum.",
+      "remediation": null
+    },
+    {
+      "id": "runtime.solana-keygen",
+      "group": "stack",
+      "title": "Solana CLI (solana-keygen)",
+      "severity": "required",
+      "status": "pass",
+      "detail": "Solana CLI (solana-keygen) found at /home/davit/.local/share/solana/install/active_release/bin/solana-keygen.",
+      "remediation": null
+    },
+    {
+      "id": "runtime.bash",
+      "group": "stack",
+      "title": "Bash",
+      "severity": "required",
+      "status": "pass",
+      "detail": "bash 5.2.21 found at /usr/bin/bash.",
+      "remediation": null
+    },
+    {
+      "id": "runtime.postgres",
+      "group": "stack",
+      "title": "PostgreSQL",
+      "severity": "required",
+      "status": "pass",
+      "detail": "PostgreSQL 17.10 found via Homebrew postgresql@17 at /home/linuxbrew/.linuxbrew/opt/postgresql@17/bin.",
+      "remediation": null
+    },
+    {
+      "id": "deps.demo-api",
+      "group": "stack",
+      "title": "apps/demo-api dependencies",
+      "severity": "required",
+      "status": "pass",
+      "detail": "apps/demo-api/node_modules/pg is present.",
+      "remediation": null
+    },
+    {
+      "id": "deps.verifier",
+      "group": "stack",
+      "title": "apps/verifier dependencies",
+      "severity": "required",
+      "status": "pass",
+      "detail": "apps/verifier/node_modules/@solana/kit is present.",
+      "remediation": null
+    },
+    {
+      "id": "deps.mvp-web",
+      "group": "stack",
+      "title": "apps/mvp-web dependencies",
+      "severity": "required",
+      "status": "pass",
+      "detail": "apps/mvp-web/node_modules/next is present.",
+      "remediation": null
+    },
+    {
+      "id": "deps.onchain-client",
+      "group": "stack",
+      "title": "packages/onchain-client dependencies",
+      "severity": "required",
+      "status": "pass",
+      "detail": "packages/onchain-client/node_modules/@solana/kit is present.",
+      "remediation": null
+    },
+    {
+      "id": "files.migrations",
+      "group": "stack",
+      "title": "Database migrations",
+      "severity": "required",
+      "status": "pass",
+      "detail": "db/migrations contains 19 SQL migration file(s).",
+      "remediation": null
+    },
+    {
+      "id": "files.fixture",
+      "group": "stack",
+      "title": "Synthetic demo fixture",
+      "severity": "required",
+      "status": "pass",
+      "detail": "db/fixtures/devnet-demo.sql is present.",
+      "remediation": null
+    },
+    {
+      "id": "files.native-launcher",
+      "group": "stack",
+      "title": "Native demo launcher",
+      "severity": "required",
+      "status": "pass",
+      "detail": "deploy/devnet-demo/native is present and executable.",
+      "remediation": null
+    },
+    {
+      "id": "files.runtime-dir",
+      "group": "stack",
+      "title": "Runtime state directory",
+      "severity": "required",
+      "status": "pass",
+      "detail": "deploy/devnet-demo is writable for PostgreSQL data, logs and pid files.",
+      "remediation": null
+    },
+    {
+      "id": "files.tmpfs",
+      "group": "stack",
+      "title": "tmpfs runtime",
+      "severity": "required",
+      "status": "pass",
+      "detail": "/dev/shm is writable; synthetic keys and demo credentials are created there (contents are never read here).",
+      "remediation": null
+    },
+    {
+      "id": "state.synthetic-runtime",
+      "group": "stack",
+      "title": "Synthetic runtime state",
+      "severity": "advisory",
+      "status": "info",
+      "detail": "/dev/shm/onelayer-devnet-demo is present; initialize-runtime reuses existing files. Contents are not read by this check.",
+      "remediation": null
+    },
+    {
+      "id": "build.mvp-web",
+      "group": "stack",
+      "title": "Next.js build output",
+      "severity": "advisory",
+      "status": "info",
+      "detail": "apps/mvp-web/.next is present; native start rebuilds it before launch.",
+      "remediation": null
+    },
+    {
+      "id": "files.native-state",
+      "group": "stack",
+      "title": "Private native state",
+      "severity": "advisory",
+      "status": "info",
+      "detail": "An absent directory is created with umask 077; existing private state is retained. Filesystem permission support is verified during startup.",
+      "remediation": null
+    },
+    {
+      "id": "ports.8080",
+      "group": "stack",
+      "title": "Loopback port 8080",
+      "severity": "required",
+      "status": "fail",
+      "detail": "127.0.0.1:8080 is occupied and the verifier PID marker is live (pid 92601); socket ownership is not verified.",
+      "remediation": "Check deploy/devnet-demo/native status; stop the demo or the foreign listener before checking launch readiness again."
+    },
+    {
+      "id": "ports.8090",
+      "group": "stack",
+      "title": "Loopback port 8090",
+      "severity": "required",
+      "status": "fail",
+      "detail": "127.0.0.1:8090 is occupied and the demo-api PID marker is live (pid 92471); socket ownership is not verified.",
+      "remediation": "Check deploy/devnet-demo/native status; stop the demo or the foreign listener before checking launch readiness again."
+    },
+    {
+      "id": "ports.8091",
+      "group": "stack",
+      "title": "Loopback port 8091",
+      "severity": "required",
+      "status": "fail",
+      "detail": "127.0.0.1:8091 is occupied and the mvp-web PID marker is live (pid 92632); socket ownership is not verified.",
+      "remediation": "Check deploy/devnet-demo/native status; stop the demo or the foreign listener before checking launch readiness again."
+    }
+  ],
+  "external_gates": [
+    {
+      "id": "gate.devnet-rpc",
+      "title": "Solana devnet RPC reachability and rate limits",
+      "detail": "This preflight makes no external network requests. The running stack and live smoke checks observe devnet availability.",
+      "reference": "deploy/devnet-demo/README.md",
+      "status": "external"
+    },
+    {
+      "id": "gate.signer",
+      "title": "Production signer (KMS/HSM or external signer)",
+      "detail": "Requires a real organization decision and independent review; the demo uses a synthetic software key in tmpfs.",
+      "reference": "docs/application-pipeline-ru.md",
+      "status": "external"
+    },
+    {
+      "id": "gate.identity",
+      "title": "Production IdP/SSO and device enrollment",
+      "detail": "Requires a real IdP, managed devices and private network/VPN ingress acceptance.",
+      "reference": "docs/adr/0007-desktop-application-and-role-scoped-access.md",
+      "status": "external"
+    },
+    {
+      "id": "gate.installer",
+      "title": "Managed install, signed bundle, SBOM/provenance",
+      "detail": "The GTK lab is a source/runtime installation, not a bundled signed production executable.",
+      "reference": ".scratch/production-desktop/evidence/02/preflight.md",
+      "status": "external"
+    },
+    {
+      "id": "gate.updates",
+      "title": "Signed updates and rollback policy",
+      "detail": "Signed updater and rollback acceptance remain open spike gates.",
+      "reference": "docs/application-pipeline-ru.md",
+      "status": "external"
+    },
+    {
+      "id": "gate.pilot",
+      "title": "60-day shadow pilot",
+      "detail": "Long-running operational evidence on the target organization; not a local machine check.",
+      "reference": ".scratch/production-desktop/index.md",
+      "status": "external"
+    },
+    {
+      "id": "gate.audit",
+      "title": "Independent audit/pentest and recovery drill on real data",
+      "detail": "Requires external reviewers and real restored data; cannot be satisfied by this or any local command.",
+      "reference": "docs/agents/implementation-runbook.md",
+      "status": "external"
+    }
+  ],
+  "note": "Local build/launch readiness only. This command only probes local loopback ports, installs nothing, starts nothing and never reads secret values. Production readiness is not claimed: the external gates listed below are not evaluated here and must not be reported as passed."
+}

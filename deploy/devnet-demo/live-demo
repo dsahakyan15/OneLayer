@@ -1,0 +1,404 @@
+#!/usr/bin/env bash
+# One-command live-demo launcher for the OneLayer local devnet demo.
+#
+# Starts the local demo stack (PostgreSQL + demo-api + verifier + web), waits
+# for its loopback health endpoints, performs a READ-ONLY chain assessment and
+# opens the English GTK launcher — all with explicit errors at every step.
+#
+# Chain-safety contract (ADR-0010, solana-dev transaction review):
+#   * This script NEVER signs or sends a devnet transaction. It does not run
+#     `live-demo-seed --prepare` and it does not run `--approve-fallback`.
+#   * Local process startup (PostgreSQL, Node services) is not a chain action.
+#   * Any chain setup (initialize_registry / grant_operator / fund_operator /
+#     create_ledger_segment) is shown in the launcher's Setup card as a
+#     concrete reviewed summary and runs only after an explicit user click.
+#   * The legacy gov.registry.land namespace is never switched implicitly; the
+#     isolated ADR-0010 namespace is selected only via ONELAYER_REGISTRY_ID.
+#
+# Subcommands:
+#   start    (default) start the stack, assess read-only, open the launcher
+#   status   report readiness + service health + namespace, open nothing
+#   check    readiness preflight only; exit non-zero when not ready
+#   stop     stop the stack (delegates to native stop)
+set -euo pipefail
+umask 077
+
+command=${1:-start}
+demo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd -- "$demo_dir/../.." && pwd)
+scripts="$demo_dir/scripts"
+native="$demo_dir/native"
+launcher="$repo_root/apps/desktop/launcher"
+readiness="$repo_root/apps/desktop/readiness.py"
+seed_cli="$scripts/live-demo-seed"
+
+# ---------------------------------------------------------------- environment
+
+die() {
+  echo "live-demo: $*" >&2
+  exit 1
+}
+
+note() { echo "live-demo: $*"; }
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 is required"
+}
+
+# A DATA/NTFS checkout cannot hold private Unix runtime state (permissions are
+# reported as 0777 and not enforced). Detect real Unix permission support and,
+# when absent, select a private directory outside the checkout and say so.
+select_private_state() {
+  if [[ -n "${ONELAYER_NATIVE_STATE_DIR:-}" ]]; then
+    return 0
+  fi
+  local candidate="$demo_dir/.runtime/native"
+  local probe="$candidate/.perm-test-$$"
+  if mkdir -p "$candidate" 2>/dev/null; then
+    if ( umask 077; : >"$probe" ) 2>/dev/null; then
+      local mode
+      mode=$(stat -c '%a' "$probe" 2>/dev/null || echo "")
+      rm -f "$probe" 2>/dev/null || true
+      # Real Unix filesystems honor umask 077 -> mode 600. NTFS reports 777.
+      if [[ "$mode" == "600" ]]; then
+        return 0
+      fi
+    fi
+  fi
+  export ONELAYER_NATIVE_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/onelayer-devnet-demo/native"
+  note "checkout filesystem does not enforce Unix permissions (mode 600 unsupported)"
+  note "using private state directory: $ONELAYER_NATIVE_STATE_DIR"
+}
+
+# ---------------------------------------------------------------- readiness
+
+run_readiness() {
+  /usr/bin/python3 "$readiness" "$@"
+}
+
+readiness_scope_for() {
+  case "$1" in
+    start|status) echo all ;;
+    check) echo "${ONELAYER_LIVE_DEMO_SCOPE:-all}" ;;
+    *) echo all ;;
+  esac
+}
+
+report_readiness() {
+  local scope="$1"
+  if run_readiness --scope "$scope"; then
+    return 0
+  fi
+  echo "" >&2
+  echo "live-demo: local prerequisites are missing — the lines marked [fail] above name the fix." >&2
+  echo "live-demo: nothing was started. Remediate and re-run './deploy/devnet-demo/live-demo'." >&2
+  return 1
+}
+
+# ---------------------------------------------------------------- stack
+
+service_healthy() {
+  local url="$1"
+  local body
+  body=$(curl -fsS --max-time 4 --noproxy '*' "$url" 2>/dev/null) || return 1
+  [[ "$body" == *'"status":"ok"'* || "$body" == *'"status": "ok"'* ]]
+}
+
+# The live service reports the registry namespace it actually serves on
+# /v1/health (M6). This is the authoritative identity: it comes from the running
+# service's HTTP response, never from a mutable env var or a local file. A
+# missing registryId is treated as unknown and fails closed.
+health_identity_registry() {
+  local body
+  body=$(curl -fsS --max-time 4 --noproxy '*' http://127.0.0.1:8090/v1/health 2>/dev/null) || { echo ""; return 0; }
+  /usr/bin/python3 - "$body" <<'PY'
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+    print(str(data.get("registryId") or ""))
+except Exception:
+    print("")
+PY
+}
+
+# The native stack also records a sidecar identity
+# (deploy/devnet-demo/native: record_stack_identity). This is now only a
+# CROSS-CHECK: the authoritative identity is the live service's /v1/health.
+stack_identity_registry() {
+  local native_root="${ONELAYER_NATIVE_STATE_DIR:-$demo_dir/.runtime/native}"
+  local identity="$native_root/pids/stack-identity.json"
+  [[ -f "$identity" ]] || { echo ""; return 0; }
+  /usr/bin/python3 - "$identity" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    print(str(data.get("registryId") or ""))
+except Exception:
+    print("")
+PY
+}
+
+check_stack_identity() {
+  local requested="${ONELAYER_REGISTRY_ID:-gov.registry.land}"
+  local live sidecar
+  live=$(health_identity_registry)
+  if [[ -z "$live" ]]; then
+    echo "" >&2
+    echo "live-demo: STACK IDENTITY UNKNOWN — the live service did not report a registryId on /v1/health." >&2
+    echo "live-demo: refusing to reuse the running stack (a missing identity fails closed, never accepted)." >&2
+    echo "live-demo: restart the stack so it reports its identity: ./deploy/devnet-demo/live-demo stop && ./deploy/devnet-demo/live-demo start" >&2
+    return 1
+  fi
+  if [[ "$live" != "$requested" ]]; then
+    echo "" >&2
+    echo "live-demo: NAMESPACE MISMATCH — refusing to reuse the running stack." >&2
+    echo "live-demo: the running stack serves '$live' (from its live /v1/health)," >&2
+    echo "live-demo: but '$requested' was requested." >&2
+    echo "live-demo: stop the stack and start it with the requested namespace:" >&2
+    echo "live-demo:   ./deploy/devnet-demo/live-demo stop" >&2
+    echo "live-demo:   ONELAYER_REGISTRY_ID=$requested ./deploy/devnet-demo/live-demo start" >&2
+    echo "live-demo: a running stack is never silently re-pointed to another namespace." >&2
+    return 1
+  fi
+  note "stack identity: live service serves '$live' — matches the requested namespace"
+  # Cross-check only: the sidecar, when present, must agree with the live
+  # service. It is never authoritative on its own.
+  sidecar=$(stack_identity_registry)
+  if [[ -n "$sidecar" && "$sidecar" != "$live" ]]; then
+    echo "live-demo: note — sidecar cross-check disagrees (sidecar '$sidecar' vs live '$live');" >&2
+    echo "live-demo: the live service is authoritative; the stale sidecar is ignored." >&2
+  fi
+  return 0
+}
+
+wait_for_health() {
+  local deadline=$(( $(date +%s) + "${ONELAYER_LIVE_DEMO_HEALTH_TIMEOUT:-90}" ))
+  local api="http://127.0.0.1:8090/v1/health"
+  local verifier="http://127.0.0.1:8080/v1/health"
+  note "waiting for loopback health (demo-api 8090, verifier 8080)…"
+  while (( $(date +%s) < deadline )); do
+    if service_healthy "$api" && service_healthy "$verifier"; then
+      note "services are healthy"
+      return 0
+    fi
+    sleep 1
+  done
+  echo "" >&2
+  echo "live-demo: services did not become healthy within the deadline." >&2
+  echo "live-demo: inspect logs with './deploy/devnet-demo/native logs'." >&2
+  return 1
+}
+
+start_stack() {
+  note "starting the local demo stack (PostgreSQL + demo-api + verifier + web)…"
+  if [[ ! -x "$native" ]]; then
+    die "native launcher is missing or not executable: $native"
+  fi
+  ONELAYER_NATIVE_STATE_DIR="${ONELAYER_NATIVE_STATE_DIR:-}" "$native" start
+  wait_for_health
+}
+
+# ---------------------------------------------------------------- assessment
+
+# READ-ONLY chain assessment. Never passes --prepare or --approve-fallback:
+# this script must not sign or send a devnet transaction. The seed CLI exits
+# 0 ready · 2 refused request · 3 refused environment/authority · 4 report
+# produced but not ready; 3 and 4 still emit a report worth showing.
+assess_chain() {
+  if [[ ! -x "$seed_cli" ]]; then
+    note "chain assessment unavailable (seed CLI missing); skipping"
+    return 0
+  fi
+  note "read-only chain assessment (no transaction is signed or sent)…"
+  local output rc=0
+  output=$("$seed_cli" 2>/dev/null) || rc=$?
+  if [[ -z "$output" ]]; then
+    note "chain assessment could not run (RPC unreachable or service not ready)"
+    return 0
+  fi
+  /usr/bin/python3 - "$output" <<'PY'
+import json, sys
+try:
+    report = json.loads(sys.argv[1])
+except (ValueError, IndexError):
+    print("live-demo: chain assessment produced no readable report")
+    raise SystemExit(0)
+registry = report.get("registryId") or "?"
+cluster = report.get("cluster") or "?"
+program = report.get("programId") or "?"
+prepared = report.get("prepared")
+refusal = report.get("refusal") or {}
+steps = report.get("steps") or []
+print(f"live-demo: namespace        {registry}")
+print(f"live-demo: cluster          {cluster}")
+print(f"live-demo: program          {program}")
+print(f"live-demo: assessment mode  {'prepared' if prepared else 'read-only'}")
+ready = [s for s in steps if s.get("status") in ("READY", "SATISFIED", "EXECUTED")]
+needed = [s for s in steps if s.get("status") == "ACTION_REQUIRED"]
+blocked = [s for s in steps if s.get("status") == "BLOCKED"]
+print(f"live-demo: steps            {len(ready)} ready · {len(needed)} action-required · {len(blocked)} blocked")
+if refusal:
+    print(f"live-demo: blocker          {refusal.get('code')}")
+    if refusal.get("detail"):
+        print(f"live-demo: blocker detail   {refusal['detail']}")
+for step in steps:
+    status = step.get("status")
+    if status in ("ACTION_REQUIRED", "BLOCKED"):
+        action = (step.get("action") or {}).get("kind") or step.get("id")
+        codes = ", ".join(sorted({b.get("code","") for b in (step.get("blockers") or []) if b.get("code")}))
+        suffix = f" [{codes}]" if codes else ""
+        print(f"live-demo:   [{status}] {action}{suffix}: {step.get('detail','')}")
+all_codes = sorted({b.get("code","") for s in steps for b in (s.get("blockers") or []) if b.get("code")})
+if all_codes:
+    print(f"live-demo: blocker codes    {', '.join(all_codes)}")
+if "GOVERNANCE_KEY_UNAVAILABLE" in all_codes:
+    print("live-demo: the legacy registry's governance key is permanently lost.")
+    print("live-demo: governance-signed setup cannot run on gov.registry.land.")
+    print("live-demo: an isolated ADR-0010 namespace (ONELAYER_REGISTRY_ID) is the")
+    print("live-demo: honest path; it is never selected implicitly.")
+print("live-demo: chain setup is NOT run by this command.")
+print("live-demo: open the launcher's Connection page and use 'Review and prepare…'")
+print("live-demo: to see the exact transactions and approve them explicitly.")
+PY
+}
+
+# ---------------------------------------------------------------- namespace
+
+report_namespace() {
+  local registry="${ONELAYER_REGISTRY_ID:-gov.registry.land}"
+  if [[ "$registry" == "gov.registry.land" ]]; then
+    note "namespace: legacy gov.registry.land (governance key lost — setup blocked)"
+  else
+    note "namespace: isolated synthetic '$registry' (ADR-0010 — not the production registry)"
+  fi
+  if [[ -n "${ONELAYER_SYNTHETIC_PROFILE:-}" ]]; then
+    note "ONELAYER_SYNTHETIC_PROFILE is set: responses are labeled synthetic demo"
+  fi
+}
+
+# ---------------------------------------------------------------- banner
+
+print_banner() {
+  cat <<'EOF'
+
+OneLayer live demo — local devnet
+=================================
+Services (loopback only):
+  demo-api   http://127.0.0.1:8090/v1/health
+  verifier   http://127.0.0.1:8080/v1/health
+  web        http://127.0.0.1:8091
+
+Demo scenario (in the launcher):
+  1. Connection  → Sign in (password read from /dev/shm; never typed)
+  2. Records     → Create record version
+  3. Publish     → Prepare and simulate → review the exact transaction
+                   → Approve and sign locally (explicit click)
+  4. Certificates→ Issue (selective disclosure) → Save package JSON / QR PNG
+  5. Verify      → Open the saved package or QR → honest verdict
+  6. Verify      → Open a tampered copy → the refusal is shown, fields cleared
+
+Chain setup (initialize_registry / grant_operator / fund_operator /
+create_ledger_segment) is NOT run by this command. Open the launcher's
+Connection page and use "Review and prepare…" to see the exact instructions,
+payer, accounts and rent/fees, then approve them explicitly.
+
+All data is synthetic. Nothing here is production readiness.
+EOF
+}
+
+# ---------------------------------------------------------------- commands
+
+case "$command" in
+  check-scenario)
+    exec /usr/bin/python3 "$scripts/open-local.py" --check-scenario
+    ;;
+  open-local)
+    exec /usr/bin/python3 "$scripts/open-local.py"
+    ;;
+  local)
+    note "explicit synthetic localhost profile; no devnet transactions"
+    exec node --experimental-transform-types "$repo_root/apps/demo-api/scripts/local-demo.ts"
+    ;;
+  check)
+    select_private_state
+    report_namespace
+    report_readiness "$(readiness_scope_for check)"
+    note "readiness: READY for the selected scope"
+    ;;
+  status)
+    select_private_state
+    report_namespace
+    if run_readiness --scope all >/dev/null 2>&1; then
+      note "start preflight: READY"
+    else
+      note "start preflight: NOT READY (run './deploy/devnet-demo/live-demo check' for details)"
+    fi
+    api_ok=no; verifier_ok=no
+    service_healthy "http://127.0.0.1:8090/v1/health" && api_ok=yes
+    service_healthy "http://127.0.0.1:8080/v1/health" && verifier_ok=yes
+    note "demo-api health:   $api_ok"
+    note "verifier health:  $verifier_ok"
+    if [[ "$api_ok" == "yes" && "$verifier_ok" == "yes" ]]; then
+      note "stack state: running"
+      check_stack_identity || true
+    else
+      note "stack state: stopped"
+    fi
+    assess_chain
+    ;;
+  stop)
+    select_private_state
+    ONELAYER_NATIVE_STATE_DIR="${ONELAYER_NATIVE_STATE_DIR:-}" "$native" stop
+    ;;
+  start)
+    select_private_state
+    report_namespace
+    if service_healthy "http://127.0.0.1:8090/v1/health" && \
+       service_healthy "http://127.0.0.1:8080/v1/health"; then
+      check_stack_identity || exit 1
+      note "services are already healthy; reusing the running stack"
+    else
+      report_readiness "$(readiness_scope_for start)" || exit 1
+      start_stack
+      check_stack_identity || exit 1
+    fi
+    assess_chain
+    print_banner
+    if [[ "${ONELAYER_LIVE_DEMO_NO_LAUNCHER:-}" == "1" ]]; then
+      note "launcher not opened (ONELAYER_LIVE_DEMO_NO_LAUNCHER=1)"
+      exit 0
+    fi
+    if [[ ! -x "$launcher" ]]; then
+      die "launcher is missing or not executable: $launcher"
+    fi
+    if [[ -z "${DISPLAY:-}" && -z "${WAYLAND_DISPLAY:-}" ]]; then
+      echo "live-demo: no display is available; the GTK launcher cannot open." >&2
+      echo "live-demo: the stack is running; use ONELAYER_LIVE_DEMO_NO_LAUNCHER=1 for headless bring-up." >&2
+      exit 1
+    fi
+    note "opening the launcher (close its window to end this command)…"
+    exec "$launcher"
+    ;;
+  *)
+    cat >&2 <<'EOF'
+usage: deploy/devnet-demo/live-demo [start|status|check|stop]
+
+  start   (default) start the stack, assess read-only, open the launcher
+  status  report readiness, service health and the chain assessment
+  check   readiness preflight only; exit non-zero when not ready
+  stop    stop the local demo stack
+
+Environment:
+  ONELAYER_NATIVE_STATE_DIR     private runtime state (auto-selected when the
+                                checkout filesystem lacks Unix permissions)
+  ONELAYER_REGISTRY_ID          isolated ADR-0010 namespace (default: the
+                                legacy gov.registry.land, never switched)
+  ONELAYER_SYNTHETIC_PROFILE=1  label responses as synthetic demo
+  ONELAYER_LIVE_DEMO_NO_LAUNCHER=1   bring the stack up without opening the UI
+
+This command never signs or sends a devnet transaction.
+EOF
+    exit 2
+    ;;
+esac

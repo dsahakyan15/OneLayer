@@ -72,8 +72,9 @@ export default function HowItWorksPage(): ReactNode {
           <li>no open incident covers this batch, and the incident index proved its own freshness.</li>
         </ol>
         <p>
-          If all five hold, the certificate shows exactly the data that was anchored — and a green result is
-          only shown when the last one holds too.
+          If all five hold, the certificate shows exactly the data that was anchored. The result still does not
+          say the record is current: no authenticated lifecycle source exists yet, so a verified certificate is
+          reported as <code>UNKNOWN</code> rather than as a current one.
         </p>
       </section>
 

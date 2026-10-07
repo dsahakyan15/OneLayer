@@ -1,8 +1,8 @@
 # 19 — CI, installers, signed updates и supply chain
 
 Status: ready-for-agent
-Execution: in-review
-Owner: coordinator (Linux GTK CI increment)
+Execution: claimed
+Owner: Codex coordinator
 Role: Release/Ops
 Phase: P7
 Blocked by: 02, 10
@@ -49,3 +49,6 @@ Rebuild/provenance check, signed test update/tampered update, install/uninstall/
 2026-10-01: добавлен отдельный Linux GTK CI job с live virtual display, unit/interaction tests и installed smoke artifact. Запуск на GitHub не заявлен; production bundling/signing/updates остаются открытыми.
 
 2026-10-01: локальные команды GTK CI (virtual display) 27 tests + installed smoke PASS; [evidence](../evidence/19/gtk-ci-2026-10-01.md). GitHub-run, Tauri bundle и signed updates остаются открытыми.
+
+
+2026-10-06: текущий ограниченный срез выполняется в `feat/pipeline-live-demo-20261006` через T3 orchestration. Полные acceptance и зависимости остаются открытыми; итоги и evidence будут опубликованы после интеграционной проверки.

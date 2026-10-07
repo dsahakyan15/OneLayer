@@ -16,10 +16,14 @@ import {
 
 export const SNAPSHOT_FORMAT = "SnapshotPackageV1" as const;
 export const SNAPSHOT_STATE_FORMAT = "ONELAYER_SNAPSHOT_STATE_V1" as const;
+/** V2 adds the workflow/publication state the pipeline creates. */
+export const SNAPSHOT_STATE_FORMAT_V2 = "ONELAYER_SNAPSHOT_STATE_V2" as const;
 export const SNAPSHOT_CHUNK_SIZE = 64 * 1024;
 export const RETENTION_WINDOW = 12;
 export const SNAPSHOT_KEY_ENCRYPTION_VERSION = "mvp-memory-kek-v1";
 export const RECOVERY_SHARE_FORMAT = "ONELAYER_RECOVERY_SHARE_V1";
+/** Schema revision the V2 payload inventory was written against. */
+export const SNAPSHOT_STATE_SCHEMA_VERSION = 22;
 
 function validateRecoveryShare(share: KeyShare): void {
   if (!Number.isSafeInteger(share.index) || share.index < 1 || share.index > 5 || share.bytes.length !== 32) {
@@ -123,7 +127,89 @@ export function encryptSnapshotState(input: {
   kek: Uint8Array;
   keyEncryptionVersion?: string;
 }): EncryptedSnapshot {
-  const plaintext = encodeSnapshotState(input.state);
+  return encryptSnapshotPlaintext({ ...input, plaintext: encodeSnapshotState(input.state) });
+}
+
+/**
+ * Full-state V2 payload: the V1 inventory plus the registry workflow and
+ * durable publication state the pipeline creates. The plaintext hash covers
+ * every listed row, but that hash is NOT a batch Merkle root and does not, by
+ * itself, prove the state is bound to a trusted finalized anchor. A V2
+ * snapshot therefore stays NON_FINALIZED until a dedicated checkpoint binding
+ * exists (ticket 14); this module makes no such claim.
+ */
+export interface SnapshotStateV2 extends SnapshotStateV1 {
+  schemaVersion: number;
+  keyEncryptionVersion: string;
+  workflowRecords: readonly Record<string, unknown>[];
+  workflowVersions: readonly Record<string, unknown>[];
+  workflowDrafts: readonly Record<string, unknown>[];
+  workflowRevisions: readonly Record<string, unknown>[];
+  workflowRequests: readonly Record<string, unknown>[];
+  workflowOutbox: readonly Record<string, unknown>[];
+  workflowAudit: readonly Record<string, unknown>[];
+  publicationOperations: readonly Record<string, unknown>[];
+  publicationItems: readonly Record<string, unknown>[];
+  publicationIntents: readonly Record<string, unknown>[];
+  publicationAnchors: readonly Record<string, unknown>[];
+}
+
+export function encodeSnapshotStateV2(state: SnapshotStateV2): Uint8Array {
+  // A distinct `format` value means a V1 reader can never mistake these bytes
+  // for the V1 payload, even though the field set is a superset.
+  return encode({
+    type: "map",
+    entries: {
+      format: { type: "text", value: SNAPSHOT_STATE_FORMAT_V2 },
+      version: { type: "int", value: "2" },
+      schemaVersion: { type: "int", value: String(state.schemaVersion) },
+      keyEncryptionVersion: { type: "text", value: state.keyEncryptionVersion },
+      registryId: { type: "text", value: state.registryId },
+      capturedAt: { type: "text", value: state.capturedAt },
+      records: { type: "array", items: state.records.map(cborValue) },
+      recordVersions: { type: "array", items: state.recordVersions.map(cborValue) },
+      certificatePackages: { type: "array", items: state.certificatePackages.map(cborValue) },
+      qrMetadata: { type: "array", items: state.qrMetadata.map(cborValue) },
+      proofs: { type: "array", items: state.proofs.map(cborValue) },
+      roots: { type: "array", items: state.roots.map(cborValue) },
+      manifests: { type: "array", items: state.manifests.map(cborValue) },
+      anchorReferences: { type: "array", items: state.anchorReferences.map(cborValue) },
+      operationHistory: { type: "array", items: state.operationHistory.map(cborValue) },
+      workflowRecords: { type: "array", items: state.workflowRecords.map(cborValue) },
+      workflowVersions: { type: "array", items: state.workflowVersions.map(cborValue) },
+      workflowDrafts: { type: "array", items: state.workflowDrafts.map(cborValue) },
+      workflowRevisions: { type: "array", items: state.workflowRevisions.map(cborValue) },
+      workflowRequests: { type: "array", items: state.workflowRequests.map(cborValue) },
+      workflowOutbox: { type: "array", items: state.workflowOutbox.map(cborValue) },
+      workflowAudit: { type: "array", items: state.workflowAudit.map(cborValue) },
+      publicationOperations: { type: "array", items: state.publicationOperations.map(cborValue) },
+      publicationItems: { type: "array", items: state.publicationItems.map(cborValue) },
+      publicationIntents: { type: "array", items: state.publicationIntents.map(cborValue) },
+      publicationAnchors: { type: "array", items: state.publicationAnchors.map(cborValue) },
+    },
+  });
+}
+
+export function encryptSnapshotStateV2(input: {
+  registryId: string;
+  snapshotId: Uint8Array;
+  snapshotVersion: bigint;
+  state: SnapshotStateV2;
+  kek: Uint8Array;
+  keyEncryptionVersion?: string;
+}): EncryptedSnapshot {
+  return encryptSnapshotPlaintext({ ...input, plaintext: encodeSnapshotStateV2(input.state) });
+}
+
+function encryptSnapshotPlaintext(input: {
+  registryId: string;
+  snapshotId: Uint8Array;
+  snapshotVersion: bigint;
+  plaintext: Uint8Array;
+  kek: Uint8Array;
+  keyEncryptionVersion?: string;
+}): EncryptedSnapshot {
+  const plaintext = input.plaintext;
   try {
     const snapshot = createSnapshotPackage({
       registryId: input.registryId,

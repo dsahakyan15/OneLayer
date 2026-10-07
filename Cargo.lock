@@ -1713,6 +1713,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 
 [[package]]
+name = "onelayer-audit"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "hex",
+ "hmac 0.12.1",
+ "libc",
+ "postgres",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "onelayer-canonical"
 version = "0.1.0"
 dependencies = [
@@ -1732,6 +1746,25 @@ version = "0.1.0"
 dependencies = [
  "hex",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "onelayer-monitor"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "bs58",
+ "curve25519-dalek",
+ "hex",
+ "hmac 0.12.1",
+ "libc",
+ "onelayer-canonical",
+ "onelayer-merkle",
+ "postgres",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "unicode-normalization",
 ]
 
 [[package]]
@@ -1912,6 +1945,8 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
+ "serde_core",
+ "serde_json",
 ]
 
 [[package]]

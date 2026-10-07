@@ -1,0 +1,107 @@
+{
+  "schema": "onelayer.desktop.local-readiness.v1",
+  "tool": "apps/desktop/readiness.py",
+  "repository": "/media/davit/DATA/projects/OneLayer",
+  "scope": [
+    "desktop"
+  ],
+  "local_ready": true,
+  "summary": {
+    "checks": 4,
+    "required": 3,
+    "failed_required": 0,
+    "passed": 3,
+    "warnings": 0,
+    "informational": 1
+  },
+  "checks": [
+    {
+      "id": "desktop.python",
+      "group": "desktop",
+      "title": "System Python 3",
+      "severity": "required",
+      "status": "pass",
+      "detail": "/usr/bin/python3 is Python 3.12.3.",
+      "remediation": null
+    },
+    {
+      "id": "desktop.gtk",
+      "group": "desktop",
+      "title": "GTK 3 and Secret typelibs",
+      "severity": "required",
+      "status": "pass",
+      "detail": "PyGObject, GTK 3.0 and Secret 1 typelibs are importable by /usr/bin/python3.",
+      "remediation": null
+    },
+    {
+      "id": "desktop.display",
+      "group": "desktop",
+      "title": "Display",
+      "severity": "required",
+      "status": "pass",
+      "detail": "A display is available via DISPLAY (value not printed).",
+      "remediation": null
+    },
+    {
+      "id": "desktop.dbus",
+      "group": "desktop",
+      "title": "Session bus",
+      "severity": "advisory",
+      "status": "info",
+      "detail": "DBUS_SESSION_BUS_ADDRESS is set; credential-service paths can be exercised.",
+      "remediation": null
+    }
+  ],
+  "external_gates": [
+    {
+      "id": "gate.devnet-rpc",
+      "title": "Solana devnet RPC reachability and rate limits",
+      "detail": "This preflight makes no external network requests. The running stack and live smoke checks observe devnet availability.",
+      "reference": "deploy/devnet-demo/README.md",
+      "status": "external"
+    },
+    {
+      "id": "gate.signer",
+      "title": "Production signer (KMS/HSM or external signer)",
+      "detail": "Requires a real organization decision and independent review; the demo uses a synthetic software key in tmpfs.",
+      "reference": "docs/application-pipeline-ru.md",
+      "status": "external"
+    },
+    {
+      "id": "gate.identity",
+      "title": "Production IdP/SSO and device enrollment",
+      "detail": "Requires a real IdP, managed devices and private network/VPN ingress acceptance.",
+      "reference": "docs/adr/0007-desktop-application-and-role-scoped-access.md",
+      "status": "external"
+    },
+    {
+      "id": "gate.installer",
+      "title": "Managed install, signed bundle, SBOM/provenance",
+      "detail": "The GTK lab is a source/runtime installation, not a bundled signed production executable.",
+      "reference": ".scratch/production-desktop/evidence/02/preflight.md",
+      "status": "external"
+    },
+    {
+      "id": "gate.updates",
+      "title": "Signed updates and rollback policy",
+      "detail": "Signed updater and rollback acceptance remain open spike gates.",
+      "reference": "docs/application-pipeline-ru.md",
+      "status": "external"
+    },
+    {
+      "id": "gate.pilot",
+      "title": "60-day shadow pilot",
+      "detail": "Long-running operational evidence on the target organization; not a local machine check.",
+      "reference": ".scratch/production-desktop/index.md",
+      "status": "external"
+    },
+    {
+      "id": "gate.audit",
+      "title": "Independent audit/pentest and recovery drill on real data",
+      "detail": "Requires external reviewers and real restored data; cannot be satisfied by this or any local command.",
+      "reference": "docs/agents/implementation-runbook.md",
+      "status": "external"
+    }
+  ],
+  "note": "Local build/launch readiness only. This command only probes local loopback ports, installs nothing, starts nothing and never reads secret values. Production readiness is not claimed: the external gates listed below are not evaluated here and must not be reported as passed."
+}

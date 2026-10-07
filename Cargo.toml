@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["apps/pilot-pipeline", "crates/canonical", "crates/merkle"]
+members = ["apps/monitor", "apps/audit", "apps/pilot-pipeline", "crates/canonical", "crates/merkle"]
 
 [workspace.package]
 version = "0.1.0"

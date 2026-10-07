@@ -1,6 +1,19 @@
 # Desktop platform lab
 
-## Actual usability — 2026-10-02
+## Local launch — 2026-10-06
+
+```bash
+./deploy/devnet-demo/live-demo          # local services + GTK launcher; no chain writes
+./deploy/devnet-demo/live-demo status   # health + read-only devnet assessment
+./deploy/devnet-demo/live-demo check    # fresh-start prerequisites
+./deploy/devnet-demo/live-demo stop
+```
+
+The wrapper selects private Unix state when the checkout filesystem cannot enforce file permissions. It reports the selected namespace and refuses a recorded namespace mismatch when reusing services. The default remains legacy `gov.registry.land`; its lost governance key is surfaced as a blocker. No setup transaction runs at startup.
+
+Coordinator checks: 286 desktop tests passed; the installed source-dependent lab smoke passed after correcting its ledger-day fixture. Actual local services and launcher startup were checked on the target desktop. Durable workflow integration, independent source review and complete live publication acceptance remain open. See [current evidence](../../.scratch/production-desktop/evidence/10/live-demo-launcher-2026-10-06.md).
+
+## Historical usability review — 2026-10-02
 
 Normal startup has no connection configuration or sign-in, and authenticated summaries do not open role workspaces. The synthetic session adapter is a test harness. The full English application remains unfinished. See [implementation status](../../docs/implementation-status-2026-10-02.md) and [personal usage-pipeline review](../../.scratch/production-desktop/evidence/launcher-usage-pipeline-review-2026-10-02.md). Tests described below validate bounded lab behavior, not full installed-app acceptance.
 
@@ -147,3 +160,70 @@ The environment setting also selects the PID markers inspected by preflight.
 Occupied ports fail launch preflight even when their PID marker is alive;
 `native status` is the check for a running stack. A previous repository-local
 database is preserved and must be migrated explicitly if it is to be reused.
+
+## Live-demo seed, tamper and opt-in live smoke (B4/B5)
+
+Three deploy-side entry points drive the live-demo scenario outside the GTK
+walk. All of them live in `deploy/devnet-demo/scripts/` and print machine
+readable reports; key material is read only through the A1 key store and never
+printed.
+
+```bash
+# readiness assessment (read-only) + opt-in idempotent preparation + fallback
+./deploy/devnet-demo/scripts/live-demo-seed --help
+./deploy/devnet-demo/scripts/live-demo-seed                 # assessment only
+./deploy/devnet-demo/scripts/live-demo-seed --prepare       # chain preparation
+./deploy/devnet-demo/scripts/live-demo-seed --prepare --approve-fallback
+
+# accepted A3 tamper CLI (args and exit codes verbatim; --out must be a new file)
+./deploy/devnet-demo/scripts/live-demo-tamper --in package.json --out tampered.json --mode area
+
+# opt-in live GTK smoke: real widgets against the real local services
+ONELAYER_LIVE_DEVNET_SMOKE=1 ./deploy/devnet-demo/scripts/live-demo-smoke
+```
+
+`live-demo-seed` preparation covers registry init, operator role, bounded
+rent/fee funding and the day's ledger segment, and is idempotent: a satisfied
+step is never executed twice. Without `--prepare` nothing is sent. A missing
+governance authority (the current devnet's permanently lost key) fails with
+`GOVERNANCE_KEY_UNAVAILABLE` **before any chain mutation**; nothing is
+substituted, no program is deployed and an initialized registry is never
+mutated. `--approve-fallback` publishes one real finalized certificate with
+selective disclosure (`status` + `areaSquareMeters`) through the demo-api
+publication flow; a previous finalized fallback is reused only after it
+re-verifies, and artifacts are fresh private files under
+`~/.local/state/onelayer-devnet-demo/seed/` (0700 tree). Exit codes: 0 ready or
+prepared · 2 refused request · 3 refused environment or authority · 4 report
+produced but not ready.
+
+`live-demo-smoke` does nothing without `ONELAYER_LIVE_DEVNET_SMOKE=1` (no
+network, no chain). With the flag it preflights loopback health plus the
+readiness probe and drives the ordinary launcher pages with real
+`Gtk.Button.clicked()` callbacks and the real file-chooser seams against
+`mode="live"` services — never fixture success. Three consecutive runs are
+requested and the JSON report states exactly how many completed: a missing
+governance authority reports `BLOCKED` with `"0/3"`, never a pass or a green
+skip. Screenshots and a public-ID log are kept only for runs that succeeded,
+in `~/.local/state/onelayer-devnet-demo/evidence/live-smoke/` (0700). Exit 0
+only for `PASS` (3/3) or the documented `DISABLED` opt-out; every other
+outcome exits 3.
+
+Tests for these scripts are hermetic (fake RPC and fake HTTP, no live chain):
+
+```bash
+node --test --experimental-transform-types deploy/devnet-demo/scripts/*.test.ts
+/usr/bin/python3 -m unittest discover -s deploy/devnet-demo/scripts -p 'test_live_demo_smoke_gate.py'
+```
+
+### Installed prefix and the source-root binding
+
+`lab/install.py` installs a disposable prefix that carries the Python modules
+plus one generated `live_demo_source_root.py` binding: a single bounded,
+non-secret absolute path to the trusted source tree whose Node helpers (A1
+signer, operator-address helper, A4 QR decoder) the installed launcher runs.
+No key material and no repository content is copied into the prefix, and the
+path is validated (absolute, length-bounded, helper files present) before any
+helper executes. The installed launcher is therefore **source-root dependent**:
+the tree named in the binding must stay in place. This is a source/runtime
+installation of the lab harness, not a bundled, signed production installer;
+production install/update gates remain open.

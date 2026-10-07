@@ -1,3 +1,4 @@
+import { authorizeCertificate, type TrustPolicy } from "./trust-policy.ts";
 import { timingSafeEqual } from "node:crypto";
 import {
   batchLeafHash,
@@ -27,6 +28,7 @@ export type VerificationStatus =
   | "INVALID";
 
 export interface ObservedAnchor {
+  registryConfigPda: Uint8Array;
   programId: Uint8Array;
   segmentPda: Uint8Array;
   derivedSegmentPda: Uint8Array;
@@ -40,11 +42,14 @@ export interface ObservedAnchor {
 }
 
 export interface ObservedRegistry {
+  configPda: Uint8Array;
+  programId: Uint8Array;
   registryIdHash: Hash;
   paused: boolean;
 }
 
 export interface ChainReader {
+  getGenesisHash(): Promise<string>;
   getAnchor(body: CertificateBody): Promise<ObservedAnchor>;
   getRegistryConfig(body: CertificateBody): Promise<ObservedRegistry>;
   getFinalizedHeadSlot(): Promise<bigint>;
@@ -52,10 +57,30 @@ export interface ChainReader {
 
 export class AnchorDisputedError extends Error {}
 
+export type IncidentResolutionStatus = "OPEN" | "CONFIRMED" | "FALSE_POSITIVE" | "RESOLVED";
+
 export interface IncidentNotice {
   firstBatchSequence: bigint;
   lastBatchSequence: bigint;
+  /** Incident wire V1: `OPEN` = blocking, `RESOLVED` = not blocking (legacy). */
   status: "OPEN" | "RESOLVED";
+  /** Exact on-chain disposition, when the index provides it. */
+  resolutionStatus?: IncidentResolutionStatus;
+  /** Explicit blocking flag, when the index provides it. */
+  blocking?: boolean;
+}
+
+/**
+ * ADR-0008: OPEN, CONFIRMED and RESOLVED keep data in the suspect range
+ * blocked; only FALSE_POSITIVE lifts this incident's block. Every signal is
+ * combined fail-closed: any field saying "blocking" wins. A legacy `RESOLVED`
+ * without `resolutionStatus` cannot be told apart from a closed but real
+ * incident, so it blocks too.
+ */
+export function incidentBlocks(incident: IncidentNotice): boolean {
+  if (incident.status === "OPEN" || incident.blocking === true) return true;
+  if (incident.resolutionStatus === undefined) return true;
+  return incident.resolutionStatus !== "FALSE_POSITIVE";
 }
 
 export interface IncidentIndexResponse {
@@ -75,6 +100,7 @@ export interface IncidentIndex {
  */
 export interface RecordLifecycle {
   registryId: string;
+  certificateId?: string;
   currentRecordVersion: bigint;
   certificateStatus: "ACTIVE" | "SUPERSEDED" | "REVOKED";
 }
@@ -84,6 +110,7 @@ export interface LifecycleIndex {
 }
 
 export interface VerifyOptions {
+  trustPolicy?: TrustPolicy;
   maxIndexLagSlots?: bigint;
   lifecycle?: LifecycleIndex;
 }
@@ -300,6 +327,9 @@ async function verifyAgainstAnchor(
   options: VerifyOptions = {},
 ): Promise<VerificationResult> {
   const body = signed.body;
+  const trustError = authorizeCertificate(body, options.trustPolicy);
+  if (trustError !== null) return invalid(body, trustError);
+  const policy = options.trustPolicy!;
   try {
     if (!verifyCertificateSignature(signed)) return invalid(body, "CERT_SIGNATURE_INVALID");
     if (body.schemaVersion !== 1) return invalid(body, "UNSUPPORTED_SCHEMA");
@@ -311,10 +341,12 @@ async function verifyAgainstAnchor(
 
   let registry: ObservedRegistry;
   try {
+    if (await chain.getGenesisHash() !== policy.genesisHash) return invalid(body, "CLUSTER_UNTRUSTED");
     registry = await chain.getRegistryConfig(body);
   } catch {
     return invalid(body, "REGISTRY_STATUS_UNAVAILABLE");
   }
+  if (!equal(registry.configPda, Buffer.from(policy.configPdaHex, "hex")) || !equal(registry.programId, Buffer.from(policy.programIdHex, "hex"))) return invalid(body, "REGISTRY_CONFIG_UNTRUSTED");
   const registryError = verifyWorkingRegistry(body, registry);
   if (registryError !== null) return invalid(body, registryError);
 
@@ -324,6 +356,7 @@ async function verifyAgainstAnchor(
   } catch (error) {
     return invalid(body, error instanceof AnchorDisputedError ? "ANCHOR_DISPUTED" : "ANCHOR_NOT_FOUND");
   }
+  if (!equal(observed.registryConfigPda, registry.configPda)) return invalid(body, "LEDGER_REGISTRY_MISMATCH");
   const anchorError = verifyObservedAnchor(body, observed);
   if (anchorError !== null) return invalid(body, anchorError);
 
@@ -382,7 +415,7 @@ async function verifyAgainstAnchor(
   }
   const disputed = response.incidents.some(
     (incident) =>
-      incident.status === "OPEN" &&
+      incidentBlocks(incident) &&
       incident.firstBatchSequence <= body.anchor.batchSequence &&
       incident.lastBatchSequence >= body.anchor.batchSequence,
   );

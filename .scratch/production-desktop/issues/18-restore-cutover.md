@@ -1,8 +1,8 @@
 # 18 — Полный restore в новую target и управляемый cutover
 
 Status: ready-for-agent
-Execution: not-started
-Owner: unassigned
+Execution: claimed
+Owner: DeepSeek V4.1 Flash (max)
 Role: Recovery/Storage + Backend
 Phase: P6
 Blocked by: 09, 12, 17
@@ -45,3 +45,6 @@ Clean-room drill на известном dataset с old host shutdown, повр�
 ## Comments
 
 Задача создана планом 2026-09-19. На момент создания реализация ещё не была начата; актуальный результат указан выше.
+
+
+2026-10-06: текущий ограниченный срез выполняется в `feat/pipeline-live-demo-20261006` через T3 orchestration. Полные acceptance и зависимости остаются открытыми; итоги и evidence будут опубликованы после интеграционной проверки.

@@ -1,0 +1,9 @@
+{
+  "name": "@onelayer/live-demo-deploy-scripts",
+  "private": true,
+  "type": "module",
+  "description": "Module marker and typecheck entry for the deploy-side live-demo scripts only; no dependencies are installed here.",
+  "scripts": {
+    "typecheck": "node ../../../apps/demo-api/node_modules/typescript/bin/tsc -p tsconfig.json"
+  }
+}

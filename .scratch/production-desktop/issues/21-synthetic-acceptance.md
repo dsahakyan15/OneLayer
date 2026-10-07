@@ -1,8 +1,8 @@
 # 21 — Сквозная приемка установленного приложения и 72-hour soak
 
 Status: ready-for-agent
-Execution: not-started
-Owner: unassigned
+Execution: claimed
+Owner: Codex coordinator
 Role: QA/Security Reviewer
 Phase: P8
 Blocked by: 11, 18, 19, 20
@@ -45,3 +45,6 @@ tests/acceptance/; installed client; real backend/local chain/storage; .scratch 
 ## Comments
 
 Задача создана планом 2026-09-19. На момент создания реализация ещё не была начата; актуальный результат указан выше.
+
+
+2026-10-06: текущий ограниченный срез выполняется в `feat/pipeline-live-demo-20261006` через T3 orchestration. Полные acceptance и зависимости остаются открытыми; итоги и evidence будут опубликованы после интеграционной проверки.

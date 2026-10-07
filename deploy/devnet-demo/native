@@ -1,19 +1,73 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 command=${1:-start}
 demo_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd -- "$demo_dir/../.." && pwd)
 scripts="$demo_dir/scripts"
-native_root="$demo_dir/.runtime/native"
+# Preserve the legacy state, isolate every explicit synthetic namespace by a
+# collision-resistant token (punctuation folding would alias a.b and a_b).
+registry_namespace="${ONELAYER_REGISTRY_ID:-gov.registry.land}"
+namespace_token=$(printf '%s' "$registry_namespace" | sha256sum | cut -c1-24)
+native_base="${ONELAYER_NATIVE_STATE_DIR:-$demo_dir/.runtime/native}"
+native_root="$native_base"
+if [[ "$registry_namespace" != "gov.registry.land" ]]; then
+  native_root="$native_base/namespaces/$namespace_token"
+fi
 postgres_data="$native_root/postgres"
 logs_dir="$native_root/logs"
 pids_dir="$native_root/pids"
-runtime=/dev/shm/onelayer-devnet-demo
 pg_port=${ONELAYER_NATIVE_PG_PORT:-55432}
 pg_user=onelayer_demo
-database=onelayer_demo
+if [[ "$registry_namespace" == "gov.registry.land" ]]; then
+  database=onelayer_demo
+  policy_file="$native_root/verifier-trust-policy.json"
+  verifier_trust_state="${XDG_STATE_HOME:-$HOME/.local/state}/onelayer-devnet-demo/verifier-trust/accepted.json"
+  runtime="${ONELAYER_DEMO_RUNTIME_DIR:-/dev/shm/onelayer-devnet-demo}"
+  publication_key_root="${XDG_STATE_HOME:-$HOME/.local/state}/onelayer-devnet-demo/keys"
+else
+  database="onelayer_demo_$namespace_token"
+  policy_file="$native_root/trust-policy/policy.json"
+  verifier_trust_state="$native_root/verifier-trust/accepted.json"
+  runtime="${ONELAYER_DEMO_RUNTIME_DIR:-$native_root/runtime}"
+  publication_key_root="${XDG_STATE_HOME:-$HOME/.local/state}/onelayer-devnet-demo/keys/namespaces/$namespace_token"
+fi
 database_url_file="$native_root/database-url"
+# Restart-stable SOFTWARE DEMO publication HMAC keys (M3). Never printed. The
+# operator signer key lives in the hardened persistent key store.
+publication_keys_file="$native_root/publication-keys.json"
+publication_operator_key_id="demo-operator-1"
+publication_signer_file="$publication_key_root/demo-operator.json"
+# Distinct hardened approval-issuer key (H5). This MUST be a different key file
+# from the operator/chain signer: the runtime requires an independently
+# authenticated approval receipt whose issuer is not the signer. If it is missing
+# or aliases the signer key, startup fails closed (PUBLICATION_CONFIG_INCOMPLETE /
+# PUBLICATION_APPROVAL_KEY_REUSED). Never printed.
+publication_approval_file="$publication_key_root/approval-issuer.json"
+# Explicit cluster + (for local/unknown clusters) the live expected genesis hash.
+# `solana:devnet` is pinned in the deployment; a local/unknown chain must set
+# ONELAYER_RPC_GENESIS_HASH to the validator's actual getGenesisHash, else the
+# chain-identity check refuses to reserve or sign anything.
+publication_cluster="${ONELAYER_PUBLICATION_CLUSTER:-solana:devnet}"
+publication_rpc_genesis="${ONELAYER_RPC_GENESIS_HASH:-}"
+# RPC endpoint. Defaults to devnet; a local-validator profile points this at the
+# local validator AND sets ONELAYER_RPC_GENESIS_HASH to its actual getGenesisHash.
+publication_rpc_url="${ONELAYER_RPC_URL:-https://api.devnet.solana.com}"
+audit_root="$native_root/audit"
+audit_enabled=0
+if [[ "${ONELAYER_ADMIN_ACCESS_LAB:-0}" == 1 && "${ONELAYER_SYNTHETIC_PROFILE:-}" == local-validator && "$publication_cluster" == solana:local && "$registry_namespace" != gov.registry.land ]]; then
+  audit_enabled=1
+fi
+audit_target="${CARGO_TARGET_DIR:-}"
+if [[ -z "$audit_target" && -n "${ONELAYER_SBF_CACHE_DIR:-}" ]]; then
+  audit_target="$(dirname -- "$ONELAYER_SBF_CACHE_DIR")/cargo-target"
+fi
+audit_target="${audit_target:-$native_base/build}"
+audit_binary="$audit_target/debug/onelayer-audit"
+monitor_root="$native_root/monitor"
+monitor_binary="$audit_target/debug/onelayer-monitor"
+audit_environment=()
 
 die() {
   echo "native demo: $*" >&2
@@ -23,6 +77,8 @@ die() {
 require_command() {
   command -v "$1" >/dev/null 2>&1 || die "$1 is required"
 }
+
+[[ "$native_root" = /* ]] || die "ONELAYER_NATIVE_STATE_DIR must be an absolute path"
 
 require_command node
 require_command npm
@@ -47,7 +103,7 @@ psql="$pg_bin_dir/psql"
 createdb="$pg_bin_dir/createdb"
 pg_isready="$pg_bin_dir/pg_isready"
 
-mkdir -p "$logs_dir" "$pids_dir"
+mkdir -p "$logs_dir" "$pids_dir" "$(dirname "$policy_file")"
 
 psql_db() {
   local db=$1
@@ -59,13 +115,22 @@ postgres_running() {
   "$pg_ctl" -D "$postgres_data" status >/dev/null 2>&1
 }
 
+process_start_time() {
+  local pid=$1 details
+  [[ "$pid" =~ ^[1-9][0-9]*$ && -r "/proc/$pid/stat" ]] || return 1
+  details=$(<"/proc/$pid/stat")
+  details="${details##*) }"
+  [[ "${details%% *}" != Z ]] || return 1
+  awk '{print $20}' <<< "$details"
+}
+
 service_pid() {
-  local name=$1
-  local pid_file="$pids_dir/$name.pid"
-  [[ -s "$pid_file" ]] || return 1
-  local pid
-  pid=$(<"$pid_file")
-  kill -0 "$pid" >/dev/null 2>&1 || return 1
+  local name=$1 pid actual expected
+  [[ -s "$pids_dir/$name.pid" && -s "$pids_dir/$name.pid.start" ]] || return 1
+  pid=$(<"$pids_dir/$name.pid")
+  expected=$(<"$pids_dir/$name.pid.start")
+  actual=$(process_start_time "$pid") || return 1
+  [[ "$actual" == "$expected" ]] || return 1
   printf '%s\n' "$pid"
 }
 
@@ -74,8 +139,23 @@ port_in_use() {
   (exec 3<>/dev/tcp/127.0.0.1/"$port") 2>/dev/null
 }
 
+ensure_private_state() {
+  node - "$native_root" "$postgres_data" <<'NODE'
+const fs = require('node:fs');
+for (const [index, path] of process.argv.slice(2).entries()) {
+  let info;
+  try { info = fs.lstatSync(path); }
+  catch (error) { if (error.code === 'ENOENT' && index === 1) continue; throw error; }
+  if (!info.isDirectory() || info.uid !== process.getuid() || (info.mode & 0o077) !== 0) {
+    console.error('native demo: private Unix runtime directories are required; set ONELAYER_NATIVE_STATE_DIR outside the shared checkout and preserve the existing database');
+    process.exit(1);
+  }
+}
+NODE
+}
+
 ensure_runtime() {
-  "$scripts/initialize-runtime" >/dev/null
+  ONELAYER_DEMO_RUNTIME_DIR="$runtime" "$scripts/initialize-runtime" >/dev/null
   mkdir -p "$native_root"
   printf 'postgresql://%s@127.0.0.1:%s/%s\n' "$pg_user" "$pg_port" "$database" > "$database_url_file"
   chmod 600 "$database_url_file"
@@ -95,7 +175,7 @@ ensure_postgres() {
   fi
   if ! postgres_running; then
     "$pg_ctl" -D "$postgres_data" -l "$logs_dir/postgres.log" \
-      -o "-p $pg_port -h 127.0.0.1" start >/dev/null
+      -o "-p $pg_port -h 127.0.0.1 -k ''" start >/dev/null
   fi
   for _ in $(seq 1 60); do
     if "$pg_isready" -h 127.0.0.1 -p "$pg_port" -U "$pg_user" -d postgres >/dev/null 2>&1; then
@@ -111,38 +191,102 @@ ensure_postgres() {
   fi
 }
 
+# A migration that changed after it was applied must fail startup instead of
+# being skipped. A recorded row without a digest fails closed too: the applied
+# bytes are unknown, and the runner must not record the current file as if
+# those bytes had been verified.
+verify_migration_digests() {
+  local rows version digest file current
+  rows=$(psql_db "$database" -At -F '|' -c \
+    "SELECT version, coalesce(sha256, '') FROM schema_migration ORDER BY version")
+  while IFS='|' read -r version digest; do
+    [[ -n "$version" ]] || continue
+    file="$repo_root/db/migrations/$version"
+    [[ -f "$file" ]] || die "migration $version is recorded as applied but has no file in db/migrations; refusing to start"
+    current=$(sha256sum "$file" | cut -d' ' -f1)
+    [[ -n "$digest" ]] \
+      || die "migration $version has no recorded digest, so its applied bytes cannot be verified; refusing to start. Restore the file it was applied from, or recreate the demo database: recording the current file would claim a verification that never happened"
+    [[ "$digest" == "$current" ]] \
+      || die "migration $version was applied with digest $digest but the file now hashes to $current; restore the applied file or add a new migration instead of editing an applied one"
+  done <<< "$rows"
+}
+
 migrate_database() {
+  if service_pid demo-api >/dev/null 2>&1; then
+    die "stop demo-api before migrations; use native restart for a running stack"
+  fi
   psql_db "$database" -v ON_ERROR_STOP=1 <<'SQL'
 CREATE TABLE IF NOT EXISTS schema_migration (
   version TEXT PRIMARY KEY,
   sha256 TEXT NOT NULL,
   applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE schema_migration ADD COLUMN IF NOT EXISTS sha256 TEXT;
+SQL
+
+  # Verification runs before any pending migration or fixture is applied.
+  verify_migration_digests
+
+  # psql substitutes -v variables only while reading a file or stdin, never in
+  # -c, so the checksum row is recorded from a generated statement file. That
+  # file and the migration snapshots live in a private temp directory owned by
+  # this run, so concurrent runners cannot clobber each other's statements,
+  # and the digest always covers the exact bytes that are applied.
+  work_dir=$(mktemp -d "${TMPDIR:-/tmp}/onelayer-native-migrations.XXXXXX")
+  trap 'rm -rf -- "$work_dir"' EXIT
+  cat > "$work_dir/record.sql" <<'SQL'
+DO $$ BEGIN PERFORM pg_advisory_xact_lock(7710061); END $$;
+INSERT INTO schema_migration(version, sha256) VALUES (:'version', :'digest');
 SQL
 
   for migration in "$repo_root"/db/migrations/*.sql; do
     version=$(basename "$migration")
-    if [[ "$(psql_db "$database" -Atqc "SELECT count(*) FROM schema_migration WHERE version = '$version'")" == 0 ]]; then
-      digest=$(sha256sum "$migration" | cut -d' ' -f1)
-      psql_db "$database" -v ON_ERROR_STOP=1 -1 -f "$migration"
-      psql_db "$database" -v ON_ERROR_STOP=1 \
-        -c "INSERT INTO schema_migration(version, sha256) VALUES ('$version', '$digest')"
+    applied=$(psql_db "$database" -At -v version="$version" <<'SQL'
+SELECT count(*) FROM schema_migration WHERE version = :'version';
+SQL
+)
+    if [[ "$applied" == 0 ]]; then
+      snapshot="$work_dir/$version"
+      cp -- "$migration" "$snapshot"
+      digest=$(sha256sum "$snapshot" | cut -d' ' -f1)
+      # One transaction applies the snapshot and records its digest, so the
+      # journal covers the applied bytes and never exists without them. The advisory lock
+      # serializes concurrent runners; the primary key on version then turns a
+      # lost race into a loud failure instead of applying the file twice.
+      psql_db "$database" -v ON_ERROR_STOP=1 -1 \
+        -v version="$version" -v digest="$digest" \
+        -f "$work_dir/record.sql" -f "$snapshot"
     fi
   done
 
-  psql_db "$database" -v ON_ERROR_STOP=1 -1 -f "$repo_root/db/fixtures/devnet-demo.sql"
+  if [[ "$registry_namespace" == "gov.registry.land" ]]; then
+    # Legacy namespace: full fixture (marker + legacy synthetic records),
+    # preserved exactly for the default gov.registry.land deployment.
+    psql_db "$database" -v ON_ERROR_STOP=1 -1 -f "$repo_root/db/fixtures/devnet-demo.sql"
+  else
+    # Isolated ADR-0010 namespace: synthetic marker ONLY. The legacy fixture
+    # records (SYNTHETIC-1/2) are never loaded into an isolated namespace; its
+    # record space starts empty and is populated only through the application.
+    psql_db "$database" -v ON_ERROR_STOP=1 <<'SQL'
+INSERT INTO demo_fixture_marker(marker) VALUES ('ONELAYER_SYNTHETIC_DEVNET_DEMO_V1')
+ON CONFLICT (marker) DO NOTHING;
+SQL
+  fi
   marker=$(psql_db "$database" -Atqc "SELECT marker FROM demo_fixture_marker")
   [[ "$marker" == ONELAYER_SYNTHETIC_DEVNET_DEMO_V1 ]] || die "native database fixture marker is missing"
 }
 
 ensure_ports() {
   local port
-  for port in 8080 8090 8091; do
+  local ports=(8080 8090 8091)
+  if [[ "$audit_enabled" == 1 ]]; then ports+=(18991); fi
+  for port in "${ports[@]}"; do
     if port_in_use "$port"; then
       case "$port" in
         8080) service=verifier ;;
         8090) service=demo-api ;;
         8091) service=mvp-web ;;
+        18991) service=audit ;;
       esac
       service_pid "$service" >/dev/null 2>&1 || die "127.0.0.1:$port is already in use; stop the other MVP services first"
     fi
@@ -157,25 +301,31 @@ start_process() {
   fi
   rm -f "$pids_dir/$name.pid"
   nohup setsid "$@" > "$logs_dir/$name.log" 2>&1 < /dev/null &
-  echo "$!" > "$pids_dir/$name.pid"
+  local child=$!
+  echo "$child" > "$pids_dir/$name.pid"
+  process_start_time "$child" > "$pids_dir/$name.pid.start"
 }
 
 stop_process() {
   local name=$1
   local pid
   pid=$(service_pid "$name" 2>/dev/null || true)
-  [[ -n "$pid" ]] || { rm -f "$pids_dir/$name.pid"; return; }
+  [[ -n "$pid" ]] || { rm -f "$pids_dir/$name.pid" "$pids_dir/$name.pid.start"; return; }
   kill -- "-$pid" >/dev/null 2>&1 || kill "$pid" >/dev/null 2>&1 || true
   for _ in $(seq 1 20); do
     kill -0 "$pid" >/dev/null 2>&1 || break
     sleep 0.25
   done
-  rm -f "$pids_dir/$name.pid"
+  rm -f "$pids_dir/$name.pid" "$pids_dir/$name.pid.start"
 }
 
 wait_for_http() {
   local url=$1
   for _ in $(seq 1 60); do
+    service_pid "$2" >/dev/null || {
+      echo "service $2 exited before readiness; see $logs_dir/$2.log" >&2
+      return 1
+    }
     if curl --silent --fail --max-time 2 "$url" >/dev/null 2>&1; then
       return
     fi
@@ -190,37 +340,240 @@ build_web() {
   npm --prefix "$repo_root/apps/mvp-web" run build
 }
 
-start_stack() {
-  ensure_runtime
-  ensure_node_dependencies
-  ensure_ports
-  ensure_postgres
-  migrate_database
-  build_web
+# Record which registry namespace this stack is actually serving. A reuse of a
+# running stack must verify this identity: a request for an isolated namespace
+# must never silently bind to a legacy-namespace stack (ADR-0010).
+record_stack_identity() {
+  node - "$pids_dir/stack-identity.json" "${ONELAYER_REGISTRY_ID:-gov.registry.land}" "${ONELAYER_SYNTHETIC_PROFILE:-}" <<'NODE'
+const fs = require('node:fs');
+const [file, registryId, syntheticProfile] = process.argv.slice(2);
+const identity = {
+  schema: "onelayer.stack-identity.v1",
+  registryId,
+  syntheticProfile: syntheticProfile === "1" || syntheticProfile === "true",
+  recordedAt: new Date().toISOString(),
+};
+fs.writeFileSync(file, `${JSON.stringify(identity)}\n`, { mode: 0o600 });
+NODE
+}
 
+# Restart-stable SOFTWARE DEMO publication keys (M3): HMAC id/field keys plus a
+# persistent operator signer key in the hardened key store. This is LOCAL key
+# initialization only — it never signs or sends a chain transaction, and no
+# secret is ever printed. Provisioned once and reused across restarts.
+provision_publication_keys() {
+  node --experimental-transform-types --input-type=module - "$repo_root" "$publication_signer_file" "$publication_approval_file" "$publication_keys_file" <<'NODE'
+import { pathToFileURL } from 'node:url';
+import { constants } from 'node:fs';
+import { open } from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
+const [repo, signer, approval, hmac] = process.argv.slice(2);
+const { ensureKeyPair } = await import(pathToFileURL(repo + '/apps/demo-api/scripts/live-demo-key-store.ts').href);
+if (signer === approval) throw new Error('PUBLICATION_APPROVAL_KEY_REUSED');
+await ensureKeyPair({keyFile:signer});
+await ensureKeyPair({keyFile:approval});
+try {
+  const file = await open(hmac, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
+  try {
+    await file.writeFile(JSON.stringify({idKey:randomBytes(32).toString('hex'),fieldKeyMaster:randomBytes(32).toString('hex')}) + '\n');
+    await file.sync();
+  } finally { await file.close(); }
+} catch (error) { if (error.code !== 'EEXIST') throw error; }
+const file = await open(hmac, constants.O_RDONLY | constants.O_NOFOLLOW);
+try {
+  const info = await file.stat();
+  if (!info.isFile() || info.uid !== process.getuid() || (info.mode & 0o077) || info.size > 4096) throw new Error('PUBLICATION_KEYS_FILE_UNSAFE');
+} finally { await file.close(); }
+NODE
+}
+
+# Provision / validate the verifier trust policy with the FAILURE MODE KEPT
+# DISTINCT (M4). create-demo-trust-policy.ts never overwrites, rotates or resets
+# existing trust; it reports one of:
+#   0 provisioned or retained   10 expired   11 watermark missing   12 mismatch
+# Only a clean expiry (10) with an INTACT anti-rollback watermark is eligible
+# for a floor-preserving rotation. A missing watermark is NEVER bootstrapped
+# implicitly and a mismatch/corruption is NEVER silently retired or reset: both
+# fail closed with an actionable code. The prior catch-all that moved the policy
+# aside on ANY error (silently resetting the accepted floor) is gone.
+ensure_trust_policy() {
+  local output rc=0
+  output=$(node --experimental-transform-types "$repo_root/apps/verifier/scripts/create-demo-trust-policy.ts" \
+      "$runtime/issuer-secret" "$policy_file" "$verifier_trust_state" 2>&1) || rc=$?
+  case "$rc" in
+    0)
+      [[ -n "$output" ]] && printf '%s\n' "$output"
+      return 0 ;;
+    10)
+      if [[ ! -f "$verifier_trust_state" ]]; then
+        echo "native demo: trust policy is EXPIRED but the anti-rollback watermark is missing." >&2
+        echo "native demo: refusing to rotate — rotation without the watermark would reset the accepted floor." >&2
+        echo "native demo: restore the watermark from backup, or run './deploy/devnet-demo/native reset-trust' as a deliberate anti-rollback reset." >&2
+        return 1
+      fi
+      echo "native demo: expired trust policy; startup refuses automatic rotation." >&2
+      echo "native demo: review and run native rotate-trust explicitly; the accepted floor is preserved." >&2
+      return 1 ;;
+    11)
+      echo "native demo: verifier anti-rollback watermark is MISSING: $verifier_trust_state" >&2
+      [[ -n "$output" ]] && echo "native demo: $output" >&2
+      echo "native demo: refusing to start (no implicit trust bootstrap)." >&2
+      echo "native demo: restore the watermark from backup, or run './deploy/devnet-demo/native reset-trust' as a deliberate anti-rollback reset." >&2
+      return 1 ;;
+    12)
+      echo "native demo: verifier trust policy does not authorize this deployment; refusing to auto-retire or reset." >&2
+      [[ -n "$output" ]] && echo "native demo: $output" >&2
+      echo "native demo: review the policy; run './deploy/devnet-demo/native rotate-trust' deliberately if a rotation is intended." >&2
+      return 1 ;;
+    *)
+      echo "native demo: verifier trust policy provisioning failed (exit $rc); refusing to start." >&2
+      [[ -n "$output" ]] && echo "native demo: $output" >&2
+      return 1 ;;
+  esac
+}
+
+# Deliberate, floor-preserving rotation of an expired demo trust policy. This is
+# the ONLY rotation entry point; it refuses without an intact anti-rollback
+# watermark so the accepted floor is never silently reset.
+rotate_trust() {
+  [[ -f "$policy_file" ]] || die "no trust policy to rotate at $policy_file"
+  [[ -f "$verifier_trust_state" ]] \
+    || die "anti-rollback watermark $verifier_trust_state is missing; refusing to rotate (would reset the accepted floor). Run './deploy/devnet-demo/native reset-trust' only as a deliberate anti-rollback reset."
+  local retired="$policy_file.retired-$(date -u +%Y%m%dT%H%M%SZ)"
+  mv "$policy_file" "$retired"
+  echo "native demo: rotating demo trust policy (deliberate, floor-preserving); previous retired to $(basename "$retired")"
+  if ! node --experimental-transform-types "$repo_root/apps/verifier/scripts/create-demo-trust-policy.ts" \
+    "$runtime/issuer-secret" "$policy_file" "$verifier_trust_state"; then
+    if [[ ! -e "$policy_file" ]]; then mv -- "$retired" "$policy_file"; fi
+    die "trust rotation failed; prior policy retained when no replacement was created"
+  fi
+}
+
+# Deliberate anti-rollback RESET: retire the policy and provision a FRESH
+# watermark. This discards the accepted floor and is never done automatically —
+# it requires this explicit operator command.
+reset_trust() {
+  echo "native demo: DELIBERATE anti-rollback reset — the accepted floor will be discarded." >&2
+  if [[ -f "$policy_file" ]]; then
+    local retired="$policy_file.retired-$(date -u +%Y%m%dT%H%M%SZ)"
+    mv "$policy_file" "$retired"
+    echo "native demo: previous policy retired to $(basename "$retired")"
+  fi
+  if [[ -f "$verifier_trust_state" ]]; then
+    local state_retired="$verifier_trust_state.retired-$(date -u +%Y%m%dT%H%M%SZ)"
+    mv "$verifier_trust_state" "$state_retired"
+    echo "native demo: previous watermark retired to $(basename "$state_retired")"
+  fi
+  node --experimental-transform-types "$repo_root/apps/verifier/scripts/create-demo-trust-policy.ts" \
+    "$runtime/issuer-secret" "$policy_file" "$verifier_trust_state"
+  echo "native demo: fresh trust watermark bootstrapped (revision restarts). This was a deliberate operator reset."
+}
+
+start_audit() {
+  [[ "$audit_enabled" == 1 ]] || return 0
+  require_command cargo
+  require_command python3
+  (cd "$repo_root" && CARGO_TARGET_DIR="$audit_target" cargo build --locked -p onelayer-audit) > "$logs_dir/audit-build.log" 2>&1 \
+    || die "audit build failed; see $logs_dir/audit-build.log"
+  python3 "$scripts/initialize-audit.py" "$audit_root" "$audit_binary" "$database_url_file" "$registry_namespace" \
+    || die "private audit provisioning failed"
+  start_process audit "$audit_binary" serve --config "$audit_root/audit.json"
+  local ready=0
+  for _ in $(seq 1 30); do
+    service_pid audit >/dev/null || die "audit exited; see $logs_dir/audit.log"
+    if python3 "$scripts/initialize-audit.py" check "$audit_root" 2>/dev/null; then ready=1; break; fi
+    sleep 1
+  done
+  [[ "$ready" == 1 ]] || die "audit did not become ready"
+  audit_environment=(
+    ONELAYER_AUDIT_URL=http://127.0.0.1:18991
+    ONELAYER_AUDIT_APPEND_CAP_FILE="$audit_root/append.cap"
+    ONELAYER_AUDIT_READ_CAP_FILE="$audit_root/read.cap"
+    ONELAYER_AUDIT_EXPORT_CAP_FILE="$audit_root/export.cap"
+    ONELAYER_AUDIT_REBUILD_CAP_FILE="$audit_root/rebuild.cap"
+    ONELAYER_AUDIT_STATUS_CAP_FILE="$audit_root/status.cap"
+  )
+}
+
+start_monitor() {
+  [[ "$audit_enabled" == 1 ]] || return 0
+  require_command cargo
+  require_command python3
+  (cd "$repo_root" && CARGO_TARGET_DIR="$audit_target" cargo build --locked -p onelayer-monitor) > "$logs_dir/monitor-build.log" 2>&1 \
+    || die "monitor build failed; see $logs_dir/monitor-build.log"
+  psql_db "$database" -v ON_ERROR_STOP=1 -1 -f "$repo_root/apps/monitor/sql/monitor_readonly_role.sql" > "$logs_dir/monitor-role.log" 2>&1 \
+    || die "monitor read-only role provisioning failed"
+  python3 "$scripts/initialize-monitor.py" "$monitor_root" "$database_url_file" "$publication_keys_file" "$registry_namespace" "$publication_rpc_genesis" \
+    || die "private monitor provisioning failed"
+  if ! service_pid monitor >/dev/null 2>&1; then
+    local result=0
+    "$monitor_binary" once --config "$monitor_root/monitor.json" > "$logs_dir/monitor-preflight.log" 2>&1 || result=$?
+    [[ "$result" == 0 || "$result" == 3 ]] || die "monitor refused startup; see $logs_dir/monitor-preflight.log"
+    start_process monitor "$monitor_binary" run --config "$monitor_root/monitor.json"
+  fi
+  service_pid monitor >/dev/null || die "monitor exited; see $logs_dir/monitor.log"
+}
+
+start_demo_api() {
   start_process demo-api env \
+    "${audit_environment[@]}" \
     PORT=8090 \
+    ONELAYER_SESSION_BACKEND=postgres \
     ONELAYER_DATABASE_URL_FILE="$database_url_file" \
     ONELAYER_INTERNAL_TOKEN_FILE="$runtime/internal-token" \
-    ONELAYER_RPC_URL=https://api.devnet.solana.com \
+    ONELAYER_RPC_URL="$publication_rpc_url" \
     ONELAYER_VERIFIER_URL=http://127.0.0.1:8080 \
     ONELAYER_PUBLIC_BASE_URL=http://127.0.0.1:8090 \
     ONELAYER_PUBLIC_WEB_URL=http://127.0.0.1:8091 \
     ONELAYER_PROGRAM_ID=6A2LSwaJKdwVAEggAfHjZVAKb2ATWM7AXBrgDEqczEo \
+    ONELAYER_REGISTRY_ID="${ONELAYER_REGISTRY_ID:-gov.registry.land}" \
+    ONELAYER_SYNTHETIC_PROFILE="${ONELAYER_SYNTHETIC_PROFILE:-}" \
     ONELAYER_ISSUER_SECRET_FILE="$runtime/issuer-secret" \
     ONELAYER_ADMIN_CREDENTIALS_FILE="$runtime/admin-credentials.json" \
+    ONELAYER_PUBLICATION_KEYS_FILE="$publication_keys_file" \
+    ONELAYER_PUBLICATION_OPERATOR_KEY_ID="$publication_operator_key_id" \
+    ONELAYER_PUBLICATION_SIGNER_FILE="$publication_signer_file" \
+    ONELAYER_PUBLICATION_APPROVAL_KEY_FILE="$publication_approval_file" \
+    ONELAYER_PUBLICATION_CLUSTER="$publication_cluster" \
+    ONELAYER_RPC_GENESIS_HASH="$publication_rpc_genesis" \
     npm --prefix "$repo_root/apps/demo-api" start
   wait_for_http http://127.0.0.1:8090/v1/health demo-api
+  record_stack_identity
 
+}
+
+start_verifier() {
   start_process verifier env \
     PORT=8080 \
-    ONELAYER_RPC_URL=https://api.devnet.solana.com \
+    ONELAYER_TRUST_POLICY_FILE="$policy_file" \
+    ONELAYER_TRUST_POLICY_MIN_REVISION=1 \
+    ONELAYER_TRUST_POLICY_UNSIGNED=1 \
+    ONELAYER_TRUST_STATE_FILE="$verifier_trust_state" \
+    ONELAYER_RPC_URL="$publication_rpc_url" \
     ONELAYER_INCIDENT_INDEX_URL=http://127.0.0.1:8090 \
     ONELAYER_LOOKUP_URL=http://127.0.0.1:8090 \
     ONELAYER_MAX_INDEX_LAG_SLOTS=5000 \
     ONELAYER_CORS_ALLOWED_ORIGIN=http://127.0.0.1:8091 \
     npm --prefix "$repo_root/apps/verifier" start
   wait_for_http http://127.0.0.1:8080/v1/health verifier
+}
+
+start_stack() {
+  ensure_private_state
+  ensure_runtime
+  ensure_node_dependencies
+  provision_publication_keys
+  ensure_trust_policy
+  ensure_ports
+  ensure_postgres
+  migrate_database
+  start_audit
+  build_web
+
+  start_demo_api
+  start_monitor
+
+  start_verifier
 
   start_process mvp-web env \
     PORT=8091 \
@@ -240,9 +593,11 @@ start_stack() {
 }
 
 stop_stack() {
+  stop_process monitor
   stop_process mvp-web
   stop_process verifier
   stop_process demo-api
+  stop_process audit
   if postgres_running; then
     "$pg_ctl" -D "$postgres_data" stop -m fast >/dev/null
   fi
@@ -251,7 +606,7 @@ stop_stack() {
 status_stack() {
   printf 'postgres: '
   if postgres_running; then echo running; else echo stopped; fi
-  for service in demo-api verifier mvp-web; do
+  for service in demo-api verifier mvp-web audit monitor; do
     printf '%s: ' "$service"
     if service_pid "$service" >/dev/null 2>&1; then echo running; else echo stopped; fi
   done
@@ -262,6 +617,33 @@ status_stack() {
 }
 
 case "$command" in
+  monitor-start)
+    ensure_private_state
+    [[ "$audit_enabled" == 1 ]] || die "monitor-start requires the explicit local lab profile"
+    postgres_running || die "namespace PostgreSQL is not running"
+    start_monitor
+    ;;
+  verifier-restart)
+    ensure_private_state
+    ensure_trust_policy
+    stop_process verifier
+    start_verifier
+    ;;
+  api-restart)
+    ensure_private_state
+    postgres_running || die "namespace PostgreSQL is not running"
+    start_audit
+    stop_process demo-api
+    migrate_database
+    start_demo_api
+    ;;
+  audit-start)
+    ensure_private_state
+    [[ "$audit_enabled" == 1 ]] || die "audit-start requires the explicit local lab profile"
+    if port_in_use 18991 && ! service_pid audit >/dev/null 2>&1; then die "audit port is already in use"; fi
+    [[ -s "$database_url_file" ]] || die "start the namespace database first"
+    start_audit
+    ;;
   start)
     start_stack
     ;;
@@ -276,9 +658,20 @@ case "$command" in
     build_web
     ;;
   migrate)
+    ensure_private_state
     ensure_runtime
     ensure_postgres
     migrate_database
+    ;;
+  rotate-trust)
+    ensure_private_state
+    ensure_runtime
+    rotate_trust
+    ;;
+  reset-trust)
+    ensure_private_state
+    ensure_runtime
+    reset_trust
     ;;
   status)
     status_stack
@@ -287,7 +680,24 @@ case "$command" in
     tail -f "$logs_dir/demo-api.log" "$logs_dir/verifier.log" "$logs_dir/mvp-web.log"
     ;;
   *)
-    echo "usage: deploy/devnet-demo/native [start|stop|restart|build|migrate|status|logs]" >&2
+    cat >&2 <<'EOF'
+usage: deploy/devnet-demo/native [start|stop|restart|build|migrate|rotate-trust|reset-trust|status|logs]
+
+  start         start the local demo stack
+  stop|down     stop the stack
+  restart       stop then start
+  build         build the web app
+  migrate       apply database migrations and fixtures
+  rotate-trust  deliberate, floor-preserving rotation of an expired demo trust
+                policy (refuses without an intact anti-rollback watermark)
+  reset-trust   DELIBERATE anti-rollback reset (discards the accepted floor)
+  status        report service status
+  logs          tail service logs
+
+The legacy gov.registry.land namespace is the default and is never switched
+implicitly. Set ONELAYER_REGISTRY_ID for an isolated ADR-0010 namespace (which
+gets its own database, trust policy and anti-rollback watermark).
+EOF
     exit 2
     ;;
 esac

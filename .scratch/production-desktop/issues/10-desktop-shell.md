@@ -1,8 +1,8 @@
 # 10 — Устанавливаемая программа, вход и ролевой каркас
 
 Status: ready-for-agent
-Execution: blocked
-Owner: desktop-agent
+Execution: claimed
+Owner: MiMo V2.6 Pro (high)
 Role: Desktop
 Phase: P3
 Blocked by: 02, 07
@@ -55,3 +55,6 @@ Installed-app smoke, PKCE callback hijack/replay negative case в test harness, 
 В Linux GTK lab реализован Demo launcher: обзор/подключение, состояние сессии, три карточки доступности и явная фоновая проверка с deadline. Entry point: `apps/desktop/launcher`. Финальные Python/GTK 27/27 и installed smoke PASS; synthetic IdP session integration PASS. [Evidence, screenshot и review disposition](../evidence/10/launcher-ui-2026-10-01.md). Это постепенное развитие установленного harness; основной кандидат Tauri 2 + React, production dependencies 02/07 и полный Execution blocked сохраняются.
 
 2026-10-01: Boole (DeepSeek v4.1 Flash, max reasoning) переводит весь launcher UI на английский; production dependencies и Execution blocked сохраняются.
+
+
+2026-10-06: текущий ограниченный срез выполняется в `feat/pipeline-live-demo-20261006` через T3 orchestration. Полные acceptance и зависимости остаются открытыми; итоги и evidence будут опубликованы после интеграционной проверки.

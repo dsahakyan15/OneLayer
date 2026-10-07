@@ -57,7 +57,7 @@ interface RecoveryOperation {
   snapshotVersion: string;
   snapshotStatus: string;
   target: string;
-  state: "AWAITING_APPROVAL" | "APPROVED" | "RESTORED" | "FAILED";
+  state: "AWAITING_APPROVAL" | "APPROVED" | "VALIDATED" | "RESTORED" | "FAILED";
   merkleRoot: string;
   plaintextHash: string;
   ciphertextHash: string;
@@ -244,7 +244,7 @@ export function BackupCenterPanel(): ReactNode {
             disabled={readOnly || busy}
             onClick={() => void run(refreshBackups)}
           >
-            Обновить копии
+            Refresh copies
           </button>
         </p>
       </section>
@@ -307,12 +307,13 @@ export function BackupCenterPanel(): ReactNode {
       </section>
 
       <section className="ol-card" data-testid="recovery-panel">
-        <h2>Bounded Recovery</h2>
+        <h2>Demo Recovery Validation</h2>
         <p className="ol-muted">
           Recovery Shares are entered out-of-band into masked fields, used once to reconstruct the
           operation KEK, and cleared before this response is rendered. No share, plaintext or private
           key is returned to the browser or timeline.
         </p>
+        <p className="ol-muted">This demo validates approved recovery material. A completed recovery requires imported and verified target data.</p>
 
         {session?.role === "operator" ? (
           <form onSubmit={(event) => {
@@ -411,10 +412,15 @@ export function BackupCenterPanel(): ReactNode {
             ) : null}
             {session?.role === "operator" && recovery.state === "APPROVED" ? (
               <button type="button" data-variant="primary" data-testid="restore-recovery" disabled={busy} onClick={() => void run(restoreRecovery)}>
-                Restore to bounded local target
+                Validate approved recovery material
               </button>
             ) : null}
-            {recovery.restoredTarget !== null ? (
+            {recovery.state === "VALIDATED" ? (
+              <p className="ol-muted" data-testid="recovery-material-validated">
+                Recovery material validated; target import remains pending. Operation plaintext cleared.
+              </p>
+            ) : null}
+            {recovery.state === "RESTORED" && recovery.restoredTarget !== null ? (
               <p className="ol-muted" data-testid="recovery-plaintext-cleared">
                 Restore completed for <code>{recovery.restoredTarget.targetId}</code>; operation plaintext cleared.
               </p>

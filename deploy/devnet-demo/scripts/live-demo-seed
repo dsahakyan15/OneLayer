@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Live-demo seed entry (B4): assessment, opt-in preparation (--prepare) and the
+# explicit fallback certificate (--approve-fallback). See --help for the
+# contract. Nothing here is fixture data and no key material is ever printed.
+set -euo pipefail
+
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+exec node --experimental-transform-types --disable-warning=ExperimentalWarning \
+  "$script_dir/live-demo-seed-cli.ts" "$@"

@@ -1,5 +1,6 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { decodeCertificatePackageBase64url } from "./certificate-codec.ts";
+import { verifyCertificateV2 } from "./verify-v2.ts";
 import {
   verifyCertificate,
   type ChainReader,
@@ -66,7 +67,7 @@ async function handle(request: IncomingMessage, response: ServerResponse, servic
     return;
   }
 
-  if (request.method === "POST" && url.pathname === "/v1/verify") {
+  if (request.method === "POST" && (url.pathname === "/v1/verify" || url.pathname === "/v2/verify")) {
     const body = await readJson(request);
     if (typeof body.certificatePackage !== "string") throw new TypeError("certificatePackage is required");
     if (body.requiredCommitment !== undefined && body.requiredCommitment !== "finalized") {
@@ -74,7 +75,8 @@ async function handle(request: IncomingMessage, response: ServerResponse, servic
       return;
     }
     const signed = decodeCertificatePackageBase64url(body.certificatePackage);
-    const result = await verifyCertificate(signed, services.chain, services.incidents, services.verifyOptions);
+    const verify = url.pathname === "/v2/verify" ? verifyCertificateV2 : verifyCertificate;
+    const result = await verify(signed, services.chain, services.incidents, services.verifyOptions);
     writeJson(response, result.status === "INVALID" ? 422 : 200, result);
     return;
   }
