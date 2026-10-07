@@ -2098,7 +2098,6 @@ class DurableControllerFlowTests(_DurableReviewBody, ApiFixture):
             operation_id=self.OPERATION_ID,
             record_id="SYNTHETIC-1",
             version=1,
-            disclosed_paths=("status", "areaSquareMeters"),
         )
         self.assertEqual(issued["certificateId"], "aa" * 16)
         body = json.loads(
@@ -2106,7 +2105,7 @@ class DurableControllerFlowTests(_DurableReviewBody, ApiFixture):
         )
         self.assertEqual(body["recordId"], "SYNTHETIC-1")
         self.assertEqual(body["version"], 1)
-        self.assertEqual(sorted(body["disclosedPaths"]), ["areaSquareMeters", "status"])
+        self.assertEqual(sorted(body["disclosedPaths"]), ["payload.areaSquareMeters", "payload.status"])
 
 
 if __name__ == "__main__":

@@ -688,11 +688,11 @@ class LiveDemoController:
     ) -> dict[str, Any]:
         """Issue a certificate from a FINALIZED workflow operation.
 
-        The server enforces the record/field scope; an omitted disclosure is
-        FULL_RECORD and requires unrestricted access. The renderer never decides
+        The default requests status and area in the workflow payload namespace.
+        The server enforces the record/field scope. The renderer never decides
         authorization — it only states the requested paths.
         """
-        chosen = tuple(disclosed_paths) if disclosed_paths is not None else DEFAULT_DISCLOSED_PATHS
+        chosen = tuple(disclosed_paths) if disclosed_paths is not None else ("payload.status", "payload.areaSquareMeters")
         paths = tuple(sorted(dict.fromkeys(chosen)))
         generation = self._begin()
         issued = self._api.issue_workflow_certificate(

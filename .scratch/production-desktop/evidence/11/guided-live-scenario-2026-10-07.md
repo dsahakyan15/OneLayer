@@ -67,3 +67,10 @@ new validator limit. Its new GTK walkthrough passed all branches and export:
 69f9d790-18d1-4315-b085-cc477581f5f7. The clean web dependency copy was required
 because Turbopack rejects a node_modules symlink outside its filesystem root;
 no product source was changed to bypass that check.
+
+The new certificate `4a6b61333f2412853022e3d4bd18964f` was fetched and verified
+again when the finalized head reached slot 52589 (533 slots after its publication
+at 52056): proofs remained VERIFIED, registry CHECKED, package hash MATCH.
+`scenario-retained-proof-recheck.json` records the real V2 response. Overall
+current suitability remains UNKNOWN and the retained incident index remains
+STALE; neither condition was hidden or upgraded.
